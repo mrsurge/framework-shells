@@ -23,7 +23,7 @@ Texbook use case:
 
 [https://github.com/mrsurge/termux-extensions-2](https://github.com/mrsurge/termux-extensions-2)
 
-"Mobile IDE" environment (LSPs, MCP servers, and Agents) on Linux/Termux/macOS ... no user permission orchestration required.
+(Termux-Extensions-2 is a "Mobile IDE" environment... LSPs, MCP servers, and Agents... on Linux/Termux/macOS ... no user permission orchestration required. All powered by this module)
 
 ## Directory Structure
 

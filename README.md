@@ -19,6 +19,12 @@ A standalone Python package for process orchestration with PTY, pipe, and dtach 
 - **Singleton manager**: One manager instance per process, thread-safe
 - **Integration hooks (optional)**: Host apps can observe shell lifecycle events (e.g., for external process registries)
 
+Texbook use case:
+
+[https://github.com/mrsurge/termux-extensions-2](https://github.com/mrsurge/termux-extensions-2)
+
+"Mobile IDE" environment (LSPs, MCP servers, and Agents) on Linux/Termux/macOS ... no user permission orchestration required.
+
 ## Directory Structure
 
 ```

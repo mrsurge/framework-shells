@@ -196,6 +196,33 @@ shells:
     command: ["bash", "-lc", "echo hello"]
 ```
 
+### Shellspec Examples
+
+Minimal “proc” service:
+
+```yaml
+version: "1"
+shells:
+  api:
+    backend: proc
+    command: ["python", "-m", "http.server", "${free_port}"]
+    env:
+      PORT: ${free_port}
+      LOG_LEVEL: info
+```
+
+Dtach-backed interactive terminal (requires `dtach` installed):
+
+```yaml
+version: "1"
+shells:
+  terminal:
+    backend: dtach
+    cwd: ${ctx:PROJECT_ROOT}
+    subgroups: ["terminal", "project:${ctx:APP_ID}"]
+    command: ["bash", "-l", "-i"]
+```
+
 ### UI Hints (`shellspec.ui`)
 
 Shells can carry optional UI metadata via `ShellSpec.ui` / `ShellRecord.ui`.

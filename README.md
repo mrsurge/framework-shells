@@ -35,17 +35,17 @@ framework_shells/
 ├── shutdown.py          # Shutdown planner/executor helpers
 ├── shellspec.py         # YAML shellspec loader + template renderer
 ├── orchestrator.py      # Shellspec-based orchestration
+├── ui/
+│   ├── index.html          # Dashboard page
+│   ├── fws.css             # Dashboard styles
+│   ├── fws.js              # Minimal dashboard websocket client
+│   └── logs.html           # Log viewer page
 ├── cli/
 │   └── main.py          # CLI tool (fs list, fs up, fs down, fs attach)
 └── api/
     ├── fastapi_router.py   # REST API endpoints
     ├── fws_ui.py           # Self-hosted dashboard + logs (/fws, /ws/fws)
     └── websocket.py        # WebSocket endpoints for shell events
-├── ui/
-│   ├── index.html          # Dashboard page
-│   ├── fws.css             # Dashboard styles
-│   ├── fws.js              # Minimal dashboard websocket client
-│   └── logs.html           # Log viewer page
 ```
 
 ## Core Concepts
@@ -60,7 +60,7 @@ class ShellRecord:
     id: str                    # Unique ID (fs_<timestamp>_<random>)
     command: List[str]         # Command and arguments
     label: Optional[str]       # Human-readable label
-    subgroups: List[str]       # Grouping hierarchy (e.g., ["file_editor_cm6", "terminal"])
+    subgroups: List[str]       # Grouping hierarchy (e.g., ["app", "terminal"])
     cwd: str                   # Working directory
     pid: Optional[int]         # Process ID (None if not started)
     status: str                # "pending", "running", "exited"

@@ -45,6 +45,13 @@ except Exception:
 
 HOME_DIR = Path(os.path.expanduser("~"))
 
+def _truthy_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = str(raw).strip().lower()
+    return val in {"1", "true", "yes", "y", "on"}
+
 def _shell_debug(stage: str, message: str) -> None:
     # TODO: proper logging
     print(f"[PTY][{stage}] {message}")
@@ -60,6 +67,7 @@ class FrameworkShellManager:
         max_service_shells: Optional[int] = None,
         run_id: Optional[str] = None,
         enable_dtach_proxy: bool = True,
+        signal_winch_on_resize: Optional[bool] = None,
         process_hooks: Optional[ShellLifecycleHooks] = None,
         external_process_provider: Optional[ExternalProcessProvider] = None,
         enable_procfs_process_discovery: bool = True,
@@ -80,6 +88,11 @@ class FrameworkShellManager:
         self._event_bus = get_event_bus()
         self._dtach_bin = shutil.which("dtach")
         self._enable_dtach_proxy = bool(enable_dtach_proxy)
+        self._signal_winch_on_resize = (
+            _truthy_env("FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE", default=False)
+            if signal_winch_on_resize is None
+            else bool(signal_winch_on_resize)
+        )
         self._hooks = process_hooks
         self.external_process_provider = external_process_provider
         self._procfs_provider = ProcfsProcessProvider() if enable_procfs_process_discovery else None
@@ -1124,12 +1137,48 @@ class FrameworkShellManager:
 
     async def resize_pty(self, shell_id: str, cols: int, rows: int) -> None:
         """Resize a shell's PTY."""
+        proxy_pid: Optional[int] = None
         async with self._get_lock():
             state = self._pty.get(shell_id)
             if not state:
                 raise KeyError(f"No PTY for shell {shell_id}")
+            proxy_pid = state.proxy_pid
             winsz = struct.pack("HHHH", max(1, rows), max(1, cols), 0, 0)
             try:
                 await asyncio.to_thread(fcntl.ioctl, state.master_fd, termios.TIOCSWINSZ, winsz)
             except Exception:
                 pass
+
+        if self._signal_winch_on_resize:
+            await self._signal_shell_resize(shell_id, proxy_pid=proxy_pid)
+
+    async def _signal_shell_resize(self, shell_id: str, *, proxy_pid: Optional[int] = None) -> None:
+        """Best-effort SIGWINCH delivery after resize_pty().
+
+        Why: interactive programs (readline, shells, TUIs) often cache terminal
+        width and rely on SIGWINCH to refresh. In dtach mode, the dtach attach
+        proxy can be the "front" process that needs the signal, otherwise the
+        app may observe wrap/overwrite glitches in the terminal UI.
+        """
+        def _try_winch(pid: int) -> None:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGWINCH)
+                return
+            except Exception:
+                pass
+            try:
+                os.kill(pid, signal.SIGWINCH)
+            except Exception:
+                pass
+
+        # Prefer the dtach attach proxy (directly attached to the resized PTY).
+        if proxy_pid:
+            _try_winch(int(proxy_pid))
+
+        # Also signal the managed shell PID (if available).
+        try:
+            rec = await self._load_record(shell_id)
+        except Exception:
+            rec = None
+        if rec and rec.pid:
+            _try_winch(int(rec.pid))

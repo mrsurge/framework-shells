@@ -2,6 +2,12 @@
 
 A standalone Python package for process orchestration with PTY, pipe, and dtach backends.
 
+## Install
+
+```bash
+pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
+```
+
 ## Dependencies
 
 - Python 3.9+
@@ -159,6 +165,17 @@ pids = await mgr.list_active_pids()
 # Optional: provide lightweight aggregated stats (requires psutil for per-process CPU/RSS)
 stats = await mgr.aggregate_resource_stats()
 ```
+
+### SIGWINCH on resize (optional)
+
+Some interactive programs (readline, shells, TUIs) cache terminal width and rely
+on `SIGWINCH` to refresh after a PTY resize. In dtach mode, the dtach attach
+proxy can be the "front" process that needs the signal.
+
+You can enable best-effort `SIGWINCH` delivery after `resize_pty()` by either:
+
+- Passing `signal_winch_on_resize=True` when creating the singleton manager (must be consistent per-process), or
+- Setting `FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE=1` in the environment.
 
 ### REST API
 
@@ -408,4 +425,3 @@ Although the dashboard can be rendered as a standalone page and has a correspond
 | Dash screen               | Logs screen               |
 |----------------------------|----------------------------|
 | <img width="200" height="444" alt="dash.png" src="https://raw.githubusercontent.com/mrsurge/framework-shells/refs/heads/main/pngs/dash.png" /> | <img width="200" height="400" alt="logs.png" src="https://raw.githubusercontent.com/mrsurge/framework-shells/refs/heads/main/pngs/logs.png" /> |
-

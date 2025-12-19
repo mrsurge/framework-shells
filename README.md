@@ -402,3 +402,8 @@ Token is derived from `FRAMEWORK_SHELLS_SECRET`.
 
 - If `FRAMEWORK_SHELLS_SECRET` is unset/empty, auth is disabled (dev mode).
 - If `FRAMEWORK_SHELLS_SECRET` is set, mutating endpoints require a valid token.
+
+## Screenshots
+|dash screen              .|logs screen              .|
+<img width="225" height="500" alt="dash.png" src="https://raw.githubusercontent.com/mrsurge/framework-shells/refs/heads/main/pngs/dash.png" /> <img width="225" height="500" alt="logs.png" src="https://raw.githubusercontent.com/mrsurge/framework-shells/refs/heads/main/pngs/logs.png" />
+

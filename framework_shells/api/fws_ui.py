@@ -33,6 +33,28 @@ def _escape_html(value: Any) -> str:
         .replace("'", "&#39;")
     )
 
+def _fmt_bytes(n: Any) -> str:
+    try:
+        val = int(n)
+    except Exception:
+        return "-"
+    if val <= 0:
+        return "0"
+    mib = val / (1024 * 1024)
+    if mib >= 1024:
+        gib = mib / 1024
+        return f"{gib:.1f} GiB"
+    return f"{mib:.0f} MiB"
+
+def _fmt_cpu(pct: Any) -> str:
+    try:
+        val = float(pct)
+    except Exception:
+        return "-"
+    if val < 0:
+        return "-"
+    return f"{val:.1f}%"
+
 
 def _shell_backend(info: Dict[str, Any]) -> str:
     if info.get("uses_dtach"):
@@ -241,6 +263,9 @@ async def _render_dashboard_html() -> str:
                     pid = s.get("pid")
                     backend = _shell_backend(s)
                     subgroups = s.get("subgroups") if isinstance(s.get("subgroups"), list) else []
+                    stats = s.get("stats") if isinstance(s.get("stats"), dict) else {}
+                    cpu = _fmt_cpu(stats.get("cpu_percent"))
+                    rss = _fmt_bytes(stats.get("memory_rss"))
 
                     row_style = _card_style_for_subgroups([str(x) for x in subgroups], subgroup_styles)
                     row_style_bits: List[str] = []
@@ -254,8 +279,8 @@ async def _render_dashboard_html() -> str:
                     parts.append('<div class="child-main">')
                     parts.append('<div class="child-label">%s</div>' % _escape_html(label))
                     parts.append(
-                        '<div class="child-meta">PID: %s · ID: %s · %s</div>'
-                        % (_escape_html(pid), _escape_html(sid), _escape_html(backend))
+                        '<div class="child-meta">PID: %s · ID: %s · %s · CPU: %s · RSS: %s</div>'
+                        % (_escape_html(pid), _escape_html(sid), _escape_html(backend), _escape_html(cpu), _escape_html(rss))
                     )
                     cmd = s.get("command") if isinstance(s.get("command"), list) else []
                     if cmd:

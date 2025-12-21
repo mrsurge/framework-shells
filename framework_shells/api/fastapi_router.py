@@ -46,20 +46,37 @@ async def require_auth(
 
 @router.get("/api/framework_shells")
 async def list_shells(
-    mgr: FrameworkShellManager = Depends(get_manager_dep)
+    include_stats: bool = Query(False),
+    mgr: FrameworkShellManager = Depends(get_manager_dep),
 ):
     records = await mgr.list_shells()
-    return {"ok": True, "data": [r.to_payload() for r in records]}
+    if not include_stats:
+        return {"ok": True, "data": [r.to_payload() for r in records]}
+    described: List[dict] = []
+    for rec in records:
+        try:
+            described.append(await mgr.describe(rec))
+        except Exception:
+            described.append(rec.to_payload())
+    return {"ok": True, "data": described}
 
 @router.get("/api/framework_shells/{shell_id}")
 async def get_shell(
     shell_id: str,
-    mgr: FrameworkShellManager = Depends(get_manager_dep)
+    include_stats: bool = Query(False),
+    mgr: FrameworkShellManager = Depends(get_manager_dep),
 ):
     record = await mgr.get_shell(shell_id)
     if not record:
         raise HTTPException(404, "Shell not found")
-    return {"ok": True, "data": record.to_payload(include_env=True)}
+    if not include_stats:
+        return {"ok": True, "data": record.to_payload(include_env=True)}
+    try:
+        data = await mgr.describe(record)
+        data["env_overrides"] = record.env_overrides
+        return {"ok": True, "data": data}
+    except Exception:
+        return {"ok": True, "data": record.to_payload(include_env=True)}
 
 @router.post("/api/framework_shells")
 async def find_or_create_shell(

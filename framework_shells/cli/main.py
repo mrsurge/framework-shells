@@ -80,6 +80,7 @@ def main():
     
     # fs list
     list_parser = subparsers.add_parser("list", help="List running shells")
+    list_parser.add_argument("--stats", action="store_true", help="Include CPU/RSS stats (best-effort)")
     
     # fs down
     down_parser = subparsers.add_parser("down", help="Terminate shells")
@@ -241,14 +242,31 @@ async def run_async(args):
 
     elif args.command == "list":
         shells = await manager.list_shells()
-        print(f"{'ID':<20} {'SPEC':<14} {'LABEL':<15} {'STATUS':<10} {'PID':<6} {'BACKEND'}")
+        show_stats = bool(getattr(args, "stats", False))
+        if show_stats:
+            print(f"{'ID':<20} {'SPEC':<14} {'LABEL':<15} {'STATUS':<10} {'PID':<6} {'CPU':>6} {'RSS':>9} {'BACKEND'}")
+        else:
+            print(f"{'ID':<20} {'SPEC':<14} {'LABEL':<15} {'STATUS':<10} {'PID':<6} {'BACKEND'}")
         for s in shells:
             backend = (
                 "dtach"
                 if getattr(s, "uses_dtach", False)
                 else ("pipe" if getattr(s, "uses_pipes", False) else ("pty" if s.uses_pty else "proc"))
             )
-            print(f"{s.id:<20} {(getattr(s, 'spec_id', None) or '-'): <14} {s.label or '-':<15} {s.status:<10} {s.pid or '-':<6} {backend}")
+            if not show_stats:
+                print(f"{s.id:<20} {(getattr(s, 'spec_id', None) or '-'): <14} {s.label or '-':<15} {s.status:<10} {s.pid or '-':<6} {backend}")
+                continue
+            try:
+                info = await manager.describe(s)
+                stats = info.get("stats") if isinstance(info.get("stats"), dict) else {}
+                cpu = stats.get("cpu_percent")
+                rss = stats.get("memory_rss")
+                cpu_s = "-" if cpu is None else f"{float(cpu):.1f}%"
+                rss_s = "-" if rss is None else f"{int(rss) // (1024 * 1024)}MiB"
+            except Exception:
+                cpu_s = "-"
+                rss_s = "-"
+            print(f"{s.id:<20} {(getattr(s, 'spec_id', None) or '-'): <14} {s.label or '-':<15} {s.status:<10} {s.pid or '-':<6} {cpu_s:>6} {rss_s:>9} {backend}")
 
     elif args.command == "down":
         spec_ids = None

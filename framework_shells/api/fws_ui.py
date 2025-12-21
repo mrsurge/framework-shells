@@ -284,7 +284,7 @@ async def _render_dashboard_html() -> str:
                     )
                     cmd = s.get("command") if isinstance(s.get("command"), list) else []
                     if cmd:
-                        parts.append('<div class="child-meta">Cmd: %s</div>' % _escape_html(" ".join(map(str, cmd))))
+                        parts.append('<div class="child-meta child-meta--cmd">Cmd: %s</div>' % _escape_html(" ".join(map(str, cmd))))
                     pills = _render_subgroup_pills(subgroups, subgroup_styles)
                     if pills:
                         parts.append(pills)

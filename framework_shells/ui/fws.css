@@ -264,7 +264,7 @@ body {
 .child-row {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding: 8px 10px;
   border-radius: 8px;
@@ -289,6 +289,12 @@ body {
   font-size: 0.8rem;
   color: var(--muted-foreground);
   margin-top: 2px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.child-meta--cmd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

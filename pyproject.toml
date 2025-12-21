@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "framework_shells"
-version = "0.0.2"
+version = "0.0.3"
 description = "Framework-agnostic process orchestration with PTY, pipe, and dtach backends."
 readme = "README.md"
 requires-python = ">=3.9"

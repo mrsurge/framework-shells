@@ -948,6 +948,19 @@ class FrameworkShellManager:
                 return record
         return None
 
+    def _signal_pid_or_pgrp(self, pid: int, sig: signal.Signals) -> None:
+        """Best-effort signal delivery: prefer process group, fallback to PID."""
+        try:
+            pgid = os.getpgid(int(pid))
+            os.killpg(pgid, sig)
+            return
+        except Exception:
+            pass
+        try:
+            os.kill(int(pid), sig)
+        except Exception:
+            pass
+
     async def terminate_shell(self, shell_id: str, force: bool = False) -> None:
         rec = await self._load_record(shell_id)
         if not rec: return
@@ -964,12 +977,9 @@ class FrameworkShellManager:
             socket_path = self.sockets_dir / f"{shell_id}.sock"
             pid_file = self.sockets_dir / f"{shell_id}.pid"
             
-            # Kill the shell process inside dtach
+            # Kill the shell process (and its process group) inside dtach.
             if rec.pid:
-                try:
-                    os.kill(rec.pid, sig)
-                except ProcessLookupError:
-                    pass
+                self._signal_pid_or_pgrp(rec.pid, sig)
             
             # Find and kill dtach master by checking who owns the socket
             # Or just remove the socket to force dtach to exit
@@ -984,11 +994,8 @@ class FrameworkShellManager:
                 except Exception:
                     pass
         elif rec.pid:
-            # Regular process - just kill it
-            try:
-                os.kill(rec.pid, sig)
-            except ProcessLookupError:
-                pass
+            # Regular process - signal process group (preferred) so children die too.
+            self._signal_pid_or_pgrp(rec.pid, sig)
         
         # Stop any PTY/pipe proxies we're running
         await self._stop_pty(shell_id)

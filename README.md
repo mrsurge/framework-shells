@@ -120,6 +120,7 @@ Shells are stored under:
 - `runtime_id`: Derived from `FRAMEWORK_SHELLS_SECRET`
 
 This ensures different repos and different secrets don't see each other's shells.
+Two instances with different secrets won't see each other's shells, even if running from the same repo. This enables running multiple clones on different ports without interference.
 
 ## API
 
@@ -333,6 +334,12 @@ python -m framework_shells.cli.main list
 # Apply spec file
 python -m framework_shells.cli.main up shells.yaml
 
+# Terminate one shell (ID, label, or unique ID prefix)
+fws terminate <shell_id>
+
+# Remove one shell's metadata/logs (terminates if still running)
+fws rm <shell_id>
+
 # Spawn a one-off shell without a spec
 fws run --backend pty --label demo --env FOO=bar --env PORT=1234 -- bash -l -i
 
@@ -370,7 +377,7 @@ The CLI tries to be usable standalone:
 
 - If `FRAMEWORK_SHELLS_REPO_FINGERPRINT` is missing, it computes one from `cwd` (and sets the env var).
 - If `FRAMEWORK_SHELLS_SECRET` is missing, it tries to load the stored secret file under the computed fingerprint.
-- If no stored secret exists, it falls back to a temporary secret (good for one-off runs, but you won’t be able to recover/attach to that runtime after restart).
+- If no stored secret exists, it creates and stores a new secret for that fingerprint (so subsequent `fws` invocations share the same runtime).
 
 
 ## Integration Hooks (Optional)
@@ -398,16 +405,6 @@ Shell processes are launched with `start_new_session=True` for isolation. This m
 - If a host framework uses an external “last resort” killer, it should either:
     - scan `framework_shells` runtime metadata and terminate shells, or
     - ensure shell PIDs are registered with that external supervisor.
-
-## Runtime Isolation
-
-The secret's primary purpose is **runtime isolation** - it derives the `runtime_id` that namespaces shell storage:
-
-```
-~/.cache/framework_shells/runtimes/<repo_fingerprint>/<runtime_id>/
-```
-
-Two instances with different secrets won't see each other's shells, even if running from the same repo. This enables running multiple clones on different ports without interference.
 
 ## Auth
 

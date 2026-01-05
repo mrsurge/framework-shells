@@ -159,7 +159,8 @@ async def execute_shutdown_plan(
         if manager and rec.shell_id:
             try:
                 _log(f"terminate shell {rec.shell_id} (pid={pid})")
-                await manager.terminate_shell(rec.shell_id, force=True)
+                # Best-effort graceful shutdown first; escalation is handled below.
+                await manager.terminate_shell(rec.shell_id, force=False)
             except Exception as exc:
                 stats["errors"].append(f"shell {rec.shell_id}: {exc}")
         else:
@@ -179,14 +180,22 @@ async def execute_shutdown_plan(
             continue
 
         # Escalate.
-        try:
-            _log(f"sigkill pid={pid}")
-            os.kill(pid, signal.SIGKILL)
-            stats["force_killed"] += 1
-        except ProcessLookupError:
-            stats["clean_exits"] += 1
-        except Exception as exc:
-            stats["errors"].append(f"PID {pid} SIGKILL: {exc}")
+        if manager and rec.shell_id:
+            try:
+                _log(f"sigkill shell {rec.shell_id} (pid={pid})")
+                await manager.terminate_shell(rec.shell_id, force=True)
+                stats["force_killed"] += 1
+            except Exception as exc:
+                stats["errors"].append(f"shell {rec.shell_id} SIGKILL: {exc}")
+        else:
+            try:
+                _log(f"sigkill pid={pid}")
+                os.kill(pid, signal.SIGKILL)
+                stats["force_killed"] += 1
+            except ProcessLookupError:
+                stats["clean_exits"] += 1
+            except Exception as exc:
+                stats["errors"].append(f"PID {pid} SIGKILL: {exc}")
 
         _wait_pid_exit(pid, timeout_s=policy.sigkill_timeout_s, poll_interval_s=policy.poll_interval_s)
         stats["terminated"] += 1
@@ -214,4 +223,3 @@ async def shutdown_snapshot(
         processes = [p for p in processes if p.pid in keep]
     plan = plan_shutdown(processes, policy=policy)
     return await execute_shutdown_plan(plan, manager=manager, policy=policy, exclude_pids=exclude_pids, log=log)
-

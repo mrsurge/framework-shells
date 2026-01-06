@@ -149,9 +149,11 @@ info = await mgr.describe(record, include_logs=True, tail_lines=100)
 
 # PTY I/O
 queue = await mgr.subscribe_output(shell_id)
+bytes_queue = await mgr.subscribe_output_bytes(shell_id)  # Lossless raw bytes
 await mgr.write_to_pty(shell_id, "ls -la\n")
 await mgr.resize_pty(shell_id, cols=120, rows=40)
 await mgr.unsubscribe_output(shell_id, queue)
+await mgr.unsubscribe_output_bytes(shell_id, bytes_queue)
 
 # Pipe I/O (in-memory only)
 pipe_state = mgr.get_pipe_state(shell_id)

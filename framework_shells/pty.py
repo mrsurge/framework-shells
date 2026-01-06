@@ -9,6 +9,7 @@ class PTYState:
     label: Optional[str] = None
     shell_id: Optional[str] = None
     subscribers: List[AsyncQueue[str]] = field(default_factory=list)
+    subscribers_bytes: List[AsyncQueue[bytes]] = field(default_factory=list)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     reader: Optional[asyncio.Task] = None
     proxy_pid: Optional[int] = None

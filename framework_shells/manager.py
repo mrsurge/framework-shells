@@ -709,6 +709,11 @@ class FrameworkShellManager:
                             await q.put(text)
                         except Exception:
                             pass
+                    for q in list(state.subscribers_bytes):
+                        try:
+                            await q.put(data)
+                        except Exception:
+                            pass
                             
                 except asyncio.TimeoutError:
                     continue
@@ -1122,6 +1127,16 @@ class FrameworkShellManager:
             state.subscribers.append(q)
             return q
 
+    async def subscribe_output_bytes(self, shell_id: str) -> AsyncQueue[bytes]:
+        """Subscribe to raw PTY output bytes for a shell. Returns an AsyncQueue."""
+        async with self._get_lock():
+            state = self._pty.get(shell_id)
+            if not state:
+                raise KeyError(f"No PTY for shell {shell_id}")
+            q: AsyncQueue[bytes] = AsyncQueue()
+            state.subscribers_bytes.append(q)
+            return q
+
     async def unsubscribe_output(self, shell_id: str, q: AsyncQueue[str]) -> None:
         """Unsubscribe from PTY output."""
         async with self._get_lock():
@@ -1130,6 +1145,17 @@ class FrameworkShellManager:
                 return
             try:
                 state.subscribers.remove(q)
+            except ValueError:
+                pass
+
+    async def unsubscribe_output_bytes(self, shell_id: str, q: AsyncQueue[bytes]) -> None:
+        """Unsubscribe from raw PTY output bytes."""
+        async with self._get_lock():
+            state = self._pty.get(shell_id)
+            if not state:
+                return
+            try:
+                state.subscribers_bytes.remove(q)
             except ValueError:
                 pass
 

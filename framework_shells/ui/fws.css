@@ -163,9 +163,9 @@ body {
 .group-title {
   font-weight: 800;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .group-meta {
@@ -195,9 +195,9 @@ body {
   font-size: 0.85rem;
   font-weight: 700;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .subgroup-count {
@@ -214,9 +214,9 @@ body {
 .shell-title {
   font-weight: 700;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .shell-meta {
@@ -282,9 +282,9 @@ body {
 .child-label {
   font-size: 0.85rem;
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .child-meta {
@@ -405,4 +405,10 @@ body {
 
 .copy-field.is-copied {
   border-color: var(--primary);
+}
+
+.fws-content,
+.fws-content * {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }

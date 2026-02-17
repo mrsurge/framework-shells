@@ -11,6 +11,7 @@
   --success: hsl(142, 76%, 36%);
   --destructive: hsl(0, 84%, 60%);
   --destructive-foreground: #fff;
+  --hairline: 0.5px;
 }
 
 * {
@@ -28,14 +29,15 @@ body {
   color: var(--foreground);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   overflow: auto;
+  overflow-x: hidden;
 }
 
 .fws-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 12px 1px;
+  border-bottom: var(--hairline) solid var(--border);
   background: var(--card);
 }
 
@@ -68,9 +70,9 @@ body {
 .fws-toolbar {
   display: flex;
   gap: 10px;
-  padding: 12px 16px;
+  padding: 12px 1px;
   background: var(--background);
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--border);
 }
 
 .fws-toolbar-form {
@@ -78,7 +80,7 @@ body {
 }
 
 .btn {
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   background: var(--secondary);
   color: var(--foreground);
   padding: 7px 10px;
@@ -101,7 +103,7 @@ body {
 }
 
 .fws-content {
-  padding: 16px;
+  padding: 10px 1px;
 }
 
 .fws-loading {
@@ -120,7 +122,7 @@ body {
   gap: 12px;
   padding: 8px 10px;
   border-radius: 2px;
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   background: rgba(255, 255, 255, 0.03);
   font-size: 0.85rem;
   font-weight: 700;
@@ -132,9 +134,9 @@ body {
 }
 
 .shell-card {
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 12px;
+  padding: 12px 1px;
   background: rgba(255, 255, 255, 0.02);
   margin-top: 10px;
 }
@@ -144,9 +146,9 @@ body {
 }
 
 .group-card {
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 12px;
+  padding: 12px 1px;
   background: rgba(255, 255, 255, 0.02);
   margin-top: 12px;
 }
@@ -176,9 +178,9 @@ body {
 
 .subgroup-card {
   margin-top: 10px;
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 10px;
+  padding: 10px 1px;
   background: rgba(0, 0, 0, 0.12);
 }
 
@@ -250,7 +252,7 @@ body {
 .children {
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px dashed var(--border);
+  border-top: var(--hairline) dashed var(--border);
 }
 
 .children-title {
@@ -327,13 +329,24 @@ body {
   display: none;
 }
 
+.shell-entry {
+  padding-left: 1px;
+  padding-right: 1px;
+  max-width: 100%;
+  overflow: hidden;
+}
+
 .copy-field {
   position: relative;
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 6px 34px 6px 8px;
+  padding: 6px 1px;
   background: rgba(0, 0, 0, 0.18);
   cursor: copy;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .copy-field:focus {
@@ -351,6 +364,9 @@ body {
 .copy-field-value {
   margin-top: 2px;
   font-size: 0.8rem;
+  max-width: 100%;
+  min-width: 0;
+  display: block;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -366,15 +382,17 @@ body {
 
 .copy-overlay {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  border: 1px solid var(--border);
+  top: 1px;
+  right: 1px;
+  border: var(--hairline) solid var(--border);
   background: rgba(0, 0, 0, 0.28);
   color: var(--foreground);
   border-radius: 2px;
   font-size: 0.62rem;
   opacity: 0.45;
-  padding: 1px 5px;
+  padding: 0 4px;
+  line-height: 1.2;
+  max-width: calc(100% - 2px);
   cursor: pointer;
 }
 

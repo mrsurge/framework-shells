@@ -36,7 +36,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 1px;
+  padding: 12px 0;
   border-bottom: var(--hairline) solid var(--border);
   background: var(--card);
 }
@@ -70,7 +70,7 @@ body {
 .fws-toolbar {
   display: flex;
   gap: 10px;
-  padding: 12px 1px;
+  padding: 12px 0;
   background: var(--background);
   border-bottom: var(--hairline) solid var(--border);
 }
@@ -103,7 +103,7 @@ body {
 }
 
 .fws-content {
-  padding: 10px 1px;
+  padding: 10px 0;
 }
 
 .fws-loading {
@@ -120,7 +120,7 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  padding: 8px 10px;
+  padding: 8px 0;
   border-radius: 2px;
   border: var(--hairline) solid var(--border);
   background: rgba(255, 255, 255, 0.03);
@@ -136,7 +136,7 @@ body {
 .shell-card {
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 12px 1px;
+  padding: 12px 0;
   background: rgba(255, 255, 255, 0.02);
   margin-top: 10px;
 }
@@ -148,7 +148,7 @@ body {
 .group-card {
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 12px 1px;
+  padding: 12px 0;
   background: rgba(255, 255, 255, 0.02);
   margin-top: 12px;
 }
@@ -180,7 +180,7 @@ body {
   margin-top: 10px;
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 10px 1px;
+  padding: 10px 0;
   background: rgba(0, 0, 0, 0.12);
 }
 
@@ -268,7 +268,7 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 8px 0;
   border-radius: 2px;
   background: rgba(0, 0, 0, 0.15);
   border-left: 3px solid rgba(255, 255, 255, 0.2);
@@ -330,8 +330,8 @@ body {
 }
 
 .shell-entry {
-  padding-left: 1px;
-  padding-right: 1px;
+  padding-left: 0;
+  padding-right: 0;
   max-width: 100%;
   overflow: hidden;
 }
@@ -340,7 +340,7 @@ body {
   position: relative;
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 6px 1px;
+  padding: 6px 0;
   background: rgba(0, 0, 0, 0.18);
   cursor: copy;
   width: 100%;
@@ -382,8 +382,8 @@ body {
 
 .copy-overlay {
   position: absolute;
-  top: 1px;
-  right: 1px;
+  top: 0;
+  right: 0;
   border: var(--hairline) solid var(--border);
   background: rgba(0, 0, 0, 0.28);
   color: var(--foreground);
@@ -392,7 +392,7 @@ body {
   opacity: 0.45;
   padding: 0 4px;
   line-height: 1.2;
-  max-width: calc(100% - 2px);
+  max-width: 100%;
   cursor: pointer;
 }
 

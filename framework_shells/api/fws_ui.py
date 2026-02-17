@@ -5,6 +5,7 @@ import mimetypes
 import os
 import re
 import signal
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -182,6 +183,26 @@ def _render_copy_field(label: str, value: Any, *, extra_classes: str = "") -> st
     )
 
 
+def _exited_timestamp(info: Dict[str, Any]) -> float:
+    raw = info.get("updated_at")
+    if raw is None:
+        raw = info.get("created_at")
+    try:
+        return float(raw)
+    except Exception:
+        return 0.0
+
+
+def _fmt_exited_timestamp(ts: float) -> str:
+    if ts <= 0:
+        return "Unknown time"
+    dt = datetime.fromtimestamp(ts)
+    now = datetime.now()
+    if dt.date() == now.date():
+        return dt.strftime("%H:%M")
+    return dt.strftime("%m/%d/%Y %H:%M")
+
+
 async def _render_dashboard_html() -> str:
     mgr = await get_manager()
     shells = await mgr.list_shells()
@@ -356,10 +377,11 @@ async def _render_dashboard_html() -> str:
 
     parts.append("</div>")
 
-    parts.append('<div class="section">')
+    parts.append('<div class="section section-exited" id="fws-exited">')
     parts.append('<div class="section-title">')
     parts.append('Exited <span class="muted">(%d)</span>' % len(exited))
     parts.append('<div class="shell-actions">')
+    parts.append('<button class="btn btn-small" type="button" id="fws-exited-toggle" aria-expanded="true">Collapse Exited</button>')
     if exited:
         parts.append(
             '<form method="post" action="/fws/action/exited/purge" data-fws-ajax="1" '
@@ -369,14 +391,17 @@ async def _render_dashboard_html() -> str:
         )
     parts.append("</div>")
     parts.append("</div>")
+    parts.append('<div class="exited-content" id="fws-exited-content">')
     if not exited:
         parts.append('<div class="shell-card"><div class="shell-meta">No exited shells.</div></div>')
     else:
-        for s in sorted(exited, key=lambda x: x.get("label") or x.get("id") or ""):
+        for s in sorted(exited, key=_exited_timestamp, reverse=True):
             sid = str(s.get("id") or "")
             label = str(s.get("label") or sid)
             status = str(s.get("status") or "exited")
             exit_code = s.get("exit_code")
+            exited_ts = _exited_timestamp(s)
+            exited_stamp = _fmt_exited_timestamp(exited_ts)
             subgroups = s.get("subgroups") if isinstance(s.get("subgroups"), list) else []
             style = _card_style_for_subgroups([str(x) for x in subgroups], subgroup_styles)
             style_bits: List[str] = []
@@ -393,6 +418,8 @@ async def _render_dashboard_html() -> str:
             stdout_log = str(s.get("stdout_log") or "")
             stderr_log = str(s.get("stderr_log") or "")
 
+            parts.append(f'<div class="exited-item" data-exited-item="1" data-exited-ts="{_escape_html(exited_ts)}">')
+            parts.append('<div class="exited-ts">%s</div>' % _escape_html(exited_stamp))
             parts.append(f'<div class="shell-card shell-entry is-collapsed"{style_attr} data-shell-id="{_escape_html(sid)}">')
             parts.append('<div class="shell-header">')
             parts.append('<div class="shell-title">%s</div>' % _escape_html(label))
@@ -417,6 +444,11 @@ async def _render_dashboard_html() -> str:
                 parts.append(pills)
             parts.append("</div>")
             parts.append("</div>")
+            parts.append("</div>")
+        parts.append('<div class="row exited-more-row">')
+        parts.append('<button class="btn btn-small" type="button" id="fws-exited-more">More</button>')
+        parts.append("</div>")
+    parts.append("</div>")
     parts.append("</div>")
 
     return "\n".join(parts)

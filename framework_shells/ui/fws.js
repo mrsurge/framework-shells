@@ -2,9 +2,12 @@
   const content = document.getElementById('fws-content');
   const statusEl = document.getElementById('fws-status');
   const toggleAllBtn = document.getElementById('fws-toggle-all');
+  const EXITED_EXPANDED_KEY = 'fws.exited.expanded';
+  const EXITED_PAGE_SIZE = 50;
 
   const collapseState = new Map();
   let defaultCollapsed = true;
+  let exitedVisibleCount = EXITED_PAGE_SIZE;
 
   async function postForm(form) {
     const method = (form.getAttribute('method') || 'post').toUpperCase();
@@ -115,6 +118,55 @@
     updateToggleAllLabel();
   }
 
+  function getExitedExpandedDefault() {
+    try {
+      return localStorage.getItem(EXITED_EXPANDED_KEY) !== '0';
+    } catch (err) {
+      return true;
+    }
+  }
+
+  function setExitedExpanded(expanded) {
+    if (!content) return;
+    const exitedContent = content.querySelector('#fws-exited-content');
+    const exitedToggle = content.querySelector('#fws-exited-toggle');
+    if (!exitedContent || !exitedToggle) return;
+    exitedContent.classList.toggle('is-collapsed', !expanded);
+    exitedToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    exitedToggle.textContent = expanded ? 'Collapse Exited' : 'Expand Exited';
+    try {
+      localStorage.setItem(EXITED_EXPANDED_KEY, expanded ? '1' : '0');
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  function applyExitedPagination() {
+    if (!content) return;
+    const items = Array.from(content.querySelectorAll('[data-exited-item="1"]'));
+    const moreBtn = content.querySelector('#fws-exited-more');
+    if (!items.length) {
+      if (moreBtn) moreBtn.style.display = 'none';
+      return;
+    }
+    items.forEach((item, idx) => {
+      item.style.display = idx < exitedVisibleCount ? '' : 'none';
+    });
+    if (!moreBtn) return;
+    if (items.length <= exitedVisibleCount) {
+      moreBtn.style.display = 'none';
+      return;
+    }
+    moreBtn.style.display = '';
+    const remaining = items.length - exitedVisibleCount;
+    moreBtn.textContent = `More (${remaining})`;
+  }
+
+  function applyExitedSectionState() {
+    setExitedExpanded(getExitedExpandedDefault());
+    applyExitedPagination();
+  }
+
   document.addEventListener('submit', (e) => {
     const form = e.target;
     if (!form || !form.matches || !form.matches('form[data-fws-ajax="1"]')) return;
@@ -145,6 +197,20 @@
       e.preventDefault();
       const shouldCollapse = toggleAllBtn.textContent === 'Collapse All';
       setAllCollapsed(shouldCollapse);
+      return;
+    }
+
+    if (e.target.closest('#fws-exited-toggle')) {
+      e.preventDefault();
+      const expanded = e.target.closest('#fws-exited-toggle').getAttribute('aria-expanded') === 'true';
+      setExitedExpanded(!expanded);
+      return;
+    }
+
+    if (e.target.closest('#fws-exited-more')) {
+      e.preventDefault();
+      exitedVisibleCount += EXITED_PAGE_SIZE;
+      applyExitedPagination();
       return;
     }
 
@@ -193,6 +259,7 @@
             if (content) {
               content.innerHTML = msg.html;
               applyCollapseState(content);
+              applyExitedSectionState();
             }
           }
         } catch (err) {

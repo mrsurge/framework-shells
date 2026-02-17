@@ -120,7 +120,7 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  padding: 8px 0;
+  padding: 8px 1px;
   border-radius: 2px;
   border: var(--hairline) solid var(--border);
   background: rgba(255, 255, 255, 0.03);
@@ -136,7 +136,7 @@ body {
 .shell-card {
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 12px 0;
+  padding: 12px 1px;
   background: rgba(255, 255, 255, 0.02);
   margin-top: 10px;
 }
@@ -148,7 +148,7 @@ body {
 .group-card {
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 12px 0;
+  padding: 12px 1px;
   background: rgba(255, 255, 255, 0.02);
   margin-top: 12px;
 }
@@ -180,7 +180,7 @@ body {
   margin-top: 10px;
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 10px 0;
+  padding: 10px 1px;
   background: rgba(0, 0, 0, 0.12);
 }
 
@@ -268,7 +268,7 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   gap: 10px;
-  padding: 8px 0;
+  padding: 8px 1px;
   border-radius: 2px;
   background: rgba(0, 0, 0, 0.15);
   border-left: 3px solid rgba(255, 255, 255, 0.2);
@@ -358,7 +358,7 @@ body {
   position: relative;
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 6px 0;
+  padding: 6px 1px;
   background: rgba(0, 0, 0, 0.18);
   cursor: copy;
   width: 100%;
@@ -423,6 +423,25 @@ body {
 
 .copy-field.is-copied {
   border-color: var(--primary);
+}
+
+.exited-content.is-collapsed {
+  display: none;
+}
+
+.exited-item {
+  margin-top: 8px;
+}
+
+.exited-ts {
+  font-size: 0.72rem;
+  color: var(--muted-foreground);
+  margin: 0 1px 2px;
+}
+
+.exited-more-row {
+  margin-top: 10px;
+  justify-content: center;
 }
 
 .fws-content,

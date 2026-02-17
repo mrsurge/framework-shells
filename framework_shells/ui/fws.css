@@ -367,9 +367,11 @@ body {
   max-width: 100%;
   min-width: 0;
   display: block;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
 }
 
 .copy-field--multiline .copy-field-value,

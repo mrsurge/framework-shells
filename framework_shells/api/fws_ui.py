@@ -697,8 +697,8 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
         await websocket.send_json(
             {
                 "type": "initial",
-                "stdout": "\n".join(stdout_lines[-200:]),
-                "stderr": "\n".join(stderr_lines[-200:]),
+                "stdout": "\n".join(stdout_lines[-2000:]),
+                "stderr": "\n".join(stderr_lines[-2000:]),
             }
         )
 

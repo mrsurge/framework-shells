@@ -18,11 +18,11 @@
     </div>
 
     <div class="fws-toolbar">
-      <form method="post" action="/fws/action/shutdown" class="fws-toolbar-form">
+      <form method="post" action="/fws/action/shutdown" class="fws-toolbar-form" data-fws-ajax="1">
         <input type="hidden" name="scope" value="tree" />
         <button type="submit" class="btn btn-danger">Shutdown Tree</button>
       </form>
-      <form method="post" action="/fws/action/shutdown" class="fws-toolbar-form">
+      <form method="post" action="/fws/action/shutdown" class="fws-toolbar-form" data-fws-ajax="1">
         <input type="hidden" name="scope" value="shells" />
         <button type="submit" class="btn btn-secondary">Stop Shells Only</button>
       </form>
@@ -38,6 +38,7 @@
       <form method="post" action="/fws/action/refresh" class="fws-toolbar-form">
         <button type="submit" class="btn btn-secondary">Refresh</button>
       </form>
+      <button type="button" class="btn btn-secondary" id="fws-toggle-all">Expand All</button>
     </div>
 
     <div class="fws-content" id="fws-content">

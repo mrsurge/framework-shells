@@ -168,6 +168,20 @@ def _render_subgroup_pills(subgroups: List[Any], styles: Dict[str, Dict[str, str
     return '<div class="row">' + "".join(pills) + "</div>"
 
 
+def _render_copy_field(label: str, value: Any, *, extra_classes: str = "") -> str:
+    raw = "" if value is None else str(value)
+    classes = "copy-field"
+    if extra_classes:
+        classes += f" {extra_classes}"
+    return (
+        f'<div class="{classes}" data-copy="{_escape_html(raw)}" role="button" tabindex="0">'
+        f'<div class="copy-field-label">{_escape_html(label)}</div>'
+        f'<div class="copy-field-value">{_escape_html(raw)}</div>'
+        '<button class="copy-overlay" type="button" aria-label="Copy field value">Copy</button>'
+        "</div>"
+    )
+
+
 async def _render_dashboard_html() -> str:
     mgr = await get_manager()
     shells = await mgr.list_shells()
@@ -230,7 +244,7 @@ async def _render_dashboard_html() -> str:
             parts.append('<div class="shell-actions">')
             if umbrella != "(ungrouped)":
                 parts.append(
-                    f'<form method="post" action="/fws/action/app/{_escape_html(umbrella)}/shutdown">'
+                    f'<form method="post" action="/fws/action/app/{_escape_html(umbrella)}/shutdown" data-fws-ajax="1">'
                     f'<button class="btn btn-small btn-danger" type="submit">Shutdown Group</button>'
                     f"</form>"
                 )
@@ -274,31 +288,38 @@ async def _render_dashboard_html() -> str:
                     if row_style.get("border"):
                         row_style_bits.append(f"border-left: 3px solid {row_style['border']};")
                     row_style_attr = f' style="{" ".join(row_style_bits)}"' if row_style_bits else ""
-
-                    parts.append(f'<div class="child-row"{row_style_attr}>')
-                    parts.append('<div class="child-main">')
-                    parts.append('<div class="child-label">%s</div>' % _escape_html(label))
-                    parts.append(
-                        '<div class="child-meta">PID: %s · ID: %s · %s · CPU: %s · RSS: %s</div>'
-                        % (_escape_html(pid), _escape_html(sid), _escape_html(backend), _escape_html(cpu), _escape_html(rss))
-                    )
+                    status = str(s.get("status") or "running")
                     cmd = s.get("command") if isinstance(s.get("command"), list) else []
-                    if cmd:
-                        parts.append('<div class="child-meta child-meta--cmd">Cmd: %s</div>' % _escape_html(" ".join(map(str, cmd))))
-                    pills = _render_subgroup_pills(subgroups, subgroup_styles)
-                    if pills:
-                        parts.append(pills)
-                    parts.append("</div>")
+                    command_text = " ".join(map(str, cmd))
+                    stdout_log = str(s.get("stdout_log") or "")
+                    stderr_log = str(s.get("stderr_log") or "")
 
-                    parts.append('<div class="row">')
+                    parts.append(f'<div class="shell-card shell-entry is-collapsed"{row_style_attr} data-shell-id="{_escape_html(sid)}">')
+                    parts.append('<div class="shell-header">')
+                    parts.append('<div class="shell-title">%s</div>' % _escape_html(label))
+                    parts.append('<div class="shell-actions">')
+                    parts.append(f'<button class="btn btn-small" type="button" data-collapse-toggle="{_escape_html(sid)}" aria-expanded="false">Expand</button>')
                     parts.append(f'<a class="btn btn-small" href="/fws/logs/{_escape_html(sid)}">Logs</a>')
                     parts.append(
-                        f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/terminate">'
+                        f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/terminate" data-fws-ajax="1">'
                         f'<button class="btn btn-small btn-danger" type="submit">Stop</button>'
                         f"</form>"
                     )
                     parts.append("</div>")
                     parts.append("</div>")
+                    parts.append(f'<div class="shell-details" data-collapse-content="{_escape_html(sid)}">')
+                    parts.append(_render_copy_field("Status", status))
+                    parts.append(_render_copy_field("PID", pid))
+                    parts.append(_render_copy_field("ID", sid))
+                    parts.append(_render_copy_field("Backend", backend))
+                    parts.append(_render_copy_field("CPU", cpu))
+                    parts.append(_render_copy_field("RSS", rss))
+                    parts.append(_render_copy_field("Command", command_text, extra_classes="copy-field--multiline"))
+                    parts.append(_render_copy_field("stdout log", stdout_log, extra_classes="copy-field--path"))
+                    parts.append(_render_copy_field("stderr log", stderr_log, extra_classes="copy-field--path"))
+                    pills = _render_subgroup_pills(subgroups, subgroup_styles)
+                    if pills:
+                        parts.append(pills)
 
                     # Hard tree children (pid parent/child).
                     if pid and int(pid) in children_by_parent:
@@ -317,13 +338,15 @@ async def _render_dashboard_html() -> str:
                                 parts.append("</div>")
                                 parts.append('<div class="row">')
                                 parts.append(
-                                    f'<form method="post" action="/fws/action/pid/{_escape_html(child.pid)}/terminate">'
+                                    f'<form method="post" action="/fws/action/pid/{_escape_html(child.pid)}/terminate" data-fws-ajax="1">'
                                     f'<button class="btn btn-small btn-danger" type="submit">Kill</button>'
                                     f"</form>"
                                 )
                                 parts.append("</div>")
                                 parts.append("</div>")
                             parts.append("</div>")
+                    parts.append("</div>")
+                    parts.append("</div>")
 
                 parts.append("</div>")
 
@@ -363,11 +386,16 @@ async def _render_dashboard_html() -> str:
             meta = status
             if exit_code is not None:
                 meta += f" · exit: {exit_code}"
+            cmd = s.get("command") if isinstance(s.get("command"), list) else []
+            command_text = " ".join(map(str, cmd))
+            stdout_log = str(s.get("stdout_log") or "")
+            stderr_log = str(s.get("stderr_log") or "")
 
-            parts.append(f'<div class="shell-card"{style_attr}>')
+            parts.append(f'<div class="shell-card shell-entry is-collapsed"{style_attr} data-shell-id="{_escape_html(sid)}">')
             parts.append('<div class="shell-header">')
             parts.append('<div class="shell-title">%s</div>' % _escape_html(label))
             parts.append('<div class="shell-actions">')
+            parts.append(f'<button class="btn btn-small" type="button" data-collapse-toggle="{_escape_html(sid)}" aria-expanded="false">Expand</button>')
             parts.append(f'<a class="btn btn-small" href="/fws/logs/{_escape_html(sid)}">Logs</a>')
             parts.append(
                 f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/purge" data-fws-ajax="1">'
@@ -376,11 +404,16 @@ async def _render_dashboard_html() -> str:
             )
             parts.append("</div>")
             parts.append("</div>")
-            parts.append('<div class="shell-meta">%s</div>' % _escape_html(meta))
-            parts.append('<div class="shell-meta">ID: %s</div>' % _escape_html(sid))
+            parts.append(f'<div class="shell-details" data-collapse-content="{_escape_html(sid)}">')
+            parts.append(_render_copy_field("Status", meta))
+            parts.append(_render_copy_field("ID", sid))
+            parts.append(_render_copy_field("Command", command_text, extra_classes="copy-field--multiline"))
+            parts.append(_render_copy_field("stdout log", stdout_log, extra_classes="copy-field--path"))
+            parts.append(_render_copy_field("stderr log", stderr_log, extra_classes="copy-field--path"))
             pills = _render_subgroup_pills(subgroups, subgroup_styles)
             if pills:
                 parts.append(pills)
+            parts.append("</div>")
             parts.append("</div>")
     parts.append("</div>")
 
@@ -394,7 +427,15 @@ async def fws_root() -> RedirectResponse:
 
 @router.get("/fws/")
 async def fws_index() -> FileResponse:
-    return FileResponse(_UI_DIR / "index.html", media_type="text/html")
+    return FileResponse(
+        _UI_DIR / "index.html",
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.get("/fws/static/{path:path}")
@@ -403,7 +444,15 @@ async def fws_static(path: str) -> FileResponse:
     if not target.is_file() or _UI_DIR not in target.parents:
         raise HTTPException(status_code=404, detail="Not found")
     media_type, _ = mimetypes.guess_type(str(target))
-    return FileResponse(target, media_type=media_type or "application/octet-stream")
+    return FileResponse(
+        target,
+        media_type=media_type or "application/octet-stream",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.post("/fws/action/refresh")
@@ -492,22 +541,26 @@ async def fws_purge_shell(shell_id: str, request: Request) -> Response:
 
 
 @router.post("/fws/action/pid/{pid}/terminate")
-async def fws_terminate_pid(pid: int) -> RedirectResponse:
+async def fws_terminate_pid(pid: int, request: Request) -> Response:
     try:
         os.kill(int(pid), signal.SIGKILL)
     except Exception:
         pass
+    if _is_ajax(request):
+        return Response(status_code=204)
     return RedirectResponse(url="/fws/", status_code=303)
 
 
 @router.post("/fws/action/app/{app_id}/shutdown")
-async def fws_shutdown_app(app_id: str) -> RedirectResponse:
+async def fws_shutdown_app(app_id: str, request: Request) -> Response:
     mgr = await get_manager()
     shells = await mgr.list_shells()
     targets = [s for s in shells if (s.derive_app_id() or "") == app_id and s.pid and s.status == "running"]
     snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
     root_pids = [s.pid for s in targets if s.pid]
     await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]), root_pids=root_pids)
+    if _is_ajax(request):
+        return Response(status_code=204)
     return RedirectResponse(url="/fws/", status_code=303)
 
 

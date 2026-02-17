@@ -443,9 +443,14 @@ async def run_async(args):
             spec_ids = set(specs_map.keys())
 
         shells = await manager.list_shells()
-        selected = []
+        selected: List[Any] = []
         for s in shells:
             if spec_ids is not None and getattr(s, "spec_id", None) not in spec_ids:
+                continue
+            if (getattr(s, "status", None) or "") != "running":
+                continue
+            pid = getattr(s, "pid", None)
+            if not pid or not await manager._is_pid_alive(pid):  # type: ignore[attr-defined]
                 continue
             selected.append(s)
 

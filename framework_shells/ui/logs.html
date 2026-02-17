@@ -117,17 +117,6 @@
       .mode input {
         margin: 0;
       }
-      .filter-btn {
-        border: 1px solid var(--border);
-        background: rgba(255, 255, 255, 0.05);
-        color: var(--foreground);
-        padding: 4px 6px;
-        font-size: 0.72rem;
-        cursor: pointer;
-      }
-      .filter-btn:hover {
-        background: rgba(255, 255, 255, 0.1);
-      }
       .log-content {
         flex: 1;
         overflow-y: auto;
@@ -167,13 +156,11 @@
               <input id="stdout-include-input" class="filter-input" type="text" placeholder="Include filter" />
               <label class="mode"><input type="radio" name="stdout-include-mode" value="regex" checked />Regex</label>
               <label class="mode"><input type="radio" name="stdout-include-mode" value="exact" />Exact</label>
-              <button class="filter-btn" type="button" id="stdout-include-apply">Filter</button>
             </div>
             <div class="filter-row">
               <input id="stdout-exclude-input" class="filter-input" type="text" placeholder="Exclude filter" />
               <label class="mode"><input type="radio" name="stdout-exclude-mode" value="regex" checked />Regex</label>
               <label class="mode"><input type="radio" name="stdout-exclude-mode" value="exact" />Exact</label>
-              <button class="filter-btn" type="button" id="stdout-exclude-apply">Exclude</button>
             </div>
           </div>
         </div>
@@ -188,13 +175,11 @@
               <input id="stderr-include-input" class="filter-input" type="text" placeholder="Include filter" />
               <label class="mode"><input type="radio" name="stderr-include-mode" value="regex" checked />Regex</label>
               <label class="mode"><input type="radio" name="stderr-include-mode" value="exact" />Exact</label>
-              <button class="filter-btn" type="button" id="stderr-include-apply">Filter</button>
             </div>
             <div class="filter-row">
               <input id="stderr-exclude-input" class="filter-input" type="text" placeholder="Exclude filter" />
               <label class="mode"><input type="radio" name="stderr-exclude-mode" value="regex" checked />Regex</label>
               <label class="mode"><input type="radio" name="stderr-exclude-mode" value="exact" />Exact</label>
-              <button class="filter-btn" type="button" id="stderr-exclude-apply">Exclude</button>
             </div>
           </div>
         </div>
@@ -260,13 +245,17 @@
       function wireFilters(stream) {
         const includeInput = document.getElementById(`${stream}-include-input`);
         const excludeInput = document.getElementById(`${stream}-exclude-input`);
-        const includeBtn = document.getElementById(`${stream}-include-apply`);
-        const excludeBtn = document.getElementById(`${stream}-exclude-apply`);
         const radios = document.querySelectorAll(`input[name="${stream}-include-mode"], input[name="${stream}-exclude-mode"]`);
 
+        let timer = null;
         const apply = () => renderStream(stream);
-        includeBtn.addEventListener("click", apply);
-        excludeBtn.addEventListener("click", apply);
+        const applyDebounced = () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(apply, 200);
+        };
+
+        includeInput.addEventListener("input", applyDebounced);
+        excludeInput.addEventListener("input", applyDebounced);
         includeInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") apply(); });
         excludeInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") apply(); });
         radios.forEach((r) => r.addEventListener("change", apply));

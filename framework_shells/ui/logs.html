@@ -79,6 +79,55 @@
       }
       .log-pane-header.stdout { color: var(--success); }
       .log-pane-header.stderr { color: var(--destructive); }
+      .log-pane-title {
+        min-width: 80px;
+      }
+      .filters {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        width: 100%;
+      }
+      .filter-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+      }
+      .filter-input {
+        min-width: 0;
+        flex: 1;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--foreground);
+        padding: 4px 6px;
+        font-family: inherit;
+        font-size: 0.75rem;
+      }
+      .filter-input.invalid {
+        border-color: var(--destructive);
+      }
+      .mode {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        font-size: 0.72rem;
+        color: var(--foreground);
+      }
+      .mode input {
+        margin: 0;
+      }
+      .filter-btn {
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--foreground);
+        padding: 4px 6px;
+        font-size: 0.72rem;
+        cursor: pointer;
+      }
+      .filter-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
       .log-content {
         flex: 1;
         overflow-y: auto;
@@ -111,12 +160,44 @@
 
     <div class="logs-container">
       <div class="log-pane">
-        <div class="log-pane-header stdout">STDOUT</div>
+        <div class="log-pane-header stdout">
+          <div class="log-pane-title">STDOUT</div>
+          <div class="filters">
+            <div class="filter-row">
+              <input id="stdout-include-input" class="filter-input" type="text" placeholder="Include filter" />
+              <label class="mode"><input type="radio" name="stdout-include-mode" value="regex" checked />Regex</label>
+              <label class="mode"><input type="radio" name="stdout-include-mode" value="exact" />Exact</label>
+              <button class="filter-btn" type="button" id="stdout-include-apply">Filter</button>
+            </div>
+            <div class="filter-row">
+              <input id="stdout-exclude-input" class="filter-input" type="text" placeholder="Exclude filter" />
+              <label class="mode"><input type="radio" name="stdout-exclude-mode" value="regex" checked />Regex</label>
+              <label class="mode"><input type="radio" name="stdout-exclude-mode" value="exact" />Exact</label>
+              <button class="filter-btn" type="button" id="stdout-exclude-apply">Exclude</button>
+            </div>
+          </div>
+        </div>
         <pre class="log-content" id="stdout-container"><div class="loading">Connecting...</div></pre>
       </div>
 
       <div class="log-pane">
-        <div class="log-pane-header stderr">STDERR</div>
+        <div class="log-pane-header stderr">
+          <div class="log-pane-title">STDERR</div>
+          <div class="filters">
+            <div class="filter-row">
+              <input id="stderr-include-input" class="filter-input" type="text" placeholder="Include filter" />
+              <label class="mode"><input type="radio" name="stderr-include-mode" value="regex" checked />Regex</label>
+              <label class="mode"><input type="radio" name="stderr-include-mode" value="exact" />Exact</label>
+              <button class="filter-btn" type="button" id="stderr-include-apply">Filter</button>
+            </div>
+            <div class="filter-row">
+              <input id="stderr-exclude-input" class="filter-input" type="text" placeholder="Exclude filter" />
+              <label class="mode"><input type="radio" name="stderr-exclude-mode" value="regex" checked />Regex</label>
+              <label class="mode"><input type="radio" name="stderr-exclude-mode" value="exact" />Exact</label>
+              <button class="filter-btn" type="button" id="stderr-exclude-apply">Exclude</button>
+            </div>
+          </div>
+        </div>
         <pre class="log-content" id="stderr-container"><div class="loading">Connecting...</div></pre>
       </div>
     </div>
@@ -128,6 +209,71 @@
       const stdoutContainer = document.getElementById("stdout-container");
       const stderrContainer = document.getElementById("stderr-container");
       const status = document.getElementById("status");
+      const rawLog = { stdout: "", stderr: "" };
+
+      function compileMatcher(stream, kind, query, mode) {
+        const input = document.getElementById(`${stream}-${kind}-input`);
+        if (input) input.classList.remove("invalid");
+        if (!query) return () => kind === "include";
+        if (mode === "exact") {
+          return (line) => line === query;
+        }
+        try {
+          const re = new RegExp(query);
+          return (line) => re.test(line);
+        } catch (err) {
+          if (input) input.classList.add("invalid");
+          return () => kind !== "include";
+        }
+      }
+
+      function getFilterConfig(stream) {
+        const includeInput = document.getElementById(`${stream}-include-input`);
+        const excludeInput = document.getElementById(`${stream}-exclude-input`);
+        const includeMode = document.querySelector(`input[name="${stream}-include-mode"]:checked`);
+        const excludeMode = document.querySelector(`input[name="${stream}-exclude-mode"]:checked`);
+        return {
+          includeQuery: (includeInput && includeInput.value || "").trim(),
+          excludeQuery: (excludeInput && excludeInput.value || "").trim(),
+          includeMode: includeMode ? includeMode.value : "regex",
+          excludeMode: excludeMode ? excludeMode.value : "regex",
+        };
+      }
+
+      function renderStream(stream) {
+        const container = stream === "stdout" ? stdoutContainer : stderrContainer;
+        const cfg = getFilterConfig(stream);
+        const includeMatch = compileMatcher(stream, "include", cfg.includeQuery, cfg.includeMode);
+        const excludeMatch = compileMatcher(stream, "exclude", cfg.excludeQuery, cfg.excludeMode);
+
+        const allLines = (rawLog[stream] || "").split("\n");
+        const filtered = [];
+        for (const line of allLines) {
+          const includeOk = cfg.includeQuery ? includeMatch(line) : true;
+          const excludeHit = cfg.excludeQuery ? excludeMatch(line) : false;
+          if (includeOk && !excludeHit) filtered.push(line);
+        }
+        container.textContent = filtered.join("\n");
+        container.scrollTop = container.scrollHeight;
+      }
+
+      function wireFilters(stream) {
+        const includeInput = document.getElementById(`${stream}-include-input`);
+        const excludeInput = document.getElementById(`${stream}-exclude-input`);
+        const includeBtn = document.getElementById(`${stream}-include-apply`);
+        const excludeBtn = document.getElementById(`${stream}-exclude-apply`);
+        const radios = document.querySelectorAll(`input[name="${stream}-include-mode"], input[name="${stream}-exclude-mode"]`);
+
+        const apply = () => renderStream(stream);
+        includeBtn.addEventListener("click", apply);
+        excludeBtn.addEventListener("click", apply);
+        includeInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") apply(); });
+        excludeInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") apply(); });
+        radios.forEach((r) => r.addEventListener("change", apply));
+      }
+
+      wireFilters("stdout");
+      wireFilters("stderr");
 
       ws.onopen = () => {
         status.textContent = "Connected";
@@ -139,25 +285,25 @@
           const msg = JSON.parse(e.data);
 
           if (msg.type === "initial") {
-            stdoutContainer.textContent = msg.stdout || "";
-            stderrContainer.textContent = msg.stderr || "";
-            stdoutContainer.scrollTop = stdoutContainer.scrollHeight;
-            stderrContainer.scrollTop = stderrContainer.scrollHeight;
+            rawLog.stdout = msg.stdout || "";
+            rawLog.stderr = msg.stderr || "";
+            renderStream("stdout");
+            renderStream("stderr");
           } else if (msg.type === "reset") {
             if (msg.stream === "stdout") {
-              stdoutContainer.textContent = "";
-              stdoutContainer.scrollTop = stdoutContainer.scrollHeight;
+              rawLog.stdout = "";
+              renderStream("stdout");
             } else if (msg.stream === "stderr") {
-              stderrContainer.textContent = "";
-              stderrContainer.scrollTop = stderrContainer.scrollHeight;
+              rawLog.stderr = "";
+              renderStream("stderr");
             }
           } else if (msg.type === "update") {
             if (msg.stream === "stdout") {
-              stdoutContainer.textContent += msg.data;
-              stdoutContainer.scrollTop = stdoutContainer.scrollHeight;
+              rawLog.stdout += msg.data || "";
+              renderStream("stdout");
             } else if (msg.stream === "stderr") {
-              stderrContainer.textContent += msg.data;
-              stderrContainer.scrollTop = stderrContainer.scrollHeight;
+              rawLog.stderr += msg.data || "";
+              renderStream("stderr");
             }
           } else if (msg.type === "error") {
             stdoutContainer.textContent = msg.message;

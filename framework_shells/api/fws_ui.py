@@ -328,20 +328,22 @@ async def _render_dashboard_html() -> str:
                             parts.append('<div class="children">')
                             parts.append('<div class="children-title">Child Processes (%d)</div>' % len(children))
                             for child in sorted(children, key=lambda p: (p.type, p.pid)):
-                                parts.append('<div class="child-row">')
+                                parts.append('<div class="child-row child-row--proc">')
                                 parts.append('<div class="child-main">')
                                 parts.append('<div class="child-label">%s</div>' % _escape_html(child.label or child.pid))
+                                parts.append('<div class="child-meta-line">')
                                 parts.append(
                                     '<div class="child-meta">PID: %s · %s</div>'
                                     % (_escape_html(child.pid), _escape_html(child.type))
                                 )
-                                parts.append("</div>")
-                                parts.append('<div class="row">')
+                                parts.append('<div class="row child-actions-inline">')
                                 parts.append(
                                     f'<form method="post" action="/fws/action/pid/{_escape_html(child.pid)}/terminate" data-fws-ajax="1">'
                                     f'<button class="btn btn-small btn-danger" type="submit">Kill</button>'
                                     f"</form>"
                                 )
+                                parts.append("</div>")
+                                parts.append("</div>")
                                 parts.append("</div>")
                                 parts.append("</div>")
                             parts.append("</div>")

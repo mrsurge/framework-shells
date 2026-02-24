@@ -137,7 +137,7 @@ body {
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
   padding: 12px 1px;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(9, 12, 26, 0.308);
   margin-top: 10px;
 }
 
@@ -148,8 +148,8 @@ body {
 .group-card {
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 12px 1px;
-  background: rgba(255, 255, 255, 0.02);
+  padding: 12px 5px;
+  background: rgb(9, 10, 28);
   margin-top: 12px;
 }
 
@@ -180,8 +180,8 @@ body {
   margin-top: 10px;
   border: var(--hairline) solid var(--border);
   border-radius: 2px;
-  padding: 10px 1px;
-  background: rgba(0, 0, 0, 0.12);
+  padding: 10px 3px;
+  background: rgba(0, 0, 0, 0.706);
 }
 
 .subgroup-header {

@@ -1,13 +1,13 @@
 :root {
-  --background: hsl(224, 19%, 20%);
+  --background: hsl(224, 59%, 11%);
   --foreground: hsl(213, 31%, 91%);
-  --muted-foreground: rgba(255, 255, 255, 0.65);
+  --muted-foreground: rgb(88, 88, 88);
   --border: hsl(216, 34%, 17%);
   --primary: hsl(217, 91%, 60%);
   --primary-foreground: #06101f;
   --card: hsl(224, 71%, 7%);
-  --secondary: rgba(255, 255, 255, 0.05);
-  --muted: rgba(255, 255, 255, 0.08);
+  --secondary: rgb(46, 46, 46);
+  --muted: rgb(61, 61, 61);
   --success: hsl(142, 76%, 36%);
   --destructive: hsl(0, 84%, 60%);
   --destructive-foreground: #fff;

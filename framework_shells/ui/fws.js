@@ -4,21 +4,21 @@
   const toggleAllBtn = document.getElementById('fws-toggle-all');
   const EXITED_EXPANDED_KEY = 'fws.exited.expanded';
   const EXITED_PAGE_SIZE = 50;
-  const SUBGROUP_EXPANDED_KEY = 'fws.subgroup.expanded';
+  const GROUP_EXPANDED_KEY = 'fws.group.expanded';
 
   const collapseState = new Map();
   let defaultCollapsed = true;
   let exitedVisibleCount = EXITED_PAGE_SIZE;
-  let subgroupExpanded = {};
+  let groupExpanded = {};
 
   try {
-    const raw = localStorage.getItem(SUBGROUP_EXPANDED_KEY);
+    const raw = localStorage.getItem(GROUP_EXPANDED_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') subgroupExpanded = parsed;
+      if (parsed && typeof parsed === 'object') groupExpanded = parsed;
     }
   } catch (err) {
-    subgroupExpanded = {};
+    groupExpanded = {};
   }
 
   async function postForm(form) {
@@ -130,32 +130,32 @@
     updateToggleAllLabel();
   }
 
-  function persistSubgroupExpanded() {
+  function persistGroupExpanded() {
     try {
-      localStorage.setItem(SUBGROUP_EXPANDED_KEY, JSON.stringify(subgroupExpanded));
+      localStorage.setItem(GROUP_EXPANDED_KEY, JSON.stringify(groupExpanded));
     } catch (err) {
       // ignore
     }
   }
 
-  function setSubgroupCollapsed(card, collapsed) {
+  function setGroupCollapsed(card, collapsed) {
     if (!card) return;
     card.classList.toggle('is-collapsed', collapsed);
-    const btn = card.querySelector('[data-subgroup-toggle]');
+    const btn = card.querySelector('[data-group-toggle]');
     if (btn) {
       btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       btn.textContent = collapsed ? 'Expand' : 'Collapse';
     }
   }
 
-  function applySubgroupState(root) {
+  function applyGroupState(root) {
     if (!root) return;
-    const cards = root.querySelectorAll('[data-subgroup-id]');
+    const cards = root.querySelectorAll('[data-group-id]');
     cards.forEach((card) => {
-      const id = card.getAttribute('data-subgroup-id') || '';
+      const id = card.getAttribute('data-group-id') || '';
       if (!id) return;
-      const expanded = subgroupExpanded[id] === 1 || subgroupExpanded[id] === true || subgroupExpanded[id] === '1';
-      setSubgroupCollapsed(card, !expanded);
+      const expanded = groupExpanded[id] === 1 || groupExpanded[id] === true || groupExpanded[id] === '1';
+      setGroupCollapsed(card, !expanded);
     });
   }
 
@@ -234,18 +234,18 @@
       return;
     }
 
-    const subgroupToggle = e.target.closest('[data-subgroup-toggle]');
-    if (subgroupToggle) {
+    const groupToggle = e.target.closest('[data-group-toggle]');
+    if (groupToggle) {
       e.preventDefault();
-      const card = subgroupToggle.closest('[data-subgroup-id]');
+      const card = groupToggle.closest('[data-group-id]');
       if (!card) return;
-      const id = card.getAttribute('data-subgroup-id') || '';
+      const id = card.getAttribute('data-group-id') || '';
       if (!id) return;
       const currentlyCollapsed = card.classList.contains('is-collapsed');
       const expanded = currentlyCollapsed;
-      subgroupExpanded[id] = expanded ? 1 : 0;
-      persistSubgroupExpanded();
-      setSubgroupCollapsed(card, !expanded);
+      groupExpanded[id] = expanded ? 1 : 0;
+      persistGroupExpanded();
+      setGroupCollapsed(card, !expanded);
       return;
     }
 
@@ -315,7 +315,7 @@
             if (content) {
               content.innerHTML = msg.html;
               applyCollapseState(content);
-              applySubgroupState(content);
+              applyGroupState(content);
               applyExitedSectionState();
             }
           }

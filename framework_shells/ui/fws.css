@@ -160,6 +160,10 @@ body {
   align-items: center;
 }
 
+.group-card.is-collapsed .group-content {
+  display: none;
+}
+
 .group-title {
   font-weight: 800;
   min-width: 0;
@@ -189,17 +193,6 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 10px;
-}
-
-.subgroup-right {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.subgroup-card.is-collapsed .subgroup-content {
-  display: none;
 }
 
 .subgroup-title {

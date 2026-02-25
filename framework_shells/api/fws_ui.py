@@ -277,6 +277,7 @@ async def _render_dashboard_html() -> str:
             )
 
             for subgroup in sorted(subgroup_map.keys(), key=_subgroup_sort_key):
+                subgroup_id = f"{umbrella}::{subgroup}"
                 style = _subgroup_style_for(subgroup, subgroup_styles)
                 style_bits: List[str] = []
                 if style.get("bg"):
@@ -286,11 +287,21 @@ async def _render_dashboard_html() -> str:
                 style_attr = f' style="{" ".join(style_bits)}"' if style_bits else ""
 
                 shells_in_group = sorted(subgroup_map.get(subgroup, []), key=_shell_sort_key)
-                parts.append(f'<div class="subgroup-card"{style_attr}>')
+                parts.append(
+                    f'<div class="subgroup-card is-collapsed" data-subgroup-id="{_escape_html(subgroup_id)}"{style_attr}>'
+                )
                 parts.append('<div class="subgroup-header">')
                 parts.append('<div class="subgroup-title">%s</div>' % _escape_html(subgroup))
+                parts.append('<div class="subgroup-right">')
                 parts.append('<div class="subgroup-count muted">(%d)</div>' % len(shells_in_group))
+                parts.append(
+                    f'<button class="btn btn-small" type="button" data-subgroup-toggle="{_escape_html(subgroup_id)}" '
+                    f'aria-expanded="false">Expand</button>'
+                )
                 parts.append("</div>")
+                parts.append("</div>")
+
+                parts.append(f'<div class="subgroup-content" data-subgroup-content="{_escape_html(subgroup_id)}">')
 
                 for s in shells_in_group:
                     sid = str(s.get("id") or "")
@@ -371,6 +382,7 @@ async def _render_dashboard_html() -> str:
                     parts.append("</div>")
                     parts.append("</div>")
 
+                parts.append("</div>")
                 parts.append("</div>")
 
             parts.append("</div>")

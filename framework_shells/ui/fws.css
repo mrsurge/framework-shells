@@ -191,6 +191,17 @@ body {
   gap: 10px;
 }
 
+.subgroup-right {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.subgroup-card.is-collapsed .subgroup-content {
+  display: none;
+}
+
 .subgroup-title {
   font-size: 0.85rem;
   font-weight: 700;

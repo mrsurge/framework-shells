@@ -4,10 +4,22 @@
   const toggleAllBtn = document.getElementById('fws-toggle-all');
   const EXITED_EXPANDED_KEY = 'fws.exited.expanded';
   const EXITED_PAGE_SIZE = 50;
+  const SUBGROUP_EXPANDED_KEY = 'fws.subgroup.expanded';
 
   const collapseState = new Map();
   let defaultCollapsed = true;
   let exitedVisibleCount = EXITED_PAGE_SIZE;
+  let subgroupExpanded = {};
+
+  try {
+    const raw = localStorage.getItem(SUBGROUP_EXPANDED_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') subgroupExpanded = parsed;
+    }
+  } catch (err) {
+    subgroupExpanded = {};
+  }
 
   async function postForm(form) {
     const method = (form.getAttribute('method') || 'post').toUpperCase();
@@ -118,6 +130,35 @@
     updateToggleAllLabel();
   }
 
+  function persistSubgroupExpanded() {
+    try {
+      localStorage.setItem(SUBGROUP_EXPANDED_KEY, JSON.stringify(subgroupExpanded));
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  function setSubgroupCollapsed(card, collapsed) {
+    if (!card) return;
+    card.classList.toggle('is-collapsed', collapsed);
+    const btn = card.querySelector('[data-subgroup-toggle]');
+    if (btn) {
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      btn.textContent = collapsed ? 'Expand' : 'Collapse';
+    }
+  }
+
+  function applySubgroupState(root) {
+    if (!root) return;
+    const cards = root.querySelectorAll('[data-subgroup-id]');
+    cards.forEach((card) => {
+      const id = card.getAttribute('data-subgroup-id') || '';
+      if (!id) return;
+      const expanded = subgroupExpanded[id] === 1 || subgroupExpanded[id] === true || subgroupExpanded[id] === '1';
+      setSubgroupCollapsed(card, !expanded);
+    });
+  }
+
   function getExitedExpandedDefault() {
     try {
       return localStorage.getItem(EXITED_EXPANDED_KEY) !== '0';
@@ -193,6 +234,21 @@
       return;
     }
 
+    const subgroupToggle = e.target.closest('[data-subgroup-toggle]');
+    if (subgroupToggle) {
+      e.preventDefault();
+      const card = subgroupToggle.closest('[data-subgroup-id]');
+      if (!card) return;
+      const id = card.getAttribute('data-subgroup-id') || '';
+      if (!id) return;
+      const currentlyCollapsed = card.classList.contains('is-collapsed');
+      const expanded = currentlyCollapsed;
+      subgroupExpanded[id] = expanded ? 1 : 0;
+      persistSubgroupExpanded();
+      setSubgroupCollapsed(card, !expanded);
+      return;
+    }
+
     if (toggleAllBtn && e.target.closest('#fws-toggle-all')) {
       e.preventDefault();
       const shouldCollapse = toggleAllBtn.textContent === 'Collapse All';
@@ -259,6 +315,7 @@
             if (content) {
               content.innerHTML = msg.html;
               applyCollapseState(content);
+              applySubgroupState(content);
               applyExitedSectionState();
             }
           }

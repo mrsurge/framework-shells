@@ -298,7 +298,17 @@ async def run_async(args):
 
         shells = await manager.list_shells()
         if not getattr(args, "all", False):
-            shells = [s for s in shells if (getattr(s, "status", None) or "") == "running"]
+            live: List[Any] = []
+            for s in shells:
+                if (getattr(s, "status", None) or "") != "running":
+                    continue
+                pid = getattr(s, "pid", None)
+                if not pid:
+                    continue
+                if not await manager._is_pid_alive(pid):  # type: ignore[attr-defined]
+                    continue
+                live.append(s)
+            shells = live
 
         described: List[Dict[str, Any]] = []
         for rec in shells:
@@ -315,7 +325,11 @@ async def run_async(args):
             if proc.parent_pid is None:
                 continue
             try:
-                children_by_parent.setdefault(int(proc.parent_pid), []).append(int(pid))
+                ppid = int(proc.parent_pid)
+                cpid = int(pid)
+                if ppid == cpid:
+                    continue
+                children_by_parent.setdefault(ppid, []).append(cpid)
             except Exception:
                 continue
 
@@ -328,7 +342,10 @@ async def run_async(args):
                 return "pty"
             return "proc"
 
-        def render_node(pid: int, *, indent: str, shell_pid_set: set[int]) -> None:
+        def render_node(pid: int, *, indent: str, shell_pid_set: set[int], visited: set[int]) -> None:
+            if pid in visited:
+                return
+            visited.add(pid)
             proc = processes.get(pid)
             if not proc:
                 return
@@ -339,12 +356,22 @@ async def run_async(args):
 
             kids = children_by_parent.get(pid, [])
             for child_pid in sorted(kids):
+                if child_pid == pid:
+                    continue
                 # Avoid duplicating shell roots under other shells in the listing.
                 if child_pid in shell_pid_set and child_pid != pid:
                     continue
-                render_node(child_pid, indent=indent + "  ", shell_pid_set=shell_pid_set)
+                render_node(child_pid, indent=indent + "  ", shell_pid_set=shell_pid_set, visited=visited)
 
-        shell_pid_set = {int(x.get("pid")) for x in described if x.get("pid")}
+        shell_pid_set: set[int] = set()
+        for x in described:
+            pid = x.get("pid")
+            if not pid:
+                continue
+            try:
+                shell_pid_set.add(int(pid))
+            except Exception:
+                continue
         for info in sorted(described, key=lambda x: (str(x.get("label") or ""), str(x.get("id") or ""))):
             sid = str(info.get("id") or "")
             label = str(info.get("label") or sid)
@@ -354,7 +381,7 @@ async def run_async(args):
                 print(f"{sid}  {label}  status={status}  pid=-  backend={backend_for(info)}")
                 continue
             print(f"{sid}  {label}  status={status}  pid={pid}  backend={backend_for(info)}")
-            render_node(int(pid), indent="  ", shell_pid_set=shell_pid_set)
+            render_node(int(pid), indent="  ", shell_pid_set=shell_pid_set, visited=set())
         return
 
     if getattr(args, "command", None) == "terminate":

@@ -37,6 +37,7 @@ from .process_snapshot import (
     ProcessSnapshot,
     collect_external_processes,
 )
+from .shutdown import ShutdownPolicy, shutdown_snapshot
 
 try:
     import psutil  # type: ignore
@@ -157,6 +158,36 @@ class FrameworkShellManager:
             )
 
         return ProcessSnapshot(captured_at=time.time(), processes=processes)
+
+    async def shutdown_app_group(self, app_id: str) -> Dict[str, Any]:
+        """UI-equivalent shutdown for an app/group id.
+
+        Mirrors `/fws/action/app/{app_id}/shutdown` behavior: find running shells
+        with matching `derive_app_id()`, snapshot descendants, then shutdown that
+        subtree via `root_pids`.
+        """
+        app_id = str(app_id or "").strip()
+        if not app_id:
+            return {"ok": True, "data": {"root_pids": [], "stats": {}, "note": "empty app_id"}}
+
+        shells = await self.list_shells()
+        targets = [
+            s
+            for s in shells
+            if (s.derive_app_id() or "") == app_id and s.pid and s.status == "running"
+        ]
+        root_pids = [int(s.pid) for s in targets if s.pid]
+        if not root_pids:
+            return {"ok": True, "data": {"root_pids": [], "stats": {}, "note": "no matching running shells"}}
+
+        snapshot = await self.build_process_snapshot(shells=shells, include_procfs_descendants=True)
+        stats = await shutdown_snapshot(
+            snapshot,
+            manager=self,
+            policy=ShutdownPolicy(types_last=[]),
+            root_pids=root_pids,
+        )
+        return {"ok": True, "data": {"root_pids": root_pids, "stats": stats}}
 
     def _fire_hook(self, result: Any) -> None:
         """Best-effort hook execution; never blocks core flow."""

@@ -169,6 +169,15 @@ async def purge_exited_shells(
             errors.append(f"{rec.id}: {exc}")
     return {"ok": True, "data": {"purged": purged, "errors": errors}}
 
+@router.post("/api/framework_shells/app/{app_id}/shutdown")
+async def shutdown_app_group(
+    app_id: str,
+    mgr: FrameworkShellManager = Depends(get_manager_dep),
+    _: None = Depends(require_auth),
+):
+    """UI-equivalent group shutdown for downstream consumers."""
+    return await mgr.shutdown_app_group(app_id)
+
 
 from fastapi.responses import FileResponse
 

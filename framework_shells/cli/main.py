@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 import os
 import sys
 import shutil
@@ -198,6 +199,11 @@ def main():
     down_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
     down_parser.add_argument("--grace", type=float, default=2.0, help="SIGTERM wait time in seconds for --tree (default: 2.0)")
     down_parser.add_argument("--kill-wait", type=float, default=2.0, help="SIGKILL wait time in seconds for --tree (default: 2.0)")
+
+    # fs shutdown-group <app_id>
+    sg_parser = subparsers.add_parser("shutdown-group", help="Shutdown an app/group (UI-equivalent)")
+    sg_parser.add_argument("app_id", help="App/group id (matches derive_app_id())")
+    sg_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # fs terminate <id|label>
     term_parser = subparsers.add_parser("terminate", help="Terminate a single shell")
@@ -476,6 +482,20 @@ async def run_async(args):
             print(f"Terminating {s.id}...")
             await manager.terminate_shell(s.id, force=bool(getattr(args, "force", False)))
             
+    elif args.command == "shutdown-group":
+        app_id = str(getattr(args, "app_id", "") or "").strip()
+        if not app_id:
+            print("Missing app_id")
+            sys.exit(1)
+        result = await manager.shutdown_app_group(app_id)
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(result, sort_keys=True))
+            return
+        data = result.get("data") if isinstance(result, dict) else None
+        root_pids = (data or {}).get("root_pids") if isinstance(data, dict) else None
+        print(f"Shutdown group {app_id} (root_pids={root_pids or []})")
+        return
+
     elif args.command == "attach":
         # Check specific shell
         record = await manager.find_shell_by_label(args.id) or await manager.get_shell(args.id)

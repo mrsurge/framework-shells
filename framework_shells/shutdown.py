@@ -4,10 +4,12 @@ import os
 import signal
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, TYPE_CHECKING
 
-from .manager import FrameworkShellManager
 from .process_snapshot import ProcessRecord, ProcessSnapshot
+
+if TYPE_CHECKING:
+    from .manager import FrameworkShellManager
 
 
 @dataclass(frozen=True)
@@ -206,7 +208,7 @@ async def execute_shutdown_plan(
 async def shutdown_snapshot(
     snapshot: ProcessSnapshot,
     *,
-    manager: Optional[FrameworkShellManager] = None,
+    manager: Optional["FrameworkShellManager"] = None,
     policy: Optional[ShutdownPolicy] = None,
     root_pids: Optional[Iterable[int]] = None,
     exclude_pids: Optional[Set[int]] = None,

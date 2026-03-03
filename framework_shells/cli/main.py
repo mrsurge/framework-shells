@@ -190,6 +190,7 @@ def main():
     # fs list
     list_parser = subparsers.add_parser("list", help="List running shells")
     list_parser.add_argument("--stats", action="store_true", help="Include CPU/RSS stats (best-effort)")
+    list_parser.add_argument("--all", action="store_true", help="Include exited shells too")
     
     # fs down
     down_parser = subparsers.add_parser("down", help="Terminate shells")
@@ -415,6 +416,8 @@ async def run_async(args):
 
     elif args.command == "list":
         shells = await manager.list_shells()
+        if not bool(getattr(args, "all", False)):
+            shells = [s for s in shells if (getattr(s, "status", None) or "") == "running" and getattr(s, "pid", None)]
         show_stats = bool(getattr(args, "stats", False))
         if show_stats:
             print(f"{'ID':<20} {'SPEC':<14} {'LABEL':<15} {'STATUS':<10} {'PID':<6} {'CPU':>6} {'RSS':>9} {'BACKEND'}")

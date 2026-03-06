@@ -203,8 +203,71 @@ def _fmt_exited_timestamp(ts: float) -> str:
     return dt.strftime("%m/%d/%Y %H:%M")
 
 
+def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[str, Dict[str, str]]) -> str:
+    parts: List[str] = []
+    if not exited:
+        parts.append('<div class="shell-card"><div class="shell-meta">No exited shells.</div></div>')
+        return "\n".join(parts)
+
+    for s in sorted(exited, key=_exited_timestamp, reverse=True):
+        sid = str(s.get("id") or "")
+        label = str(s.get("label") or sid)
+        status = str(s.get("status") or "exited")
+        exit_code = s.get("exit_code")
+        exited_ts = _exited_timestamp(s)
+        exited_stamp = _fmt_exited_timestamp(exited_ts)
+        subgroups = s.get("subgroups") if isinstance(s.get("subgroups"), list) else []
+        style = _card_style_for_subgroups([str(x) for x in subgroups], subgroup_styles)
+        style_bits: List[str] = []
+        if style.get("bg"):
+            style_bits.append(f"background: {style['bg']};")
+        if style.get("border"):
+            style_bits.append(f"border-color: {style['border']}; border-left: 4px solid {style['border']};")
+        style_attr = f' style="{" ".join(style_bits)}"' if style_bits else ""
+        meta = status
+        if exit_code is not None:
+            meta += f" · exit: {exit_code}"
+        cmd = s.get("command") if isinstance(s.get("command"), list) else []
+        command_text = " ".join(map(str, cmd))
+        stdout_log = str(s.get("stdout_log") or "")
+        stderr_log = str(s.get("stderr_log") or "")
+
+        parts.append(f'<div class="exited-item" data-exited-item="1" data-exited-ts="{_escape_html(exited_ts)}">')
+        parts.append('<div class="exited-ts">%s</div>' % _escape_html(exited_stamp))
+        parts.append(f'<div class="shell-card shell-entry is-collapsed"{style_attr} data-shell-id="{_escape_html(sid)}">')
+        parts.append('<div class="shell-header">')
+        parts.append('<div class="shell-title">%s</div>' % _escape_html(label))
+        parts.append('<div class="shell-actions">')
+        parts.append(f'<button class="btn btn-small" type="button" data-collapse-toggle="{_escape_html(sid)}" aria-expanded="false">Expand</button>')
+        parts.append(
+            f'<button class="btn btn-small" type="button" data-log-open="{_escape_html(sid)}" '
+            f'data-log-label="{_escape_html(label)}">Logs</button>'
+        )
+        parts.append(
+            f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/purge" data-fws-ajax="1">'
+            f'<button class="btn btn-small" type="submit">Purge</button>'
+            f"</form>"
+        )
+        parts.append("</div>")
+        parts.append("</div>")
+        parts.append(f'<div class="shell-details" data-collapse-content="{_escape_html(sid)}">')
+        parts.append(_render_copy_field("Status", meta))
+        parts.append(_render_copy_field("ID", sid))
+        parts.append(_render_copy_field("Command", command_text, extra_classes="copy-field--multiline"))
+        parts.append(_render_copy_field("stdout log", stdout_log, extra_classes="copy-field--path"))
+        parts.append(_render_copy_field("stderr log", stderr_log, extra_classes="copy-field--path"))
+        pills = _render_subgroup_pills(subgroups, subgroup_styles)
+        if pills:
+            parts.append(pills)
+        parts.append("</div>")
+        parts.append("</div>")
+        parts.append("</div>")
+    return "\n".join(parts)
+
+
 async def _render_dashboard_html() -> str:
     mgr = await get_manager()
+    await mgr.prune_exited_shells(max_count=50)
     shells = await mgr.list_shells()
     described: List[Dict[str, Any]] = []
     for rec in shells:
@@ -326,7 +389,10 @@ async def _render_dashboard_html() -> str:
                     parts.append('<div class="shell-title">%s</div>' % _escape_html(label))
                     parts.append('<div class="shell-actions">')
                     parts.append(f'<button class="btn btn-small" type="button" data-collapse-toggle="{_escape_html(sid)}" aria-expanded="false">Expand</button>')
-                    parts.append(f'<a class="btn btn-small" href="/fws/logs/{_escape_html(sid)}">Logs</a>')
+                    parts.append(
+                        f'<button class="btn btn-small" type="button" data-log-open="{_escape_html(sid)}" '
+                        f'data-log-label="{_escape_html(label)}">Logs</button>'
+                    )
                     parts.append(
                         f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/terminate" data-fws-ajax="1">'
                         f'<button class="btn btn-small btn-danger" type="submit">Stop</button>'
@@ -388,7 +454,7 @@ async def _render_dashboard_html() -> str:
     parts.append('<div class="section-title">')
     parts.append('Exited <span class="muted">(%d)</span>' % len(exited))
     parts.append('<div class="shell-actions">')
-    parts.append('<button class="btn btn-small" type="button" id="fws-exited-toggle" aria-expanded="true">Collapse Exited</button>')
+    parts.append('<button class="btn btn-small" type="button" id="fws-exited-toggle" aria-expanded="false">Expand Exited</button>')
     if exited:
         parts.append(
             '<form method="post" action="/fws/action/exited/purge" data-fws-ajax="1" '
@@ -398,63 +464,10 @@ async def _render_dashboard_html() -> str:
         )
     parts.append("</div>")
     parts.append("</div>")
-    parts.append('<div class="exited-content" id="fws-exited-content">')
-    if not exited:
-        parts.append('<div class="shell-card"><div class="shell-meta">No exited shells.</div></div>')
-    else:
-        for s in sorted(exited, key=_exited_timestamp, reverse=True):
-            sid = str(s.get("id") or "")
-            label = str(s.get("label") or sid)
-            status = str(s.get("status") or "exited")
-            exit_code = s.get("exit_code")
-            exited_ts = _exited_timestamp(s)
-            exited_stamp = _fmt_exited_timestamp(exited_ts)
-            subgroups = s.get("subgroups") if isinstance(s.get("subgroups"), list) else []
-            style = _card_style_for_subgroups([str(x) for x in subgroups], subgroup_styles)
-            style_bits: List[str] = []
-            if style.get("bg"):
-                style_bits.append(f"background: {style['bg']};")
-            if style.get("border"):
-                style_bits.append(f"border-color: {style['border']}; border-left: 4px solid {style['border']};")
-            style_attr = f' style="{" ".join(style_bits)}"' if style_bits else ""
-            meta = status
-            if exit_code is not None:
-                meta += f" · exit: {exit_code}"
-            cmd = s.get("command") if isinstance(s.get("command"), list) else []
-            command_text = " ".join(map(str, cmd))
-            stdout_log = str(s.get("stdout_log") or "")
-            stderr_log = str(s.get("stderr_log") or "")
-
-            parts.append(f'<div class="exited-item" data-exited-item="1" data-exited-ts="{_escape_html(exited_ts)}">')
-            parts.append('<div class="exited-ts">%s</div>' % _escape_html(exited_stamp))
-            parts.append(f'<div class="shell-card shell-entry is-collapsed"{style_attr} data-shell-id="{_escape_html(sid)}">')
-            parts.append('<div class="shell-header">')
-            parts.append('<div class="shell-title">%s</div>' % _escape_html(label))
-            parts.append('<div class="shell-actions">')
-            parts.append(f'<button class="btn btn-small" type="button" data-collapse-toggle="{_escape_html(sid)}" aria-expanded="false">Expand</button>')
-            parts.append(f'<a class="btn btn-small" href="/fws/logs/{_escape_html(sid)}">Logs</a>')
-            parts.append(
-                f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/purge" data-fws-ajax="1">'
-                f'<button class="btn btn-small" type="submit">Purge</button>'
-                f"</form>"
-            )
-            parts.append("</div>")
-            parts.append("</div>")
-            parts.append(f'<div class="shell-details" data-collapse-content="{_escape_html(sid)}">')
-            parts.append(_render_copy_field("Status", meta))
-            parts.append(_render_copy_field("ID", sid))
-            parts.append(_render_copy_field("Command", command_text, extra_classes="copy-field--multiline"))
-            parts.append(_render_copy_field("stdout log", stdout_log, extra_classes="copy-field--path"))
-            parts.append(_render_copy_field("stderr log", stderr_log, extra_classes="copy-field--path"))
-            pills = _render_subgroup_pills(subgroups, subgroup_styles)
-            if pills:
-                parts.append(pills)
-            parts.append("</div>")
-            parts.append("</div>")
-            parts.append("</div>")
-        parts.append('<div class="row exited-more-row">')
-        parts.append('<button class="btn btn-small" type="button" id="fws-exited-more">More</button>')
-        parts.append("</div>")
+    parts.append(
+        '<div class="exited-content is-collapsed" id="fws-exited-content" '
+        f'data-loaded="0" data-count="{_escape_html(len(exited))}"></div>'
+    )
     parts.append("</div>")
     parts.append("</div>")
 
@@ -477,6 +490,22 @@ async def fws_index() -> FileResponse:
             "Expires": "0",
         },
     )
+
+
+@router.get("/fws/exited", response_class=HTMLResponse)
+async def fws_exited_fragment() -> HTMLResponse:
+    mgr = await get_manager()
+    await mgr.prune_exited_shells(max_count=50)
+    shells = await mgr.list_shells()
+    described: List[Dict[str, Any]] = []
+    for rec in shells:
+        try:
+            described.append(await mgr.describe(rec))
+        except Exception:
+            described.append(rec.to_payload())
+    subgroup_styles = _collect_subgroup_styles(described)
+    exited = [s for s in described if not _is_shell_live(s)]
+    return HTMLResponse(content=_render_exited_content(exited, subgroup_styles))
 
 
 @router.get("/fws/static/{path:path}")
@@ -653,10 +682,7 @@ async def fws_ws(websocket: WebSocket):
 
 @router.get("/fws/logs/{shell_id}", response_class=HTMLResponse)
 async def fws_logs(shell_id: str):
-    template_path = _UI_DIR / "logs.html"
-    async with aiofiles.open(template_path, "r", encoding="utf-8", errors="replace") as f:
-        content = await f.read()
-    return HTMLResponse(content=content.replace("{{ shell_id }}", shell_id))
+    return RedirectResponse(url=f"/fws/?log={shell_id}", status_code=307)
 
 
 @router.websocket("/ws/fws/logs/{shell_id}")

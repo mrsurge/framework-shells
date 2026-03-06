@@ -179,6 +179,50 @@ async def shutdown_app_group(
     return await mgr.shutdown_app_group(app_id)
 
 
+@router.get("/api/framework_shells/logs/{shell_id}/tail")
+async def get_log_tail(
+    shell_id: str,
+    stream: str = Query("both"),
+    lines: int = Query(200, ge=0, le=5000),
+    mgr: FrameworkShellManager = Depends(get_manager_dep),
+):
+    try:
+        data = await mgr.get_log_tail(shell_id, stream=stream, lines=lines)
+    except KeyError:
+        raise HTTPException(404, "Shell not found")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "data": data}
+
+
+@router.get("/api/framework_shells/logs/{shell_id}/search")
+async def search_logs(
+    shell_id: str,
+    query: str = Query(..., min_length=1),
+    stream: str = Query("both"),
+    limit: int = Query(100, ge=1, le=1000),
+    regex: bool = Query(False),
+    ignore_case: bool = Query(False),
+    mgr: FrameworkShellManager = Depends(get_manager_dep),
+):
+    try:
+        data = await mgr.search_logs(
+            shell_id,
+            stream=stream,
+            query=query,
+            limit=limit,
+            regex=regex,
+            ignore_case=ignore_case,
+        )
+    except KeyError:
+        raise HTTPException(404, "Shell not found")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "data": data}
+
+
 from fastapi.responses import FileResponse
 
 @router.get("/api/framework_shells/{shell_id}/replay")

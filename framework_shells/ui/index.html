@@ -45,6 +45,65 @@
       <div class="fws-loading">Loading...</div>
     </div>
 
+    <div class="log-drawer" id="fws-log-drawer" aria-hidden="true">
+      <div class="log-drawer-header">
+        <div class="log-drawer-header-left">
+          <button type="button" class="btn btn-secondary btn-small" id="fws-log-back">Back</button>
+          <div>
+            <div class="log-drawer-title" id="fws-log-title">Shell Logs</div>
+            <div class="log-drawer-subtitle" id="fws-log-subtitle"></div>
+          </div>
+        </div>
+        <div class="log-drawer-header-right">
+          <label class="log-pause-toggle">
+            <input type="checkbox" id="fws-log-pause" />
+            <span>Pause</span>
+          </label>
+          <div class="fws-status disconnected" id="fws-log-status">Disconnected</div>
+        </div>
+      </div>
+
+      <div class="log-drawer-body">
+        <div class="log-pane">
+          <div class="log-pane-header stdout">
+            <div class="log-pane-title">STDOUT</div>
+            <div class="filters">
+              <div class="filter-row">
+                <input id="stdout-include-input" class="filter-input" type="text" placeholder="Include filter" />
+                <label class="mode"><input type="radio" name="stdout-include-mode" value="regex" checked />Regex</label>
+                <label class="mode"><input type="radio" name="stdout-include-mode" value="exact" />Exact</label>
+              </div>
+              <div class="filter-row">
+                <input id="stdout-exclude-input" class="filter-input" type="text" placeholder="Exclude filter" />
+                <label class="mode"><input type="radio" name="stdout-exclude-mode" value="regex" checked />Regex</label>
+                <label class="mode"><input type="radio" name="stdout-exclude-mode" value="exact" />Exact</label>
+              </div>
+            </div>
+          </div>
+          <div class="log-content" id="stdout-container"><div class="loading">Select a shell log.</div></div>
+        </div>
+
+        <div class="log-pane">
+          <div class="log-pane-header stderr">
+            <div class="log-pane-title">STDERR</div>
+            <div class="filters">
+              <div class="filter-row">
+                <input id="stderr-include-input" class="filter-input" type="text" placeholder="Include filter" />
+                <label class="mode"><input type="radio" name="stderr-include-mode" value="regex" checked />Regex</label>
+                <label class="mode"><input type="radio" name="stderr-include-mode" value="exact" />Exact</label>
+              </div>
+              <div class="filter-row">
+                <input id="stderr-exclude-input" class="filter-input" type="text" placeholder="Exclude filter" />
+                <label class="mode"><input type="radio" name="stderr-exclude-mode" value="regex" checked />Regex</label>
+                <label class="mode"><input type="radio" name="stderr-exclude-mode" value="exact" />Exact</label>
+              </div>
+            </div>
+          </div>
+          <div class="log-content" id="stderr-container"><div class="loading">Select a shell log.</div></div>
+        </div>
+      </div>
+    </div>
+
     <script src="/fws/static/fws.js"></script>
   </body>
 </html>

@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -773,6 +774,7 @@ class FrameworkShellManager:
         record.exit_code = exit_code
         record.updated_at = time.time()
         await self._save_record(record)
+        await self._prune_exited_shells_locked(max_count=self.MAX_EXITED_SHELLS)
         await self._emit(EventType.SHELL_EXITED, record, exit_code=exit_code)
         self._run_hook_exited(record, last_pid)
 
@@ -1070,6 +1072,7 @@ class FrameworkShellManager:
     # Describe / stats
 
     LOG_TAIL_BYTES = 4096
+    MAX_EXITED_SHELLS = 50
 
     async def describe(
         self,
@@ -1135,6 +1138,183 @@ class FrameworkShellManager:
             data = await fh.read()
             decoded_data = data.decode("utf-8", errors="replace")
         return decoded_data.splitlines(keepends=True)[-lines:]
+
+    async def _prune_exited_shells_locked(self, *, max_count: int = 50) -> Dict[str, Any]:
+        records: List[ShellRecord] = []
+        async for record in self._aiter_records():
+            records.append(record)
+
+        exited = [rec for rec in records if (getattr(rec, "status", None) or "") == "exited"]
+        if max_count < 0:
+            max_count = 0
+        if len(exited) <= max_count:
+            return {"kept": len(exited), "purged": 0, "removed_ids": []}
+
+        exited.sort(key=lambda rec: (float(getattr(rec, "updated_at", 0) or 0), float(getattr(rec, "created_at", 0) or 0)))
+        to_remove = exited[:-max_count]
+        removed_ids: List[str] = []
+
+        for rec in to_remove:
+            meta_dir = self.metadata_dir / rec.id
+            if meta_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, meta_dir, ignore_errors=True)
+            for log_path in [rec.stdout_log, rec.stderr_log]:
+                try:
+                    path = Path(log_path)
+                    if path.exists():
+                        await asyncio.to_thread(path.unlink)
+                except Exception:
+                    pass
+            removed_ids.append(rec.id)
+            try:
+                await self._emit(EventType.SHELL_REMOVED, rec)
+            except Exception:
+                pass
+
+        return {"kept": max_count, "purged": len(removed_ids), "removed_ids": removed_ids}
+
+    async def prune_exited_shells(self, *, max_count: int = 50) -> Dict[str, Any]:
+        """Keep only the newest exited shell records, removing older metadata/logs."""
+        async with self._get_lock():
+            return await self._prune_exited_shells_locked(max_count=max_count)
+
+    async def _log_stream_payload(self, path: Path, *, lines: Optional[List[str]] = None) -> Dict[str, Any]:
+        exists = path.exists()
+        stat = await asyncio.to_thread(path.stat) if exists else None
+        mtime = float(stat.st_mtime) if stat else None
+        size = int(stat.st_size) if stat else 0
+        age_seconds = max(0.0, time.time() - mtime) if mtime is not None else None
+        payload: Dict[str, Any] = {
+            "path": str(path),
+            "mtime": mtime,
+            "size": size,
+            "age_seconds": age_seconds,
+        }
+        if lines is not None:
+            payload["lines"] = lines
+        return payload
+
+    async def get_log_tail(
+        self,
+        shell_id: str,
+        *,
+        stream: str = "both",
+        lines: int = 200,
+    ) -> Dict[str, Any]:
+        rec = await self.get_shell(shell_id)
+        if not rec:
+            raise KeyError(f"Shell not found: {shell_id}")
+
+        stream_name = (stream or "both").strip().lower()
+        if stream_name not in {"stdout", "stderr", "both"}:
+            raise ValueError(f"Invalid stream: {stream}")
+
+        result: Dict[str, Any] = {
+            "shell_id": shell_id,
+            "created_at": rec.created_at,
+            "updated_at": rec.updated_at,
+            "status": rec.status,
+        }
+        if stream_name in {"stdout", "both"}:
+            stdout_path = Path(rec.stdout_log)
+            stdout_lines = await self._read_log_tail(stdout_path, max(0, int(lines)))
+            result["stdout"] = await self._log_stream_payload(
+                stdout_path,
+                lines=[line.rstrip("\n") for line in stdout_lines],
+            )
+        if stream_name in {"stderr", "both"}:
+            stderr_path = Path(rec.stderr_log)
+            stderr_lines = await self._read_log_tail(stderr_path, max(0, int(lines)))
+            result["stderr"] = await self._log_stream_payload(
+                stderr_path,
+                lines=[line.rstrip("\n") for line in stderr_lines],
+            )
+        return result
+
+    async def _search_log_file(
+        self,
+        path: Path,
+        *,
+        query: str,
+        limit: int,
+        regex: bool,
+        ignore_case: bool,
+    ) -> List[Dict[str, Any]]:
+        if not query or limit <= 0 or not path.exists():
+            return []
+
+        flags = re.IGNORECASE if ignore_case else 0
+        matcher = re.compile(query, flags) if regex else None
+        matches: List[Dict[str, Any]] = []
+
+        async with aiofiles.open(path, "r", encoding="utf-8", errors="replace") as fh:
+            line_number = 0
+            async for line in fh:
+                line_number += 1
+                text = line.rstrip("\n")
+                haystack = text.lower() if ignore_case and not regex else text
+                needle = query.lower() if ignore_case and not regex else query
+                matched = bool(matcher.search(text)) if matcher else (needle in haystack)
+                if not matched:
+                    continue
+                matches.append({"line_number": line_number, "text": text})
+                if len(matches) >= limit:
+                    break
+        return matches
+
+    async def search_logs(
+        self,
+        shell_id: str,
+        *,
+        stream: str = "both",
+        query: str,
+        limit: int = 100,
+        regex: bool = False,
+        ignore_case: bool = False,
+    ) -> Dict[str, Any]:
+        rec = await self.get_shell(shell_id)
+        if not rec:
+            raise KeyError(f"Shell not found: {shell_id}")
+
+        stream_name = (stream or "both").strip().lower()
+        if stream_name not in {"stdout", "stderr", "both"}:
+            raise ValueError(f"Invalid stream: {stream}")
+
+        clamped_limit = max(1, min(int(limit), 1000))
+        result: Dict[str, Any] = {
+            "shell_id": shell_id,
+            "created_at": rec.created_at,
+            "updated_at": rec.updated_at,
+            "status": rec.status,
+            "stream": stream_name,
+            "query": query,
+            "regex": bool(regex),
+            "ignore_case": bool(ignore_case),
+        }
+
+        if stream_name in {"stdout", "both"}:
+            stdout_path = Path(rec.stdout_log)
+            result["stdout"] = await self._log_stream_payload(stdout_path)
+            result["stdout"]["matches"] = await self._search_log_file(
+                stdout_path,
+                query=query,
+                limit=clamped_limit,
+                regex=regex,
+                ignore_case=ignore_case,
+            )
+
+        if stream_name in {"stderr", "both"}:
+            stderr_path = Path(rec.stderr_log)
+            result["stderr"] = await self._log_stream_payload(stderr_path)
+            result["stderr"]["matches"] = await self._search_log_file(
+                stderr_path,
+                query=query,
+                limit=clamped_limit,
+                regex=regex,
+                ignore_case=ignore_case,
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # PTY / pipe I/O methods

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import mimetypes
 import os
 import re
@@ -203,6 +204,16 @@ def _fmt_exited_timestamp(ts: float) -> str:
     return dt.strftime("%m/%d/%Y %H:%M")
 
 
+def _exited_token(exited: List[Dict[str, Any]]) -> str:
+    digest = hashlib.sha1()
+    for item in sorted(exited, key=_exited_timestamp, reverse=True):
+        digest.update(str(item.get("id") or "").encode("utf-8", errors="replace"))
+        digest.update(b"|")
+        digest.update(str(item.get("updated_at") or item.get("created_at") or "").encode("utf-8", errors="replace"))
+        digest.update(b";")
+    return digest.hexdigest()
+
+
 def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[str, Dict[str, str]]) -> str:
     parts: List[str] = []
     if not exited:
@@ -290,6 +301,7 @@ async def _render_dashboard_html() -> str:
 
     running = [s for s in described if _is_shell_live(s)]
     exited = [s for s in described if not _is_shell_live(s)]
+    exited_token = _exited_token(exited)
     subgroup_styles = _collect_subgroup_styles(described)
 
     parts: List[str] = []
@@ -466,7 +478,7 @@ async def _render_dashboard_html() -> str:
     parts.append("</div>")
     parts.append(
         '<div class="exited-content is-collapsed" id="fws-exited-content" '
-        f'data-loaded="0" data-count="{_escape_html(len(exited))}"></div>'
+        f'data-loaded="0" data-count="{_escape_html(len(exited))}" data-token="{_escape_html(exited_token)}"></div>'
     )
     parts.append("</div>")
     parts.append("</div>")
@@ -663,12 +675,8 @@ async def fws_ws(websocket: WebSocket):
     try:
         await send_snapshot()
         while True:
-            try:
-                _ = await asyncio.wait_for(q.get(), timeout=5.0)
-                await send_snapshot()
-            except asyncio.TimeoutError:
-                # periodic refresh to keep UI correct even if events are missed
-                await send_snapshot()
+            _ = await q.get()
+            await send_snapshot()
     except WebSocketDisconnect:
         pass
     except Exception:

@@ -11,6 +11,7 @@
   const EXITED_EXPANDED_KEY = 'fws.exited.expanded';
   const GROUP_EXPANDED_KEY = 'fws.group.expanded';
   const collapseState = new Map();
+  const exitedCache = { html: '', token: '', loading: null };
   let defaultCollapsed = true;
   let groupExpanded = {};
 
@@ -217,24 +218,39 @@
     if (!content) return;
     const exitedContent = content.querySelector('#fws-exited-content');
     if (!exitedContent) return;
+    const token = exitedContent.getAttribute('data-token') || '';
     if (!forceReload && exitedContent.getAttribute('data-loaded') === '1') return;
-    exitedContent.innerHTML = '<div class="loading">Loading exited shells...</div>';
-    try {
-      const res = await fetch('/fws/exited', { credentials: 'same-origin', cache: 'no-store' });
-      const html = await res.text();
-      exitedContent.innerHTML = html;
+    if (!forceReload && exitedCache.html && exitedCache.token === token) {
+      exitedContent.innerHTML = exitedCache.html;
       exitedContent.setAttribute('data-loaded', '1');
       applyCollapseState(exitedContent);
-    } catch (err) {
-      exitedContent.innerHTML = '<div class="shell-card"><div class="shell-meta">Failed to load exited shells.</div></div>';
-      exitedContent.setAttribute('data-loaded', '0');
+      return;
     }
+    if (exitedCache.loading && !forceReload) return exitedCache.loading;
+    exitedContent.innerHTML = '<div class="loading">Loading exited shells...</div>';
+    exitedCache.loading = (async () => {
+      try {
+        const res = await fetch('/fws/exited', { credentials: 'same-origin', cache: 'no-store' });
+        const html = await res.text();
+        exitedContent.innerHTML = html;
+        exitedContent.setAttribute('data-loaded', '1');
+        exitedCache.html = html;
+        exitedCache.token = token;
+        applyCollapseState(exitedContent);
+      } catch (err) {
+        exitedContent.innerHTML = '<div class="shell-card"><div class="shell-meta">Failed to load exited shells.</div></div>';
+        exitedContent.setAttribute('data-loaded', '0');
+      } finally {
+        exitedCache.loading = null;
+      }
+    })();
+    return exitedCache.loading;
   }
 
   function applyExitedSectionState() {
     const expanded = getExitedExpandedDefault();
     setExitedExpanded(expanded);
-    if (expanded) ensureExitedLoaded(true);
+    if (expanded) ensureExitedLoaded(false);
   }
 
   function hasActiveFilters(stream) {
@@ -615,7 +631,7 @@
       const toggleBtn = e.target.closest('#fws-exited-toggle');
       const expanded = toggleBtn.getAttribute('aria-expanded') === 'true';
       setExitedExpanded(!expanded);
-      if (!expanded) ensureExitedLoaded(true);
+      if (!expanded) ensureExitedLoaded(false);
       return;
     }
 

@@ -51,9 +51,9 @@ framework_shells/
 │   ├── index.html          # Dashboard page
 │   ├── fws.css             # Dashboard styles
 │   ├── fws.js              # Minimal dashboard websocket client
-│   └── logs.html           # Log viewer page
+│   └── logs.html           # Legacy standalone log template (dashboard now uses a log drawer)
 ├── cli/
-│   └── main.py          # CLI tool (fs list, fs up, fs down, fs attach)
+│   └── main.py          # CLI tool (fws list/up/down/tree/shutdown-group/attach)
 └── api/
     ├── fastapi_router.py   # REST API endpoints
     ├── fws_ui.py           # Self-hosted dashboard + logs (/fws, /ws/fws)
@@ -161,6 +161,12 @@ pipe_state = mgr.get_pipe_state(shell_id)
 # Lifecycle
 await mgr.terminate_shell(shell_id, force=True)
 await mgr.remove_shell(shell_id, force=True)  # Also removes logs/metadata
+result = await mgr.shutdown_app_group("demo-app")  # UI-equivalent group shutdown
+
+# Log helpers / retention
+tail = await mgr.get_log_tail(shell_id, stream="both", lines=50)
+matches = await mgr.search_logs(shell_id, stream="stdout", query="ready", limit=20)
+purged = await mgr.prune_exited_shells(max_count=50)
 
 # Optional: enumerate running PIDs for external monitoring
 pids = await mgr.list_active_pids()
@@ -186,9 +192,13 @@ You can enable best-effort `SIGWINCH` delivery after `resize_pty()` by either:
 GET    /api/framework_shells                 # List all shells
 POST   /api/framework_shells                 # Create shell
 GET    /api/framework_shells/{id}            # Get shell details
+POST   /api/framework_shells/{id}/terminate  # Terminate shell
 POST   /api/framework_shells/{id}/action     # Terminate, etc.
 DELETE /api/framework_shells/{id}            # Purge metadata/logs (Exited-shell cleanup)
 POST   /api/framework_shells/purge_exited    # Purge metadata/logs for all exited shells
+POST   /api/framework_shells/app/{app_id}/shutdown      # UI-equivalent group shutdown
+GET    /api/framework_shells/logs/{id}/tail             # Structured stdout/stderr tail + metadata
+GET    /api/framework_shells/logs/{id}/search           # Structured log search + metadata
 GET    /api/framework_shells/{id}/replay     # Get stdout log
 ```
 
@@ -197,9 +207,10 @@ GET    /api/framework_shells/{id}/replay     # Get stdout log
 When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboard:
 
 - `GET /fws/` dashboard (live-updating via `WS /ws/fws`)
-- `GET /fws/logs/{shell_id}` log viewer (tail + follow via WebSocket)
+- shell logs open in a full-page in-dashboard drawer backed by `WS /ws/fws/logs/{shell_id}`
+- `GET /fws/logs/{shell_id}` redirects into the dashboard drawer for compatibility
 
-The dashboard toolbar includes **Truncate Logs**, which truncates all `.stdout.log`/`.stderr.log` files in the current runtime (it does not delete shell records). Exited shells can be fully removed via **Purge Exited** in the Exited section (deletes metadata + logs).
+The dashboard toolbar includes **Truncate Logs**, which truncates all `.stdout.log`/`.stderr.log` files in the current runtime (it does not delete shell records). Exited shells can be fully removed via **Purge Exited** in the Exited section (deletes metadata + logs), and exited-shell retention is capped to the newest 50 records.
 
 UI styling and grouping metadata is carried on each shell record via `ShellSpec.ui` / `ShellRecord.ui` (see Shellspec below).
 
@@ -331,10 +342,13 @@ while True:
 
 ```bash
 # List shells
-python -m framework_shells.cli.main list
+fws list
+
+# Include exited shells in the list
+fws list --all
 
 # Apply spec file
-python -m framework_shells.cli.main up shells.yaml
+fws up shells.yaml
 
 # Terminate one shell (ID, label, or unique ID prefix)
 fws terminate <shell_id>
@@ -342,17 +356,25 @@ fws terminate <shell_id>
 # Remove one shell's metadata/logs (terminates if still running)
 fws rm <shell_id>
 
+# Shutdown all running shells in an app/group (same semantics as UI "Shutdown Group")
+fws shutdown-group <app_id>
+fws shutdown-group <app_id> --json
+
 # Spawn a one-off shell without a spec
 fws run --backend pty --label demo --env FOO=bar --env PORT=1234 -- bash -l -i
 
 # Terminate all shells
-python -m framework_shells.cli.main down
+fws down
+fws down --tree
 
 # Attach to dtach shell
-python -m framework_shells.cli.main attach <shell_id>
+fws attach <shell_id>
 
 # Show process trees (managed shells + procfs descendants)
-python -m framework_shells.cli.main tree --depth 4
+fws tree --depth 4
+
+# Include exited shells in the tree if they still have a PID recorded
+fws tree --all
 ```
 
 The CLI auto-detects the repo fingerprint from cwd and loads the stored secret.

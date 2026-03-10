@@ -447,6 +447,11 @@ body.has-log-drawer {
   margin: 0 1px 2px;
 }
 
+.exited-more-row {
+  margin-top: 10px;
+  justify-content: center;
+}
+
 .fws-content,
 .fws-content * {
   overflow-wrap: anywhere;

@@ -166,6 +166,7 @@ result = await mgr.shutdown_app_group("demo-app")  # UI-equivalent group shutdow
 # Log helpers / retention
 tail = await mgr.get_log_tail(shell_id, stream="both", lines=50)
 matches = await mgr.search_logs(shell_id, stream="stdout", query="ready", limit=20)
+trimmed = await mgr.prune_exited_logs(max_count=50)  # Keep exited metadata, trim old log files
 purged = await mgr.prune_exited_shells(max_count=50)
 
 # Optional: enumerate running PIDs for external monitoring
@@ -210,7 +211,7 @@ When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboa
 - shell logs open in a full-page in-dashboard drawer backed by `WS /ws/fws/logs/{shell_id}`
 - `GET /fws/logs/{shell_id}` redirects into the dashboard drawer for compatibility
 
-The dashboard toolbar includes **Truncate Logs**, which truncates all `.stdout.log`/`.stderr.log` files in the current runtime (it does not delete shell records). Exited shells can be fully removed via **Purge Exited** in the Exited section (deletes metadata + logs), and exited-shell retention is capped to the newest 50 records.
+The dashboard toolbar includes **Truncate Logs**, which truncates all `.stdout.log`/`.stderr.log` files in the current runtime (it does not delete shell records). Exited shells can be fully removed via **Purge Exited** in the Exited section (deletes metadata + logs), and automatic exited-log retention keeps only the newest 50 exited shells' log files on disk.
 
 UI styling and grouping metadata is carried on each shell record via `ShellSpec.ui` / `ShellRecord.ui` (see Shellspec below).
 

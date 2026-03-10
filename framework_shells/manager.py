@@ -774,7 +774,7 @@ class FrameworkShellManager:
         record.exit_code = exit_code
         record.updated_at = time.time()
         await self._save_record(record)
-        await self._prune_exited_shells_locked(max_count=self.MAX_EXITED_SHELLS)
+        await self._prune_exited_logs_locked(max_count=self.MAX_EXITED_SHELLS)
         await self._emit(EventType.SHELL_EXITED, record, exit_code=exit_code)
         self._run_hook_exited(record, last_pid)
 
@@ -1177,6 +1177,47 @@ class FrameworkShellManager:
         """Keep only the newest exited shell records, removing older metadata/logs."""
         async with self._get_lock():
             return await self._prune_exited_shells_locked(max_count=max_count)
+
+    async def _prune_exited_logs_locked(self, *, max_count: int = 50) -> Dict[str, Any]:
+        records: List[ShellRecord] = []
+        async for record in self._aiter_records():
+            records.append(record)
+
+        exited = [rec for rec in records if (getattr(rec, "status", None) or "") == "exited"]
+        if max_count < 0:
+            max_count = 0
+        if len(exited) <= max_count:
+            return {"kept": len(exited), "trimmed_logs": 0, "shell_ids": []}
+
+        exited.sort(
+            key=lambda rec: (
+                float(getattr(rec, "updated_at", 0) or 0),
+                float(getattr(rec, "created_at", 0) or 0),
+            ),
+            reverse=True,
+        )
+        to_trim = exited[max_count:]
+        trimmed_shell_ids: List[str] = []
+
+        for rec in to_trim:
+            trimmed_any = False
+            for log_path in [rec.stdout_log, rec.stderr_log]:
+                try:
+                    path = Path(log_path)
+                    if path.exists():
+                        await asyncio.to_thread(path.unlink)
+                        trimmed_any = True
+                except Exception:
+                    pass
+            if trimmed_any:
+                trimmed_shell_ids.append(rec.id)
+
+        return {"kept": max_count, "trimmed_logs": len(trimmed_shell_ids), "shell_ids": trimmed_shell_ids}
+
+    async def prune_exited_logs(self, *, max_count: int = 50) -> Dict[str, Any]:
+        """Keep only the newest exited shell log files, preserving metadata records."""
+        async with self._get_lock():
+            return await self._prune_exited_logs_locked(max_count=max_count)
 
     async def _log_stream_payload(self, path: Path, *, lines: Optional[List[str]] = None) -> Dict[str, Any]:
         exists = path.exists()

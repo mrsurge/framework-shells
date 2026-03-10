@@ -242,6 +242,7 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
         command_text = " ".join(map(str, cmd))
         stdout_log = str(s.get("stdout_log") or "")
         stderr_log = str(s.get("stderr_log") or "")
+        logs_available = Path(stdout_log).exists() or Path(stderr_log).exists()
 
         parts.append(f'<div class="exited-item" data-exited-item="1" data-exited-ts="{_escape_html(exited_ts)}">')
         parts.append('<div class="exited-ts">%s</div>' % _escape_html(exited_stamp))
@@ -250,10 +251,13 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
         parts.append('<div class="shell-title">%s</div>' % _escape_html(label))
         parts.append('<div class="shell-actions">')
         parts.append(f'<button class="btn btn-small" type="button" data-collapse-toggle="{_escape_html(sid)}" aria-expanded="false">Expand</button>')
-        parts.append(
-            f'<button class="btn btn-small" type="button" data-log-open="{_escape_html(sid)}" '
-            f'data-log-label="{_escape_html(label)}">Logs</button>'
-        )
+        if logs_available:
+            parts.append(
+                f'<button class="btn btn-small" type="button" data-log-open="{_escape_html(sid)}" '
+                f'data-log-label="{_escape_html(label)}">Logs</button>'
+            )
+        else:
+            parts.append('<button class="btn btn-small" type="button" disabled>Logs Purged</button>')
         parts.append(
             f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/purge" data-fws-ajax="1">'
             f'<button class="btn btn-small" type="submit">Purge</button>'
@@ -273,12 +277,16 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
         parts.append("</div>")
         parts.append("</div>")
         parts.append("</div>")
+    if len(exited) > 50:
+        parts.append('<div class="row exited-more-row">')
+        parts.append('<button class="btn btn-small" type="button" id="fws-exited-more">More</button>')
+        parts.append("</div>")
     return "\n".join(parts)
 
 
 async def _render_dashboard_html() -> str:
     mgr = await get_manager()
-    await mgr.prune_exited_shells(max_count=50)
+    await mgr.prune_exited_logs(max_count=50)
     shells = await mgr.list_shells()
     described: List[Dict[str, Any]] = []
     for rec in shells:
@@ -507,7 +515,7 @@ async def fws_index() -> FileResponse:
 @router.get("/fws/exited", response_class=HTMLResponse)
 async def fws_exited_fragment() -> HTMLResponse:
     mgr = await get_manager()
-    await mgr.prune_exited_shells(max_count=50)
+    await mgr.prune_exited_logs(max_count=50)
     shells = await mgr.list_shells()
     described: List[Dict[str, Any]] = []
     for rec in shells:

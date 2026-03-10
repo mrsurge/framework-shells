@@ -10,10 +10,12 @@
   const logPauseInput = document.getElementById('fws-log-pause');
   const EXITED_EXPANDED_KEY = 'fws.exited.expanded';
   const GROUP_EXPANDED_KEY = 'fws.group.expanded';
+  const EXITED_PAGE_SIZE = 50;
   const collapseState = new Map();
   const exitedCache = { html: '', token: '', loading: null };
   let defaultCollapsed = true;
   let groupExpanded = {};
+  let exitedVisibleCount = EXITED_PAGE_SIZE;
 
   const logState = {
     shellId: '',
@@ -224,6 +226,7 @@
       exitedContent.innerHTML = exitedCache.html;
       exitedContent.setAttribute('data-loaded', '1');
       applyCollapseState(exitedContent);
+      applyExitedPagination();
       return;
     }
     if (exitedCache.loading && !forceReload) return exitedCache.loading;
@@ -237,6 +240,7 @@
         exitedCache.html = html;
         exitedCache.token = token;
         applyCollapseState(exitedContent);
+        applyExitedPagination();
       } catch (err) {
         exitedContent.innerHTML = '<div class="shell-card"><div class="shell-meta">Failed to load exited shells.</div></div>';
         exitedContent.setAttribute('data-loaded', '0');
@@ -251,6 +255,28 @@
     const expanded = getExitedExpandedDefault();
     setExitedExpanded(expanded);
     if (expanded) ensureExitedLoaded(false);
+  }
+
+  function applyExitedPagination() {
+    if (!content) return;
+    const exitedContent = content.querySelector('#fws-exited-content');
+    if (!exitedContent) return;
+    const items = Array.from(exitedContent.querySelectorAll('[data-exited-item="1"]'));
+    const moreBtn = exitedContent.querySelector('#fws-exited-more');
+    if (!items.length) {
+      if (moreBtn) moreBtn.style.display = 'none';
+      return;
+    }
+    items.forEach((item, idx) => {
+      item.style.display = idx < exitedVisibleCount ? '' : 'none';
+    });
+    if (!moreBtn) return;
+    if (items.length <= exitedVisibleCount) {
+      moreBtn.style.display = 'none';
+      return;
+    }
+    moreBtn.style.display = '';
+    moreBtn.textContent = `More (${items.length - exitedVisibleCount})`;
   }
 
   function hasActiveFilters(stream) {
@@ -632,6 +658,13 @@
       const expanded = toggleBtn.getAttribute('aria-expanded') === 'true';
       setExitedExpanded(!expanded);
       if (!expanded) ensureExitedLoaded(false);
+      return;
+    }
+
+    if (e.target.closest('#fws-exited-more')) {
+      e.preventDefault();
+      exitedVisibleCount += EXITED_PAGE_SIZE;
+      applyExitedPagination();
       return;
     }
 

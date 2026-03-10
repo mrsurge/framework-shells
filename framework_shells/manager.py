@@ -774,7 +774,7 @@ class FrameworkShellManager:
         record.exit_code = exit_code
         record.updated_at = time.time()
         await self._save_record(record)
-        await self._prune_exited_logs_locked(max_count=self.MAX_EXITED_SHELLS)
+        await self._prune_exited_shells_locked(max_count=self.MAX_EXITED_SHELLS)
         await self._emit(EventType.SHELL_EXITED, record, exit_code=exit_code)
         self._run_hook_exited(record, last_pid)
 

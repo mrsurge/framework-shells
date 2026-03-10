@@ -286,7 +286,6 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
 
 async def _render_dashboard_html() -> str:
     mgr = await get_manager()
-    await mgr.prune_exited_logs(max_count=50)
     shells = await mgr.list_shells()
     described: List[Dict[str, Any]] = []
     for rec in shells:
@@ -515,7 +514,6 @@ async def fws_index() -> FileResponse:
 @router.get("/fws/exited", response_class=HTMLResponse)
 async def fws_exited_fragment() -> HTMLResponse:
     mgr = await get_manager()
-    await mgr.prune_exited_logs(max_count=50)
     shells = await mgr.list_shells()
     described: List[Dict[str, Any]] = []
     for rec in shells:

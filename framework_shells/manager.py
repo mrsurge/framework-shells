@@ -46,6 +46,8 @@ except Exception:
     psutil = None
 
 HOME_DIR = Path(os.path.expanduser("~"))
+PTY_MODE_RAW = "raw"
+PTY_MODE_INTERACTIVE = "interactive"
 
 def _truthy_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -57,6 +59,15 @@ def _truthy_env(name: str, default: bool = False) -> bool:
 def _shell_debug(stage: str, message: str) -> None:
     # TODO: proper logging
     print(f"[PTY][{stage}] {message}")
+
+
+def _normalize_pty_mode(value: Optional[str], *, default: str = PTY_MODE_RAW) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {PTY_MODE_RAW, PTY_MODE_INTERACTIVE}:
+        return raw
+    raise ValueError(f"Invalid pty_mode: {value!r} (expected 'raw' or 'interactive')")
 
 class FrameworkShellManager:
     """Creates and tracks background framework shells with runtime isolation."""
@@ -70,6 +81,7 @@ class FrameworkShellManager:
         run_id: Optional[str] = None,
         enable_dtach_proxy: bool = True,
         signal_winch_on_resize: Optional[bool] = None,
+        default_pty_mode: Optional[str] = None,
         process_hooks: Optional[ShellLifecycleHooks] = None,
         external_process_provider: Optional[ExternalProcessProvider] = None,
         enable_procfs_process_discovery: bool = True,
@@ -94,6 +106,10 @@ class FrameworkShellManager:
             _truthy_env("FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE", default=False)
             if signal_winch_on_resize is None
             else bool(signal_winch_on_resize)
+        )
+        self._default_pty_mode = _normalize_pty_mode(
+            default_pty_mode if default_pty_mode is not None else os.environ.get("FRAMEWORK_SHELLS_PTY_MODE"),
+            default=PTY_MODE_RAW,
         )
         self._hooks = process_hooks
         self.external_process_provider = external_process_provider
@@ -411,6 +427,7 @@ class FrameworkShellManager:
                 uses_pty=bool(data.get("uses_pty", False)),
                 uses_pipes=bool(data.get("uses_pipes", False)),
                 uses_dtach=bool(data.get("uses_dtach", False)),
+                pty_mode=_normalize_pty_mode(data.get("pty_mode"), default=PTY_MODE_RAW),
                 runtime_id=data.get("runtime_id"),
                 signature=data.get("signature"),
                 app_id=data.get("app_id"),
@@ -452,6 +469,21 @@ class FrameworkShellManager:
         env.update(record.env_overrides)
         return env
 
+    def _configure_pty_slave(self, slave_fd: int, *, pty_mode: str) -> None:
+        mode = _normalize_pty_mode(pty_mode, default=self._default_pty_mode)
+        if mode != PTY_MODE_RAW:
+            return
+        try:
+            attrs = termios.tcgetattr(slave_fd)
+            attrs[0] = attrs[0] & ~(termios.ICRNL | termios.IXON)
+            attrs[1] = attrs[1] & ~termios.OPOST
+            attrs[3] = attrs[3] & ~(termios.ICANON | termios.ECHO | termios.ISIG)
+            attrs[6][termios.VMIN] = 1
+            attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+        except Exception:
+            pass
+
     def _create_record(
         self,
         command: Iterable[str],
@@ -466,6 +498,7 @@ class FrameworkShellManager:
         uses_pty: bool = False,
         uses_pipes: bool = False,
         uses_dtach: bool = False,
+        pty_mode: Optional[str] = None,
         parent_shell_id: Optional[str] = None,
     ) -> ShellRecord:
         shell_id = f"fs_{int(time.time())}_{uuid.uuid4().hex[:8]}"
@@ -473,6 +506,7 @@ class FrameworkShellManager:
         cwd_path = self._resolve_cwd(cwd)
         overrides = dict(env or {})
         normalized_subgroups = [str(v).strip() for v in (subgroups or []) if str(v).strip()]
+        resolved_pty_mode = _normalize_pty_mode(pty_mode, default=self._default_pty_mode)
         
         record = ShellRecord(
             id=shell_id,
@@ -497,6 +531,7 @@ class FrameworkShellManager:
             uses_pty=uses_pty,
             uses_pipes=uses_pipes,
             uses_dtach=uses_dtach,
+            pty_mode=resolved_pty_mode,
             parent_shell_id=parent_shell_id
         )
         record.app_id = record.derive_app_id()
@@ -608,17 +643,7 @@ class FrameworkShellManager:
             return # Cannot attach
             
         master_fd, slave_fd = await asyncio.to_thread(pty.openpty)
-        
-        try:
-            attrs = termios.tcgetattr(slave_fd)
-            attrs[0] = attrs[0] & ~(termios.ICRNL | termios.IXON)
-            attrs[1] = attrs[1] & ~termios.OPOST
-            attrs[3] = attrs[3] & ~(termios.ICANON | termios.ECHO | termios.ISIG)
-            attrs[6][termios.VMIN] = 1
-            attrs[6][termios.VTIME] = 0
-            termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
-        except Exception:
-            pass
+        self._configure_pty_slave(slave_fd, pty_mode=getattr(record, "pty_mode", PTY_MODE_RAW))
 
         # dtach -a <socket>
         # Note: dtach -a expects a terminal. We give it slave_fd.
@@ -658,17 +683,7 @@ class FrameworkShellManager:
         master_fd, slave_fd = await asyncio.to_thread(pty.openpty)
         envp = self._prepare_env(record)
         envp.setdefault("TERM", "xterm-256color")
-        
-        try:
-            attrs = termios.tcgetattr(slave_fd)
-            attrs[0] = attrs[0] & ~(termios.ICRNL | termios.IXON)
-            attrs[1] = attrs[1] & ~termios.OPOST
-            attrs[3] = attrs[3] & ~(termios.ICANON | termios.ECHO | termios.ISIG)
-            attrs[6][termios.VMIN] = 1
-            attrs[6][termios.VTIME] = 0
-            termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
-        except Exception:
-            pass
+        self._configure_pty_slave(slave_fd, pty_mode=getattr(record, "pty_mode", PTY_MODE_RAW))
 
         await self._emit(EventType.SHELL_CREATED, record)
 
@@ -895,13 +910,14 @@ class FrameworkShellManager:
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
         ui: Optional[Dict[str, Any]] = None,
+        pty_mode: Optional[str] = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
     ) -> ShellRecord:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
             spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
-            uses_pty=True, parent_shell_id=parent_shell_id
+            uses_pty=True, pty_mode=pty_mode, parent_shell_id=parent_shell_id
         )
         if autostart:
             await self._launch_pty(record)
@@ -944,6 +960,7 @@ class FrameworkShellManager:
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
         ui: Optional[Dict[str, Any]] = None,
+        pty_mode: Optional[str] = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
     ) -> ShellRecord:
@@ -951,7 +968,8 @@ class FrameworkShellManager:
             command, cwd=cwd, env=env, label=label,
             spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
             uses_pty=True,
-            uses_dtach=True, 
+            uses_dtach=True,
+            pty_mode=pty_mode,
             parent_shell_id=parent_shell_id
         )
         if autostart:

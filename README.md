@@ -1,6 +1,7 @@
 # Framework Shells Module
 
 A standalone Python package for process orchestration with PTY, pipe, and dtach backends.
+PTY-backed shells support `pty_mode="raw"` (legacy default) and `pty_mode="interactive"` (normal cooked/echoing terminal behavior).
 
 ## Install
 
@@ -20,6 +21,7 @@ pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@
 `framework_shells/` is a self-contained module that manages long-running background processes ("shells") with:
 
 - **Multiple backends**: PTY (interactive terminals), pipes (stdin/stdout), dtach (persistent sessions)
+- **Configurable PTY discipline**: `raw` for legacy byte-oriented behavior, `interactive` for normal terminal echo/canonical input
 - **Runtime isolation**: Shells are namespaced by repo fingerprint + secret-derived runtime ID
 - **Event bus**: Real-time notifications for shell lifecycle events
 - **Singleton manager**: One manager instance per process, thread-safe
@@ -80,6 +82,7 @@ class ShellRecord:
     uses_pty: bool             # PTY backend
     uses_pipes: bool           # Pipe backend
     uses_dtach: bool           # Dtach backend (persistent)
+    pty_mode: str              # "raw" or "interactive" for pty/dtach-backed terminals
     stdout_log: str            # Path to stdout log
     stderr_log: str            # Path to stderr log
     exit_code: Optional[int]   # Exit code (if exited)
@@ -92,6 +95,8 @@ class ShellRecord:
 - Full terminal emulation
 - Supports resize, input/output streaming
 - Good for interactive shells
+- `pty_mode="raw"` preserves the legacy raw-ish termios behavior
+- `pty_mode="interactive"` keeps a normal cooked tty (echo/canonical input/signals)
 - **Not re-attachable across manager process restarts** (PTY file descriptors are in-memory)
 
 **Pipes** (`spawn_shell_pipe`):
@@ -103,6 +108,7 @@ class ShellRecord:
 - Wraps shell in dtach for persistence
 - Survives framework restarts
 - Can attach/detach from CLI
+- Uses the same `pty_mode` setting when the local attach proxy is created/re-attached
 - Socket-based communication
 
 ### Runtime Isolation
@@ -132,12 +138,12 @@ from framework_shells import get_manager
 mgr = await get_manager()
 
 # Advanced: configure the singleton once (must be consistent per-process)
-# mgr = await get_manager(process_hooks=..., enable_dtach_proxy=False)
+# mgr = await get_manager(process_hooks=..., enable_dtach_proxy=False, default_pty_mode="interactive")
 
 # Spawn shells
-record = await mgr.spawn_shell_pty(["bash", "-l", "-i"], label="terminal", cwd="/home/user")
+record = await mgr.spawn_shell_pty(["bash", "-l", "-i"], label="terminal", cwd="/home/user", pty_mode="interactive")
 record = await mgr.spawn_shell_pipe(["pyright-langserver", "--stdio"], label="lsp:python")
-record = await mgr.spawn_shell_dtach(["bash", "-l", "-i"], label="persistent-shell")
+record = await mgr.spawn_shell_dtach(["bash", "-l", "-i"], label="persistent-shell", pty_mode="interactive")
 
 # List and find
 shells = await mgr.list_shells()
@@ -185,6 +191,18 @@ You can enable best-effort `SIGWINCH` delivery after `resize_pty()` by either:
 
 - Passing `signal_winch_on_resize=True` when creating the singleton manager (must be consistent per-process), or
 - Setting `FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE=1` in the environment.
+
+### PTY mode
+
+PTY-backed shells support two terminal modes:
+
+- `raw`: legacy default; disables canonical input, echo, and signal-generating terminal keys
+- `interactive`: leaves the PTY in a normal cooked terminal mode
+
+You can select the default mode for new PTY/dtach shells by either:
+
+- Passing `default_pty_mode="interactive"` when creating the singleton manager, or
+- Setting `FRAMEWORK_SHELLS_PTY_MODE=interactive` in the environment.
 
 ### REST API
 
@@ -255,6 +273,7 @@ version: "1"
 shells:
   terminal:
     backend: dtach
+    pty_mode: interactive
     cwd: ${ctx:PROJECT_ROOT}
     subgroups: ["terminal", "project:${ctx:APP_ID}"]
     command: ["bash", "-l", "-i"]
@@ -361,7 +380,7 @@ fws shutdown-group <app_id>
 fws shutdown-group <app_id> --json
 
 # Spawn a one-off shell without a spec
-fws run --backend pty --label demo --env FOO=bar --env PORT=1234 -- bash -l -i
+fws run --backend pty --pty-mode interactive --label demo --env FOO=bar --env PORT=1234 -- bash -l -i
 
 # Terminate all shells
 fws down
@@ -386,6 +405,7 @@ The CLI auto-detects the repo fingerprint from cwd and loads the stored secret.
 | `FRAMEWORK_SHELLS_SECRET` | Secret for runtime ID derivation and API auth |
 | `FRAMEWORK_SHELLS_REPO_FINGERPRINT` | Override auto-computed repo fingerprint |
 | `FRAMEWORK_SHELLS_BASE_DIR` | Override storage base dir (default `~/.cache/framework_shells`) |
+| `FRAMEWORK_SHELLS_PTY_MODE` | Default PTY discipline for new PTY/dtach shells (`raw` or `interactive`) |
 
 ## Secret & Fingerprint Surface
 
@@ -394,6 +414,7 @@ The CLI auto-detects the repo fingerprint from cwd and loads the stored secret.
 - `FRAMEWORK_SHELLS_REPO_FINGERPRINT`: repo-scoped namespace (defaults to a SHA256 of `cwd` if unset)
 - `FRAMEWORK_SHELLS_SECRET`: secret used to derive the `runtime_id` (and API tokens when auth is enabled)
 - `FRAMEWORK_SHELLS_BASE_DIR`: optional override for the on-disk storage root (defaults to `~/.cache/framework_shells`)
+- `FRAMEWORK_SHELLS_PTY_MODE`: optional default PTY mode for newly created PTY/dtach shells
 
 ### Standalone / CLI
 

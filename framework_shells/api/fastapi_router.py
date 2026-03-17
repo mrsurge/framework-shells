@@ -91,6 +91,7 @@ async def find_or_create_shell(
     label = payload.get("label")
     subgroups = payload.get("subgroups")
     ui = payload.get("ui")
+    pty_mode = payload.get("pty_mode")
     autostart = payload.get("autostart", True)
 
     # Idempotency check
@@ -104,7 +105,7 @@ async def find_or_create_shell(
 
     record = await mgr.spawn_shell_pty(
         command, cwd=cwd, env=env, label=label,
-        subgroups=subgroups, ui=ui, autostart=autostart
+        subgroups=subgroups, ui=ui, pty_mode=pty_mode, autostart=autostart
     )
     return {"ok": True, "data": record.to_payload()}
 

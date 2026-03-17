@@ -40,6 +40,7 @@ class ShellSpec:
     env: Dict[str, str] = field(default_factory=dict)
     subgroups: List[str] = field(default_factory=list)
     ui: Dict[str, Any] = field(default_factory=dict)
+    pty_mode: str = "raw"  # "raw" | "interactive"
     readiness: Optional[ReadinessProbe] = None
     restart: RestartPolicy = field(default_factory=RestartPolicy)
     backend: str = "proc"  # "proc" | "pty" | "pipe" | "dtach"
@@ -115,6 +116,7 @@ def render_shellspec(spec: ShellSpec, *, ctx: Optional[Mapping[str, Any]] = None
             "env": dict(spec.env or {}),
             "subgroups": list(spec.subgroups or []),
             "ui": dict(spec.ui or {}),
+            "pty_mode": spec.pty_mode,
             "readiness": None,
             "restart": {
                 "policy": spec.restart.policy,
@@ -177,6 +179,7 @@ def render_shellspec(spec: ShellSpec, *, ctx: Optional[Mapping[str, Any]] = None
         env={str(k): str(v) for k, v in (rendered.get("env") or {}).items()},
         subgroups=[str(x) for x in (rendered.get("subgroups") or [])],
         ui=rendered.get("ui") or {},
+        pty_mode=str(rendered.get("pty_mode") or spec.pty_mode or "raw"),
         readiness=readiness,
         restart=restart,
         backend=str(rendered.get("backend") or spec.backend),
@@ -249,6 +252,7 @@ def _spec_from_dict(shell_id: str, raw: Dict[str, Any]) -> ShellSpec:
         env={str(k): str(v) for k, v in env_raw.items()},
         subgroups=[str(x) for x in subgroups],
         ui=dict(ui),
+        pty_mode=str(raw.get("pty_mode") or raw.get("ptyMode") or "raw"),
         readiness=_parse_readiness(raw.get("readiness")),
         restart=_parse_restart(raw.get("restart")),
         backend=str(raw.get("backend") or "proc"),
@@ -312,4 +316,3 @@ def parse_shellspec_ref(ref: str) -> Tuple[str, Optional[str]]:
     path_part, shell_id = ref.split("#", 1)
     shell_id = shell_id.strip() or None
     return path_part.strip(), shell_id
-

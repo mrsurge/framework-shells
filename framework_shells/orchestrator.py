@@ -164,6 +164,7 @@ class Orchestrator:
                 spec_id=stored_spec_id,
                 subgroups=subgroups,
                 ui=ui_final,
+                pty_mode=rendered.pty_mode,
                 autostart=rendered.autostart,
                 parent_shell_id=parent_shell_id,
             )
@@ -176,6 +177,7 @@ class Orchestrator:
                 spec_id=stored_spec_id,
                 subgroups=subgroups,
                 ui=ui_final,
+                pty_mode=rendered.pty_mode,
                 autostart=rendered.autostart,
                 parent_shell_id=parent_shell_id,
             )

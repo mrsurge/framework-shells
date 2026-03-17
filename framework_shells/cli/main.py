@@ -234,6 +234,7 @@ def main():
     # fs run -- <command...>
     run_parser = subparsers.add_parser("run", help="Spawn a one-off shell without a shellspec")
     run_parser.add_argument("--backend", choices=["proc", "pty", "pipe", "dtach"], default="proc", help="Backend (default: proc)")
+    run_parser.add_argument("--pty-mode", choices=["raw", "interactive"], default=None, help="PTY discipline for pty/dtach backends (default: manager/env default)")
     run_parser.add_argument("--label", default=None, help="Optional shell label")
     run_parser.add_argument("--cwd", default=None, help="Working directory")
     run_parser.add_argument("--env", action="append", default=None, help="Environment override KEY=VALUE (repeatable)")
@@ -273,13 +274,14 @@ async def run_async(args):
         subgroups = [str(x) for x in (getattr(args, "subgroup", None) or []) if str(x).strip()]
         autostart = not bool(getattr(args, "no_start", False))
         backend = getattr(args, "backend", "proc")
+        pty_mode = getattr(args, "pty_mode", None)
 
         if backend == "pty":
-            rec = await manager.spawn_shell_pty(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, autostart=autostart)
+            rec = await manager.spawn_shell_pty(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, pty_mode=pty_mode, autostart=autostart)
         elif backend == "pipe":
             rec = await manager.spawn_shell_pipe(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, autostart=autostart)
         elif backend == "dtach":
-            rec = await manager.spawn_shell_dtach(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, autostart=autostart)
+            rec = await manager.spawn_shell_dtach(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, pty_mode=pty_mode, autostart=autostart)
         else:
             rec = await manager.spawn_shell(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, autostart=autostart)
 

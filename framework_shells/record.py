@@ -28,6 +28,7 @@ class ShellRecord:
     uses_pty: bool = False
     uses_pipes: bool = False
     uses_dtach: bool = False
+    pty_mode: str = "raw"
 
     # Runtime isolation (Phase 2)
     runtime_id: Optional[str] = None
@@ -83,6 +84,7 @@ class ShellRecord:
             "uses_pty": self.uses_pty,
             "uses_pipes": self.uses_pipes,
             "uses_dtach": self.uses_dtach,
+            "pty_mode": self.pty_mode,
             "runtime_id": self.runtime_id,
             "signature": self.signature,
             "app_id": self.app_id,
@@ -114,6 +116,7 @@ class ShellRecord:
             "uses_pty": self.uses_pty,
             "uses_pipes": self.uses_pipes,
             "uses_dtach": self.uses_dtach,
+            "pty_mode": self.pty_mode,
             "runtime_id": self.runtime_id,
             "app_id": self.app_id,
             "parent_shell_id": self.parent_shell_id,

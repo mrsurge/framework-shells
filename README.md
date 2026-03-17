@@ -220,6 +220,8 @@ GET    /api/framework_shells/logs/{id}/search           # Structured log search 
 GET    /api/framework_shells/{id}/replay     # Get stdout log
 ```
 
+Shell payloads include `pty_mode` (`raw` or `interactive`), and `POST /api/framework_shells` accepts optional `pty_mode` for `pty` / `dtach` shells.
+
 ## Self-hosted UI (FWS)
 
 When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboard:

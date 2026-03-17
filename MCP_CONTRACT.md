@@ -61,6 +61,7 @@ Response shape:
       "label": "app-worker:demo",
       "pid": 12345,
       "status": "running",
+      "pty_mode": "interactive",
       "created_at": 1770000000.123,
       "updated_at": 1770000042.456,
       "stdout_log": "/path/to/fs_123.stdout.log",
@@ -87,6 +88,8 @@ Example:
 ```sh
 curl -s "http://localhost:8089/api/framework_shells/fs_123?include_stats=true"
 ```
+
+Shell detail returns the same shell payload shape as list, including `pty_mode`.
 
 ### Shutdown group
 
@@ -270,6 +273,7 @@ For read-only metrics tools, normalize around this shape:
 {
   "shell_id": "fs_123",
   "status": "running",
+  "pty_mode": "interactive",
   "created_at": 1770000000.123,
   "updated_at": 1770000042.456,
   "stdout": {

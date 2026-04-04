@@ -224,6 +224,40 @@ async def search_logs(
     return {"ok": True, "data": data}
 
 
+@router.get("/api/framework_shells/logs/{shell_id}/inspect")
+async def inspect_logs(
+    shell_id: str,
+    stream: str = Query("both"),
+    lines: int = Query(200, ge=0, le=5000),
+    query: Optional[str] = Query(None),
+    exclude_query: Optional[str] = Query(None),
+    regex: bool = Query(False),
+    ignore_case: bool = Query(False),
+    format: Optional[str] = Query(None),
+    signature: Optional[str] = Query(None),
+    exclude_signature: Optional[str] = Query(None),
+    mgr: FrameworkShellManager = Depends(get_manager_dep),
+):
+    try:
+        data = await mgr.inspect_logs(
+            shell_id,
+            stream=stream,
+            lines=lines,
+            query=query,
+            exclude_query=exclude_query,
+            regex=regex,
+            ignore_case=ignore_case,
+            format=format,
+            signature=signature,
+            exclude_signature=exclude_signature,
+        )
+    except KeyError:
+        raise HTTPException(404, "Shell not found")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "data": data}
+
+
 from fastapi.responses import FileResponse
 
 @router.get("/api/framework_shells/{shell_id}/replay")

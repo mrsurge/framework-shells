@@ -38,6 +38,13 @@ from .process_snapshot import (
     ProcessSnapshot,
     collect_external_processes,
 )
+from .log_inspection import (
+    JSON_FORMAT,
+    JSONRPC_FORMAT,
+    PLAIN_FORMAT,
+    inspect_log_file,
+    read_event_window,
+)
 from .shutdown import ShutdownPolicy, shutdown_snapshot
 
 try:
@@ -1237,7 +1244,13 @@ class FrameworkShellManager:
         async with self._get_lock():
             return await self._prune_exited_logs_locked(max_count=max_count)
 
-    async def _log_stream_payload(self, path: Path, *, lines: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def _log_stream_payload(
+        self,
+        path: Path,
+        *,
+        lines: Optional[List[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         exists = path.exists()
         stat = await asyncio.to_thread(path.stat) if exists else None
         mtime = float(stat.st_mtime) if stat else None
@@ -1251,6 +1264,8 @@ class FrameworkShellManager:
         }
         if lines is not None:
             payload["lines"] = lines
+        if extra:
+            payload.update(extra)
         return payload
 
     async def get_log_tail(
@@ -1276,17 +1291,39 @@ class FrameworkShellManager:
         }
         if stream_name in {"stdout", "both"}:
             stdout_path = Path(rec.stdout_log)
-            stdout_lines = await self._read_log_tail(stdout_path, max(0, int(lines)))
+            stdout_window = await read_event_window(
+                stdout_path,
+                lines=max(0, int(lines)),
+                max_bytes=self.LOG_TAIL_BYTES,
+            )
             result["stdout"] = await self._log_stream_payload(
                 stdout_path,
-                lines=[line.rstrip("\n") for line in stdout_lines],
+                lines=[str(record.get("text") or "") for record in stdout_window["records"]],
+                extra={
+                    "byte_window_start": stdout_window["byte_window_start"],
+                    "byte_window_end": stdout_window["byte_window_end"],
+                    "partial_head": stdout_window["partial_head"],
+                    "truncated": stdout_window["truncated"],
+                    "event_count": stdout_window["event_count"],
+                },
             )
         if stream_name in {"stderr", "both"}:
             stderr_path = Path(rec.stderr_log)
-            stderr_lines = await self._read_log_tail(stderr_path, max(0, int(lines)))
+            stderr_window = await read_event_window(
+                stderr_path,
+                lines=max(0, int(lines)),
+                max_bytes=self.LOG_TAIL_BYTES,
+            )
             result["stderr"] = await self._log_stream_payload(
                 stderr_path,
-                lines=[line.rstrip("\n") for line in stderr_lines],
+                lines=[str(record.get("text") or "") for record in stderr_window["records"]],
+                extra={
+                    "byte_window_start": stderr_window["byte_window_start"],
+                    "byte_window_end": stderr_window["byte_window_end"],
+                    "partial_head": stderr_window["partial_head"],
+                    "truncated": stderr_window["truncated"],
+                    "event_count": stderr_window["event_count"],
+                },
             )
         return result
 
@@ -1371,6 +1408,92 @@ class FrameworkShellManager:
                 limit=clamped_limit,
                 regex=regex,
                 ignore_case=ignore_case,
+            )
+
+        return result
+
+    async def inspect_logs(
+        self,
+        shell_id: str,
+        *,
+        stream: str = "both",
+        lines: int = 200,
+        query: Optional[str] = None,
+        exclude_query: Optional[str] = None,
+        regex: bool = False,
+        ignore_case: bool = False,
+        format: Optional[str] = None,
+        signature: Optional[str] = None,
+        exclude_signature: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        rec = await self.get_shell(shell_id)
+        if not rec:
+            raise KeyError(f"Shell not found: {shell_id}")
+
+        stream_name = (stream or "both").strip().lower()
+        if stream_name not in {"stdout", "stderr", "both"}:
+            raise ValueError(f"Invalid stream: {stream}")
+
+        format_name = (format or "").strip().lower() or None
+        if format_name not in {None, PLAIN_FORMAT, JSON_FORMAT, JSONRPC_FORMAT}:
+            raise ValueError(f"Invalid format: {format}")
+
+        signature_value = str(signature or "").strip() or None
+        line_count = max(0, int(lines))
+
+        result: Dict[str, Any] = {
+            "shell_id": shell_id,
+            "created_at": rec.created_at,
+            "updated_at": rec.updated_at,
+            "status": rec.status,
+            "stream": stream_name,
+            "query": query,
+            "exclude_query": exclude_query,
+            "regex": bool(regex),
+            "ignore_case": bool(ignore_case),
+            "format": format_name,
+            "signature": signature_value,
+            "exclude_signature": str(exclude_signature or "").strip() or None,
+        }
+
+        if stream_name in {"stdout", "both"}:
+            stdout_path = Path(rec.stdout_log)
+            stdout_inspection = await inspect_log_file(
+                stdout_path,
+                stream="stdout",
+                lines=line_count,
+                max_bytes=self.LOG_TAIL_BYTES,
+                query=query,
+                exclude_query=exclude_query,
+                regex=regex,
+                ignore_case=ignore_case,
+                format_filter=format_name,
+                signature_filter=signature_value,
+                exclude_signature_filter=result["exclude_signature"],
+            )
+            result["stdout"] = await self._log_stream_payload(
+                stdout_path,
+                extra=stdout_inspection,
+            )
+
+        if stream_name in {"stderr", "both"}:
+            stderr_path = Path(rec.stderr_log)
+            stderr_inspection = await inspect_log_file(
+                stderr_path,
+                stream="stderr",
+                lines=line_count,
+                max_bytes=self.LOG_TAIL_BYTES,
+                query=query,
+                exclude_query=exclude_query,
+                regex=regex,
+                ignore_case=ignore_case,
+                format_filter=format_name,
+                signature_filter=signature_value,
+                exclude_signature_filter=result["exclude_signature"],
+            )
+            result["stderr"] = await self._log_stream_payload(
+                stderr_path,
+                extra=stderr_inspection,
             )
 
         return result

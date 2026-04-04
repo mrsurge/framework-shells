@@ -206,6 +206,20 @@ def main():
     sg_parser.add_argument("app_id", help="App/group id (matches derive_app_id())")
     sg_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
+    # fs inspect <shell_id>
+    inspect_parser = subparsers.add_parser("inspect", help="Inspect structured log events for a shell")
+    inspect_parser.add_argument("shell_id", help="Shell ID")
+    inspect_parser.add_argument("--stream", default="both", choices=["stdout", "stderr", "both"], help="Log stream to inspect")
+    inspect_parser.add_argument("--lines", type=int, default=200, help="Number of recent event containers to inspect")
+    inspect_parser.add_argument("--query", help="Raw text substring or regex filter")
+    inspect_parser.add_argument("--exclude-query", help="Exclude records matching this substring or regex")
+    inspect_parser.add_argument("--regex", action="store_true", help="Treat --query as a regex")
+    inspect_parser.add_argument("--ignore-case", action="store_true", help="Case-insensitive matching")
+    inspect_parser.add_argument("--format", choices=["plain", "json", "jsonrpc"], help="Filter by detected format")
+    inspect_parser.add_argument("--signature", help="Filter by event signature (supports * wildcards)")
+    inspect_parser.add_argument("--exclude-signature", help="Exclude event signatures (supports * wildcards)")
+    inspect_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
     # fs terminate <id|label>
     term_parser = subparsers.add_parser("terminate", help="Terminate a single shell")
     term_parser.add_argument("target", help="Shell ID, label, or unique ID prefix")
@@ -526,6 +540,50 @@ async def run_async(args):
         data = result.get("data") if isinstance(result, dict) else None
         root_pids = (data or {}).get("root_pids") if isinstance(data, dict) else None
         print(f"Shutdown group {app_id} (root_pids={root_pids or []})")
+        return
+
+    elif args.command == "inspect":
+        try:
+            result = await manager.inspect_logs(
+                str(getattr(args, "shell_id", "") or "").strip(),
+                stream=str(getattr(args, "stream", "both") or "both"),
+                lines=max(0, int(getattr(args, "lines", 200) or 0)),
+                query=getattr(args, "query", None),
+                exclude_query=getattr(args, "exclude_query", None),
+                regex=bool(getattr(args, "regex", False)),
+                ignore_case=bool(getattr(args, "ignore_case", False)),
+                format=getattr(args, "format", None),
+                signature=getattr(args, "signature", None),
+                exclude_signature=getattr(args, "exclude_signature", None),
+            )
+        except KeyError:
+            print("Shell not found")
+            sys.exit(1)
+        except ValueError as exc:
+            print(str(exc))
+            sys.exit(1)
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(result, sort_keys=True))
+            return
+
+        print(
+            f"Inspect {result.get('shell_id')} stream={result.get('stream')} "
+            f"format={result.get('format') or '-'} signature={result.get('signature') or '-'}"
+        )
+        for stream_name in ("stdout", "stderr"):
+            payload = result.get(stream_name)
+            if not isinstance(payload, dict):
+                continue
+            records = payload.get("records") or []
+            print(
+                f"{stream_name}: events={payload.get('event_count', 0)} "
+                f"matched={len(records)} partial_head={payload.get('partial_head', False)}"
+            )
+            for item in payload.get("summary", {}).get("top_signatures", [])[:5]:
+                try:
+                    print(f"  {item.get('signature')}: {item.get('count')}")
+                except Exception:
+                    continue
         return
 
     elif args.command == "attach":

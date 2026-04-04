@@ -55,7 +55,7 @@ framework_shells/
 │   ├── fws.js              # Minimal dashboard websocket client
 │   └── logs.html           # Legacy standalone log template (dashboard now uses a log drawer)
 ├── cli/
-│   └── main.py          # CLI tool (fws list/up/down/tree/shutdown-group/attach)
+│   └── main.py          # CLI tool (fws list/up/down/tree/shutdown-group/inspect/attach)
 └── api/
     ├── fastapi_router.py   # REST API endpoints
     ├── fws_ui.py           # Self-hosted dashboard + logs (/fws, /ws/fws)
@@ -172,6 +172,8 @@ result = await mgr.shutdown_app_group("demo-app")  # UI-equivalent group shutdow
 # Log helpers / retention
 tail = await mgr.get_log_tail(shell_id, stream="both", lines=50)
 matches = await mgr.search_logs(shell_id, stream="stdout", query="ready", limit=20)
+inspection = await mgr.inspect_logs(shell_id, stream="stdout", lines=100, format="jsonrpc")
+inspection = await mgr.inspect_logs(shell_id, stream="stderr", exclude_signature="plain:ipc_chunk")
 purged = await mgr.prune_exited_shells(max_count=50)
 
 # Optional: enumerate running PIDs for external monitoring
@@ -215,12 +217,21 @@ POST   /api/framework_shells/{id}/action     # Terminate, etc.
 DELETE /api/framework_shells/{id}            # Purge metadata/logs (Exited-shell cleanup)
 POST   /api/framework_shells/purge_exited    # Purge metadata/logs for all exited shells
 POST   /api/framework_shells/app/{app_id}/shutdown      # UI-equivalent group shutdown
-GET    /api/framework_shells/logs/{id}/tail             # Structured stdout/stderr tail + metadata
+GET    /api/framework_shells/logs/{id}/tail             # Structured stdout/stderr tail + boundary metadata
 GET    /api/framework_shells/logs/{id}/search           # Structured log search + metadata
+GET    /api/framework_shells/logs/{id}/inspect          # Event-first log inspection (`plain`, `json`, `jsonrpc`)
 GET    /api/framework_shells/{id}/replay     # Get stdout log
 ```
 
 Shell payloads include `pty_mode` (`raw` or `interactive`), and `POST /api/framework_shells` accepts optional `pty_mode` for `pty` / `dtach` shells.
+
+The inspection surface is intentionally narrow in v1:
+
+- parser/classifier support is limited to `plain`, `json`, and `jsonrpc`
+- raw event text remains primary and parsed fragments are annotations
+- `tail` now includes boundary metadata such as `partial_head`, byte-window offsets, and event count
+- stable bracketed plain-text prefixes are promoted into signatures such as `plain:ipc_chunk`
+- the only negative filters are `exclude_query` and `exclude_signature`
 
 ## Self-hosted UI (FWS)
 
@@ -380,6 +391,11 @@ fws rm <shell_id>
 # Shutdown all running shells in an app/group (same semantics as UI "Shutdown Group")
 fws shutdown-group <app_id>
 fws shutdown-group <app_id> --json
+
+# Inspect recent log events with optional raw/structured filters
+fws inspect <shell_id>
+fws inspect <shell_id> --stream stdout --format jsonrpc --json
+fws inspect <shell_id> --stream stderr --exclude-signature plain:ipc_chunk
 
 # Spawn a one-off shell without a spec
 fws run --backend pty --pty-mode interactive --label demo --env FOO=bar --env PORT=1234 -- bash -l -i

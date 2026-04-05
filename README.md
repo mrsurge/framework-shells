@@ -109,6 +109,17 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 - Supports live stdin write / EOF while the current manager process owns the live pipe state
 - **Not re-attachable across manager process restarts** (pipe handles are in-memory)
 
+### Pipe Migration Notes
+
+- Existing `backend: pipe` shellspecs do not require a schema change.
+- The main change is behavioral: FWS now owns live pipe stdout observability and stdin write/EOF while the current manager process is alive.
+- If an old wrapper mirrored stdout to stderr only so FWS could see it, remove that workaround and let stdout stay on stdout.
+- Review wrappers that use `exec 1>&2`, `2>&1`, or `tee /dev/stderr`; they may now duplicate output or pollute protocol stdout.
+- For stdio protocol servers, keep protocol/data traffic on stdout and human diagnostics on stderr.
+- Pipe output subscriptions are raw stream chunks, not line-framed records. Downstream consumers that assume one callback per line need to reassemble lines or messages themselves.
+- Reconnection now means reconnecting to the live FWS manager for that `shell_id`, not reconstructing the raw OS pipe in a new manager process.
+- If the manager process dies, raw `pipe` shells are still not reattachable. That is future `uds_pipe` territory, not current `pipe` behavior.
+
 **Dtach** (`spawn_shell_dtach`):
 - Wraps shell in dtach for persistence
 - Survives framework restarts

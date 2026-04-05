@@ -240,6 +240,17 @@ Relevant manager primitives:
 - `write_to_shell(...)`
 - `send_shell_eof(...)`
 
+Migration notes:
+
+- Existing `backend: pipe` shellspecs do not require a schema change.
+- The compatibility change is mostly behavioral: FWS now owns live stdout observation and stdin/EOF control for pipe shells while the current manager process remains alive.
+- If a wrapper previously fanned stdout into stderr only so FWS could observe it, remove that workaround and let protocol/data stdout remain on stdout.
+- Review wrappers that use `exec 1>&2`, `2>&1`, or `tee /dev/stderr`; they may now duplicate output or corrupt stdio protocol boundaries.
+- For stdio protocol services, keep protocol traffic on stdout and human diagnostics on stderr.
+- Pipe subscriptions are stream-chunk oriented, not line-framed; downstream consumers must reassemble their own line or message boundaries when needed.
+- A client can reconnect through the live FWS manager and the shell's `shell_id` while that manager still owns the pipe state.
+- A new manager process still cannot reconstruct an old raw pipe session after the original owner dies or restarts.
+
 ### `dtach`
 
 Identity:

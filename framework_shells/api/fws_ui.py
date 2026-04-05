@@ -59,6 +59,8 @@ def _fmt_cpu(pct: Any) -> str:
 
 
 def _shell_backend(info: Dict[str, Any]) -> str:
+    if info.get("backend"):
+        return str(info.get("backend"))
     if info.get("uses_dtach"):
         return "dtach"
     if info.get("uses_pipes"):

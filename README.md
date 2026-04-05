@@ -79,6 +79,7 @@ class ShellRecord:
     pid: Optional[int]         # Process ID (None if not started)
     status: str                # "pending", "running", "exited"
     created_at: float          # Unix timestamp
+    backend: str               # Canonical backend: "proc" | "pty" | "pipe" | "dtach"
     uses_pty: bool             # PTY backend
     uses_pipes: bool           # Pipe backend
     uses_dtach: bool           # Dtach backend (persistent)
@@ -99,9 +100,13 @@ class ShellRecord:
 - `pty_mode="interactive"` keeps a normal cooked tty (echo/canonical input/signals)
 - **Not re-attachable across manager process restarts** (PTY file descriptors are in-memory)
 
+The compatibility booleans remain in payloads, but `backend` is the canonical backend descriptor going forward.
+
 **Pipes** (`spawn_shell_pipe`):
 - Stdin/stdout/stderr as separate streams
 - Good for LSP servers, daemons
+- FWS now tees pipe `stdout` into the shell's `stdout_log`
+- Supports live stdin write / EOF while the current manager process owns the live pipe state
 - **Not re-attachable across manager process restarts** (pipe handles are in-memory)
 
 **Dtach** (`spawn_shell_dtach`):
@@ -150,12 +155,16 @@ shells = await mgr.list_shells()
 shell = await mgr.get_shell(shell_id)
 shell = await mgr.find_shell_by_label("terminal", status="running")
 
-# Describe (with stats)
+# Describe (with stats + capabilities)
 info = await mgr.describe(record, include_logs=True, tail_lines=100)
 
-# PTY I/O
+# Live shell I/O
 queue = await mgr.subscribe_output(shell_id)
 bytes_queue = await mgr.subscribe_output_bytes(shell_id)  # Lossless raw bytes
+result = await mgr.write_to_shell(shell_id, "status", append_newline=True)
+eof = await mgr.send_shell_eof(shell_id)  # Supported for live pipe shells
+
+# PTY-only terminal behavior
 await mgr.write_to_pty(shell_id, "ls -la\n")
 await mgr.resize_pty(shell_id, cols=120, rows=40)
 await mgr.unsubscribe_output(shell_id, queue)
@@ -163,6 +172,7 @@ await mgr.unsubscribe_output_bytes(shell_id, bytes_queue)
 
 # Pipe I/O (in-memory only)
 pipe_state = mgr.get_pipe_state(shell_id)
+caps = await mgr.get_shell_capabilities(shell_id)
 
 # Lifecycle
 await mgr.terminate_shell(shell_id, force=True)
@@ -214,6 +224,7 @@ POST   /api/framework_shells                 # Create shell
 GET    /api/framework_shells/{id}            # Get shell details
 POST   /api/framework_shells/{id}/terminate  # Terminate shell
 POST   /api/framework_shells/{id}/action     # Terminate, etc.
+POST   /api/framework_shells/{id}/input      # Generic live stdin write / EOF
 DELETE /api/framework_shells/{id}            # Purge metadata/logs (Exited-shell cleanup)
 POST   /api/framework_shells/purge_exited    # Purge metadata/logs for all exited shells
 POST   /api/framework_shells/app/{app_id}/shutdown      # UI-equivalent group shutdown
@@ -223,7 +234,7 @@ GET    /api/framework_shells/logs/{id}/inspect          # Event-first log inspec
 GET    /api/framework_shells/{id}/replay     # Get stdout log
 ```
 
-Shell payloads include `pty_mode` (`raw` or `interactive`), and `POST /api/framework_shells` accepts optional `pty_mode` for `pty` / `dtach` shells.
+Shell payloads returned by the REST API include a canonical `backend` field plus compatibility booleans (`uses_pty`, `uses_pipes`, `uses_dtach`). Payloads also include a `capabilities` block describing live input/output support for that shell in the current manager process. `pty_mode` (`raw` or `interactive`) remains relevant only for `pty` / `dtach` shells, and `POST /api/framework_shells` accepts optional `pty_mode` for those backends.
 
 The inspection surface is intentionally narrow in v1:
 
@@ -232,6 +243,23 @@ The inspection surface is intentionally narrow in v1:
 - `tail` now includes boundary metadata such as `partial_head`, byte-window offsets, and event count
 - stable bracketed plain-text prefixes are promoted into signatures such as `plain:ipc_chunk`
 - the only negative filters are `exclude_query` and `exclude_signature`
+
+Example input body for the new live input route:
+
+```json
+{
+  "data": "status",
+  "append_newline": true
+}
+```
+
+Or, for live pipe shells, send EOF:
+
+```json
+{
+  "eof": true
+}
+```
 
 ## Self-hosted UI (FWS)
 

@@ -27,7 +27,14 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 import aiofiles
 
 from .store import RuntimeStore
-from .record import ShellRecord
+from .record import (
+    BACKEND_DTACH,
+    BACKEND_PIPE,
+    BACKEND_PROC,
+    BACKEND_PTY,
+    ShellRecord,
+    normalize_backend,
+)
 from .pty import PTYState, PipeState
 from .events import get_event_bus, ShellEvent, EventType
 from .hooks import ShellLifecycleHooks
@@ -174,6 +181,7 @@ class FrameworkShellManager:
                 metadata={
                     "shell_id": shell.id,
                     "run_id": shell.run_id,
+                    "backend": self._backend_name(shell),
                     "uses_dtach": bool(getattr(shell, "uses_dtach", False)),
                     "uses_pipes": bool(getattr(shell, "uses_pipes", False)),
                     "uses_pty": bool(getattr(shell, "uses_pty", False)),
@@ -320,6 +328,7 @@ class FrameworkShellManager:
         
         for record in stale_records:
             await self._stop_pty(record.id)
+            await self._stop_pipe(record.id)
             # Cleanup omitted for safety
 
         if updated:
@@ -431,6 +440,12 @@ class FrameworkShellManager:
                 run_id=data.get("run_id"),
                 launcher_pid=data.get("launcher_pid"),
                 adopted=bool(data.get("adopted", False)),
+                backend=normalize_backend(
+                    data.get("backend"),
+                    uses_pty=bool(data.get("uses_pty", False)),
+                    uses_pipes=bool(data.get("uses_pipes", False)),
+                    uses_dtach=bool(data.get("uses_dtach", False)),
+                ),
                 uses_pty=bool(data.get("uses_pty", False)),
                 uses_pipes=bool(data.get("uses_pipes", False)),
                 uses_dtach=bool(data.get("uses_dtach", False)),
@@ -505,6 +520,7 @@ class FrameworkShellManager:
         uses_pty: bool = False,
         uses_pipes: bool = False,
         uses_dtach: bool = False,
+        backend: Optional[str] = None,
         pty_mode: Optional[str] = None,
         parent_shell_id: Optional[str] = None,
     ) -> ShellRecord:
@@ -514,7 +530,13 @@ class FrameworkShellManager:
         overrides = dict(env or {})
         normalized_subgroups = [str(v).strip() for v in (subgroups or []) if str(v).strip()]
         resolved_pty_mode = _normalize_pty_mode(pty_mode, default=self._default_pty_mode)
-        
+        resolved_backend = normalize_backend(
+            backend,
+            uses_pty=uses_pty,
+            uses_pipes=uses_pipes,
+            uses_dtach=uses_dtach,
+        )
+
         record = ShellRecord(
             id=shell_id,
             command=command_list,
@@ -535,6 +557,7 @@ class FrameworkShellManager:
             run_id=self.run_id,
             launcher_pid=self.launcher_pid,
             adopted=False,
+            backend=resolved_backend,
             uses_pty=uses_pty,
             uses_pipes=uses_pipes,
             uses_dtach=uses_dtach,
@@ -546,7 +569,7 @@ class FrameworkShellManager:
         return record
 
     async def _launch(self, record: ShellRecord) -> ShellRecord:
-        record.uses_pty = False
+        record.set_backend(BACKEND_PROC)
         env = self._prepare_env(record)
         stdout_path = Path(record.stdout_log)
         stderr_path = Path(record.stderr_log)
@@ -580,9 +603,8 @@ class FrameworkShellManager:
     async def _launch_dtach(self, record: ShellRecord) -> ShellRecord:
         if not self._dtach_bin:
              raise RuntimeError("dtach binary not found")
-        
-        record.uses_dtach = True
-        record.uses_pty = True
+
+        record.set_backend(BACKEND_DTACH)
         socket_path = self.sockets_dir / f"{record.id}.sock"
         pid_file = self.sockets_dir / f"{record.id}.pid"
         
@@ -686,7 +708,7 @@ class FrameworkShellManager:
         self._pty[record.id] = state
 
     async def _launch_pty(self, record: ShellRecord) -> ShellRecord:
-        record.uses_pty = True
+        record.set_backend(BACKEND_PTY)
         master_fd, slave_fd = await asyncio.to_thread(pty.openpty)
         envp = self._prepare_env(record)
         envp.setdefault("TERM", "xterm-256color")
@@ -825,10 +847,79 @@ class FrameworkShellManager:
             except Exception:
                 pass
 
+    def _backend_name(self, record: ShellRecord) -> str:
+        return normalize_backend(
+            getattr(record, "backend", None),
+            uses_pty=bool(getattr(record, "uses_pty", False)),
+            uses_pipes=bool(getattr(record, "uses_pipes", False)),
+            uses_dtach=bool(getattr(record, "uses_dtach", False)),
+        )
+
+    async def _pipe_stdout_reader(self, record: ShellRecord, state: PipeState) -> None:
+        proc = state.process
+        stream = proc.stdout
+        if stream is None:
+            return
+
+        log_path = Path(record.stdout_log)
+        async with aiofiles.open(log_path, "ab") as log_fh:
+            while not state.stop.is_set():
+                try:
+                    data = await stream.read(4096)
+                    if not data:
+                        break
+
+                    await log_fh.write(data)
+                    await log_fh.flush()
+
+                    text = data.decode("utf-8", errors="replace")
+                    event = ShellEvent(
+                        type=EventType.LOG_CHUNK,
+                        shell_id=record.id,
+                        data={"stream": "stdout", "chunk": text},
+                        app_id=record.app_id or record.derive_app_id(),
+                        parent_shell_id=record.parent_shell_id,
+                        is_app_worker=record.is_app_worker,
+                    )
+                    await self._event_bus.publish(event)
+
+                    for q in list(state.stdout_subscribers):
+                        try:
+                            await q.put(text)
+                        except Exception:
+                            pass
+                    for q in list(state.stdout_subscribers_bytes):
+                        try:
+                            await q.put(data)
+                        except Exception:
+                            pass
+
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    break
+
+    async def _pipe_waiter(self, record: ShellRecord, state: PipeState) -> None:
+        proc = state.process
+        try:
+            exit_code = await proc.wait()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            exit_code = proc.returncode
+
+        async with self._get_lock():
+            current = self._pipes.get(record.id)
+            if current is state:
+                self._pipes.pop(record.id, None)
+
+        rec = await self._load_record(record.id)
+        if rec and getattr(rec, "status", None) != "exited":
+            await self._mark_exited(rec, exit_code)
+
     async def _launch_pipe(self, record: ShellRecord) -> ShellRecord:
         """Launch shell with live stdin/stdout pipes for bidirectional streaming."""
-        record.uses_pipes = True
-        record.uses_pty = False
+        record.set_backend(BACKEND_PIPE)
         env = self._prepare_env(record)
         
         stdout_path = Path(record.stdout_log)
@@ -863,6 +954,8 @@ class FrameworkShellManager:
                 label=record.label,
                 shell_id=record.id,
             )
+            state.stdout_reader = asyncio.create_task(self._pipe_stdout_reader(record, state))
+            state.waiter = asyncio.create_task(self._pipe_waiter(record, state))
             self._pipes[record.id] = state
             return record
             
@@ -873,6 +966,10 @@ class FrameworkShellManager:
         state = self._pipes.pop(shell_id, None)
         if not state: return
         state.stop.set()
+        if state.stdout_reader:
+            state.stdout_reader.cancel()
+        if state.waiter and state.waiter is not asyncio.current_task():
+            state.waiter.cancel()
         proc = state.process
         # Close stdin to signal EOF
         if proc.stdin and not proc.stdin.is_closing():
@@ -899,7 +996,7 @@ class FrameworkShellManager:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
             spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
-            uses_pty=False
+            backend=BACKEND_PROC
         )
         if autostart:
             await self._launch(record)
@@ -924,7 +1021,7 @@ class FrameworkShellManager:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
             spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
-            uses_pty=True, pty_mode=pty_mode, parent_shell_id=parent_shell_id
+            backend=BACKEND_PTY, pty_mode=pty_mode, parent_shell_id=parent_shell_id
         )
         if autostart:
             await self._launch_pty(record)
@@ -948,7 +1045,7 @@ class FrameworkShellManager:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
             spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
-            uses_pty=False, uses_pipes=True,
+            backend=BACKEND_PIPE,
             parent_shell_id=parent_shell_id
         )
         if autostart:
@@ -974,8 +1071,7 @@ class FrameworkShellManager:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
             spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
-            uses_pty=True,
-            uses_dtach=True,
+            backend=BACKEND_DTACH,
             pty_mode=pty_mode,
             parent_shell_id=parent_shell_id
         )
@@ -1108,6 +1204,7 @@ class FrameworkShellManager:
     ) -> Dict[str, Any]:
         """Return a dict with shell payload, stats, and optionally logs."""
         payload = record.to_payload()
+        payload["capabilities"] = await self.get_shell_capabilities(record)
         payload["stats"] = await self._process_stats(record)
         if include_logs:
             payload["logs"] = {
@@ -1509,46 +1606,127 @@ class FrameworkShellManager:
         """
         return self._pipes.get(shell_id)
 
+    async def get_shell_capabilities(self, record_or_shell_id: ShellRecord | str) -> Dict[str, Any]:
+        record = record_or_shell_id
+        if isinstance(record_or_shell_id, str):
+            record = await self.get_shell(record_or_shell_id)
+            if record is None:
+                raise KeyError(f"Shell not found: {record_or_shell_id}")
+
+        backend = self._backend_name(record)
+        async with self._get_lock():
+            has_pty = record.id in self._pty
+            pipe_state = self._pipes.get(record.id)
+            has_pipe = pipe_state is not None and pipe_state.process.returncode is None
+
+        if backend == "dtach":
+            return {
+                "backend": backend,
+                "stdin_write": has_pty,
+                "stdin_eof": False,
+                "stdout_subscribe": has_pty,
+                "stdout_subscribe_bytes": has_pty,
+                "stderr_subscribe": False,
+                "resize": has_pty,
+                "reattach": True,
+            }
+        if backend == "pty":
+            return {
+                "backend": backend,
+                "stdin_write": has_pty,
+                "stdin_eof": False,
+                "stdout_subscribe": has_pty,
+                "stdout_subscribe_bytes": has_pty,
+                "stderr_subscribe": False,
+                "resize": has_pty,
+                "reattach": False,
+            }
+        if backend == "pipe":
+            return {
+                "backend": backend,
+                "stdin_write": has_pipe,
+                "stdin_eof": has_pipe,
+                "stdout_subscribe": has_pipe,
+                "stdout_subscribe_bytes": has_pipe,
+                "stderr_subscribe": False,
+                "resize": False,
+                "reattach": False,
+            }
+        return {
+            "backend": backend,
+            "stdin_write": False,
+            "stdin_eof": False,
+            "stdout_subscribe": False,
+            "stdout_subscribe_bytes": False,
+            "stderr_subscribe": False,
+            "resize": False,
+            "reattach": False,
+        }
+
 
     async def subscribe_output(self, shell_id: str) -> AsyncQueue[str]:
-        """Subscribe to PTY output for a shell. Returns an AsyncQueue."""
+        """Subscribe to live shell output text for a shell."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
-            if not state:
-                raise KeyError(f"No PTY for shell {shell_id}")
-            q: AsyncQueue[str] = AsyncQueue()
-            state.subscribers.append(q)
-            return q
+            if state:
+                q: AsyncQueue[str] = AsyncQueue()
+                state.subscribers.append(q)
+                return q
+            pipe_state = self._pipes.get(shell_id)
+            if pipe_state:
+                q = AsyncQueue()
+                pipe_state.stdout_subscribers.append(q)
+                return q
+            raise KeyError(f"No live output stream for shell {shell_id}")
 
     async def subscribe_output_bytes(self, shell_id: str) -> AsyncQueue[bytes]:
-        """Subscribe to raw PTY output bytes for a shell. Returns an AsyncQueue."""
+        """Subscribe to raw live output bytes for a shell."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
-            if not state:
-                raise KeyError(f"No PTY for shell {shell_id}")
-            q: AsyncQueue[bytes] = AsyncQueue()
-            state.subscribers_bytes.append(q)
-            return q
+            if state:
+                q: AsyncQueue[bytes] = AsyncQueue()
+                state.subscribers_bytes.append(q)
+                return q
+            pipe_state = self._pipes.get(shell_id)
+            if pipe_state:
+                q = AsyncQueue()
+                pipe_state.stdout_subscribers_bytes.append(q)
+                return q
+            raise KeyError(f"No live output stream for shell {shell_id}")
 
     async def unsubscribe_output(self, shell_id: str, q: AsyncQueue[str]) -> None:
-        """Unsubscribe from PTY output."""
+        """Unsubscribe from live shell output."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
-            if not state:
+            if state:
+                try:
+                    state.subscribers.remove(q)
+                except ValueError:
+                    pass
+                return
+            pipe_state = self._pipes.get(shell_id)
+            if not pipe_state:
                 return
             try:
-                state.subscribers.remove(q)
+                pipe_state.stdout_subscribers.remove(q)
             except ValueError:
                 pass
 
     async def unsubscribe_output_bytes(self, shell_id: str, q: AsyncQueue[bytes]) -> None:
-        """Unsubscribe from raw PTY output bytes."""
+        """Unsubscribe from raw live shell output."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
-            if not state:
+            if state:
+                try:
+                    state.subscribers_bytes.remove(q)
+                except ValueError:
+                    pass
+                return
+            pipe_state = self._pipes.get(shell_id)
+            if not pipe_state:
                 return
             try:
-                state.subscribers_bytes.remove(q)
+                pipe_state.stdout_subscribers_bytes.remove(q)
             except ValueError:
                 pass
 
@@ -1560,6 +1738,104 @@ class FrameworkShellManager:
                 raise KeyError(f"No PTY for shell {shell_id}")
             encoded = data.encode("utf-8")
             await asyncio.to_thread(os.write, state.master_fd, encoded)
+
+    async def write_to_pipe(self, shell_id: str, data: str) -> None:
+        """Write data to a shell's live stdin pipe."""
+        async with self._get_lock():
+            state = self._pipes.get(shell_id)
+            if not state:
+                raise KeyError(f"No live pipe for shell {shell_id}")
+            stdin = state.process.stdin
+
+        if stdin is None:
+            raise RuntimeError(f"Pipe stdin unavailable for shell {shell_id}")
+        if stdin.is_closing():
+            raise RuntimeError(f"Pipe stdin is closed for shell {shell_id}")
+
+        encoded = data.encode("utf-8")
+        try:
+            stdin.write(encoded)
+            await stdin.drain()
+        except Exception as exc:
+            raise RuntimeError(f"Pipe stdin write failed for shell {shell_id}: {exc}") from exc
+
+    async def send_pipe_eof(self, shell_id: str) -> None:
+        """Close stdin for a live pipe-backed shell."""
+        async with self._get_lock():
+            state = self._pipes.get(shell_id)
+            if not state:
+                raise KeyError(f"No live pipe for shell {shell_id}")
+            stdin = state.process.stdin
+
+        if stdin is None:
+            raise RuntimeError(f"Pipe stdin unavailable for shell {shell_id}")
+        if stdin.is_closing():
+            raise RuntimeError(f"Pipe stdin is already closed for shell {shell_id}")
+
+        stdin.close()
+        try:
+            await stdin.wait_closed()
+        except Exception:
+            pass
+
+    async def write_to_shell(
+        self,
+        shell_id: str,
+        data: str,
+        *,
+        append_newline: bool = False,
+    ) -> Dict[str, Any]:
+        record = await self.get_shell(shell_id)
+        if not record:
+            raise KeyError(f"Shell not found: {shell_id}")
+
+        backend = self._backend_name(record)
+        payload = str(data)
+        if append_newline:
+            payload = payload + "\n"
+        bytes_written = len(payload.encode("utf-8"))
+
+        try:
+            if backend in {"pty", "dtach"}:
+                await self.write_to_pty(shell_id, payload)
+            elif backend == "pipe":
+                await self.write_to_pipe(shell_id, payload)
+            else:
+                raise RuntimeError(f"stdin write is not supported for backend {backend}")
+        except KeyError as exc:
+            raise RuntimeError(f"Live input unavailable for shell {shell_id}") from exc
+
+        return {
+            "shell_id": shell_id,
+            "backend": backend,
+            "accepted": True,
+            "bytes_written": bytes_written,
+            "newline_appended": bool(append_newline),
+            "eof_sent": False,
+        }
+
+    async def send_shell_eof(self, shell_id: str) -> Dict[str, Any]:
+        record = await self.get_shell(shell_id)
+        if not record:
+            raise KeyError(f"Shell not found: {shell_id}")
+
+        backend = self._backend_name(record)
+        try:
+            if backend == "pipe":
+                await self.send_pipe_eof(shell_id)
+            else:
+                raise RuntimeError(f"stdin EOF is not supported for backend {backend}")
+        except KeyError as exc:
+            raise RuntimeError(f"Live input unavailable for shell {shell_id}") from exc
+
+        return {
+            "shell_id": shell_id,
+            "backend": backend,
+            "accepted": True,
+            "bytes_written": 0,
+            "newline_appended": False,
+            "eof_sent": True,
+        }
 
     async def resize_pty(self, shell_id: str, cols: int, rows: int) -> None:
         """Resize a shell's PTY."""

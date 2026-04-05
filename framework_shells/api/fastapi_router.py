@@ -16,6 +16,17 @@ async def get_manager_dep() -> FrameworkShellManager:
     # Always use the package-level singleton so hosts can configure hooks/providers once.
     return await get_shared_manager()
 
+
+async def _payload_with_capabilities(
+    mgr: FrameworkShellManager,
+    record,
+    *,
+    include_env: bool = False,
+):
+    payload = record.to_payload(include_env=include_env)
+    payload["capabilities"] = await mgr.get_shell_capabilities(record)
+    return payload
+
 async def require_auth(
     authorization: str = Header(None),
     x_framework_key: str = Header(None, alias="X-Framework-Key")
@@ -51,13 +62,16 @@ async def list_shells(
 ):
     records = await mgr.list_shells()
     if not include_stats:
-        return {"ok": True, "data": [r.to_payload() for r in records]}
+        payloads: List[dict] = []
+        for rec in records:
+            payloads.append(await _payload_with_capabilities(mgr, rec))
+        return {"ok": True, "data": payloads}
     described: List[dict] = []
     for rec in records:
         try:
             described.append(await mgr.describe(rec))
         except Exception:
-            described.append(rec.to_payload())
+            described.append(await _payload_with_capabilities(mgr, rec))
     return {"ok": True, "data": described}
 
 @router.get("/api/framework_shells/{shell_id}")
@@ -70,13 +84,13 @@ async def get_shell(
     if not record:
         raise HTTPException(404, "Shell not found")
     if not include_stats:
-        return {"ok": True, "data": record.to_payload(include_env=True)}
+        return {"ok": True, "data": await _payload_with_capabilities(mgr, record, include_env=True)}
     try:
         data = await mgr.describe(record)
         data["env_overrides"] = record.env_overrides
         return {"ok": True, "data": data}
     except Exception:
-        return {"ok": True, "data": record.to_payload(include_env=True)}
+        return {"ok": True, "data": await _payload_with_capabilities(mgr, record, include_env=True)}
 
 @router.post("/api/framework_shells")
 async def find_or_create_shell(
@@ -98,7 +112,7 @@ async def find_or_create_shell(
     if label:
         existing = await mgr.find_shell_by_label(label)
         if existing:
-             return {"ok": True, "data": existing.to_payload(), "reused": True}
+             return {"ok": True, "data": await _payload_with_capabilities(mgr, existing), "reused": True}
 
     if not command:
         raise HTTPException(400, "Command required")
@@ -107,7 +121,7 @@ async def find_or_create_shell(
         command, cwd=cwd, env=env, label=label,
         subgroups=subgroups, ui=ui, pty_mode=pty_mode, autostart=autostart
     )
-    return {"ok": True, "data": record.to_payload()}
+    return {"ok": True, "data": await _payload_with_capabilities(mgr, record)}
 
 @router.post('/api/framework_shells/{shell_id}/terminate')
 async def terminate_shell(
@@ -133,6 +147,41 @@ async def shell_action(
         return {"ok": True}
     else:
         raise HTTPException(400, f"Unknown action: {action}")
+
+
+@router.post('/api/framework_shells/{shell_id}/input')
+async def shell_input(
+    shell_id: str,
+    payload: dict = Body(...),
+    mgr: FrameworkShellManager = Depends(get_manager_dep),
+    _: None = Depends(require_auth),
+):
+    data = payload.get("data")
+    append_newline = bool(payload.get("append_newline", False))
+    eof = bool(payload.get("eof", False))
+
+    if eof and data not in (None, ""):
+        raise HTTPException(400, "Provide either data or eof=true, not both")
+    if not eof and data is None:
+        raise HTTPException(400, "data is required unless eof=true")
+
+    try:
+        if eof:
+            result = await mgr.send_shell_eof(shell_id)
+        else:
+            result = await mgr.write_to_shell(
+                shell_id,
+                str(data),
+                append_newline=append_newline,
+            )
+    except KeyError:
+        raise HTTPException(404, "Shell not found")
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    return {"ok": True, "data": result}
 
 
 @router.delete('/api/framework_shells/{shell_id}')

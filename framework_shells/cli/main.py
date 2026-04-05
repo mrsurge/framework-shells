@@ -90,9 +90,12 @@ def _print_shell_candidates(cands: List[Any]) -> None:
     for s in cands:
         try:
             backend = (
-                "dtach"
-                if getattr(s, "uses_dtach", False)
-                else ("pipe" if getattr(s, "uses_pipes", False) else ("pty" if getattr(s, "uses_pty", False) else "proc"))
+                getattr(s, "backend", None)
+                or (
+                    "dtach"
+                    if getattr(s, "uses_dtach", False)
+                    else ("pipe" if getattr(s, "uses_pipes", False) else ("pty" if getattr(s, "uses_pty", False) else "proc"))
+                )
             )
             print(f"- {s.id}  label={s.label or '-'}  status={s.status}  pid={s.pid or '-'}  backend={backend}")
         except Exception:
@@ -350,6 +353,8 @@ async def run_async(args):
                 continue
 
         def backend_for(info: Dict[str, Any]) -> str:
+            if info.get("backend"):
+                return str(info.get("backend"))
             if info.get("uses_dtach"):
                 return "dtach"
             if info.get("uses_pipes"):
@@ -468,9 +473,12 @@ async def run_async(args):
             print(f"{'ID':<20} {'SPEC':<14} {'LABEL':<15} {'STATUS':<10} {'PID':<6} {'BACKEND'}")
         for s in shells:
             backend = (
-                "dtach"
-                if getattr(s, "uses_dtach", False)
-                else ("pipe" if getattr(s, "uses_pipes", False) else ("pty" if s.uses_pty else "proc"))
+                getattr(s, "backend", None)
+                or (
+                    "dtach"
+                    if getattr(s, "uses_dtach", False)
+                    else ("pipe" if getattr(s, "uses_pipes", False) else ("pty" if getattr(s, "uses_pty", False) else "proc"))
+                )
             )
             if not show_stats:
                 print(f"{s.id:<20} {(getattr(s, 'spec_id', None) or '-'): <14} {s.label or '-':<15} {s.status:<10} {s.pid or '-':<6} {backend}")

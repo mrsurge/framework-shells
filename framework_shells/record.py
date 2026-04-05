@@ -2,6 +2,42 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
 import json
 
+BACKEND_PROC = "proc"
+BACKEND_PTY = "pty"
+BACKEND_PIPE = "pipe"
+BACKEND_DTACH = "dtach"
+KNOWN_BACKENDS = {BACKEND_PROC, BACKEND_PTY, BACKEND_PIPE, BACKEND_DTACH}
+
+
+def normalize_backend(
+    backend: Optional[str],
+    *,
+    uses_pty: bool = False,
+    uses_pipes: bool = False,
+    uses_dtach: bool = False,
+) -> str:
+    raw = str(backend or "").strip().lower()
+    if raw:
+        if raw not in KNOWN_BACKENDS:
+            raise ValueError(f"Invalid backend: {backend!r}")
+        return raw
+    if uses_dtach:
+        return BACKEND_DTACH
+    if uses_pipes:
+        return BACKEND_PIPE
+    if uses_pty:
+        return BACKEND_PTY
+    return BACKEND_PROC
+
+
+def backend_flags(backend: str) -> Dict[str, bool]:
+    normalized = normalize_backend(backend)
+    return {
+        "uses_pty": normalized in {BACKEND_PTY, BACKEND_DTACH},
+        "uses_pipes": normalized == BACKEND_PIPE,
+        "uses_dtach": normalized == BACKEND_DTACH,
+    }
+
 @dataclass
 class ShellRecord:
     """Serializable metadata describing a framework shell."""
@@ -25,6 +61,7 @@ class ShellRecord:
     run_id: Optional[str] = None
     launcher_pid: Optional[int] = None
     adopted: bool = False
+    backend: str = BACKEND_PROC
     uses_pty: bool = False
     uses_pipes: bool = False
     uses_dtach: bool = False
@@ -38,6 +75,24 @@ class ShellRecord:
     app_id: Optional[str] = None
     parent_shell_id: Optional[str] = None
     is_app_worker: bool = False
+
+    def __post_init__(self) -> None:
+        self.set_backend(
+            normalize_backend(
+                self.backend,
+                uses_pty=self.uses_pty,
+                uses_pipes=self.uses_pipes,
+                uses_dtach=self.uses_dtach,
+            )
+        )
+
+    def set_backend(self, backend: str) -> None:
+        normalized = normalize_backend(backend)
+        self.backend = normalized
+        flags = backend_flags(normalized)
+        self.uses_pty = flags["uses_pty"]
+        self.uses_pipes = flags["uses_pipes"]
+        self.uses_dtach = flags["uses_dtach"]
 
     def derive_app_id(self) -> Optional[str]:
         """Extract app_id from label or subgroups."""
@@ -61,6 +116,14 @@ class ShellRecord:
         return verify_record(secret, self.to_dict())
 
     def to_dict(self) -> Dict[str, Any]:
+        self.set_backend(
+            normalize_backend(
+                self.backend,
+                uses_pty=self.uses_pty,
+                uses_pipes=self.uses_pipes,
+                uses_dtach=self.uses_dtach,
+            )
+        )
         return {
             "id": self.id,
             "spec_id": self.spec_id,
@@ -81,6 +144,7 @@ class ShellRecord:
             "run_id": self.run_id,
             "launcher_pid": self.launcher_pid,
             "adopted": self.adopted,
+            "backend": self.backend,
             "uses_pty": self.uses_pty,
             "uses_pipes": self.uses_pipes,
             "uses_dtach": self.uses_dtach,
@@ -93,6 +157,14 @@ class ShellRecord:
         }
 
     def to_payload(self, *, include_env: bool = False) -> Dict[str, Any]:
+        self.set_backend(
+            normalize_backend(
+                self.backend,
+                uses_pty=self.uses_pty,
+                uses_pipes=self.uses_pipes,
+                uses_dtach=self.uses_dtach,
+            )
+        )
         payload: Dict[str, Any] = {
             "id": self.id,
             "spec_id": self.spec_id,
@@ -113,6 +185,7 @@ class ShellRecord:
             "run_id": self.run_id,
             "launcher_pid": self.launcher_pid,
             "adopted": self.adopted,
+            "backend": self.backend,
             "uses_pty": self.uses_pty,
             "uses_pipes": self.uses_pipes,
             "uses_dtach": self.uses_dtach,

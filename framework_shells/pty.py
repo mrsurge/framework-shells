@@ -21,4 +21,8 @@ class PipeState:
     process: asyncio.subprocess.Process
     label: Optional[str] = None
     shell_id: Optional[str] = None
+    stdout_subscribers: List[AsyncQueue[str]] = field(default_factory=list)
+    stdout_subscribers_bytes: List[AsyncQueue[bytes]] = field(default_factory=list)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
+    stdout_reader: Optional[asyncio.Task] = None
+    waiter: Optional[asyncio.Task] = None

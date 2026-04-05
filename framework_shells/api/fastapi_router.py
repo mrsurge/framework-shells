@@ -1,15 +1,58 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Body
+from typing import Annotated, cast
+
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse
-from typing import List, Optional, Any, Dict
 import hmac
 from pathlib import Path
 
 from ..auth import get_secret, derive_api_token
 from ..manager import FrameworkShellManager
-from ..store import RuntimeStore
+from ..record import ShellRecord
 from .. import get_manager as get_shared_manager
 
 router = APIRouter()
+
+JsonDict = dict[str, object]
+
+
+def _json_dict(value: object) -> JsonDict:
+    if isinstance(value, dict):
+        return cast(JsonDict, value)
+    return {}
+
+
+def _json_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _json_str_list(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    items: list[str] = []
+    for item in cast(list[object], value):
+        if not isinstance(item, str):
+            return None
+        items.append(item)
+    return items
+
+
+def _json_str_dict(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, str] = {}
+    for key, item in cast(dict[object, object], value).items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            return None
+        result[key] = item
+    return result
+
+
+def _json_bool(value: object, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return default
 
 
 async def get_manager_dep() -> FrameworkShellManager:
@@ -19,17 +62,17 @@ async def get_manager_dep() -> FrameworkShellManager:
 
 async def _payload_with_capabilities(
     mgr: FrameworkShellManager,
-    record: Any,
+    record: ShellRecord,
     *,
     include_env: bool = False,
-) -> Dict[str, Any]:
-    payload = record.to_payload(include_env=include_env)
+) -> JsonDict:
+    payload = cast(JsonDict, record.to_payload(include_env=include_env))
     payload["capabilities"] = await mgr.get_shell_capabilities(record)
     return payload
 
 async def require_auth(
-    authorization: str = Header(None),
-    x_framework_key: str = Header(None, alias="X-Framework-Key")
+    authorization: Annotated[str | None, Header()] = None,
+    x_framework_key: Annotated[str | None, Header(alias="X-Framework-Key")] = None,
 ) -> None:
     """Require valid Bearer token or X-Framework-Key for mutating endpoints."""
     secret = get_secret()
@@ -57,16 +100,16 @@ async def require_auth(
 
 @router.get("/api/framework_shells")
 async def list_shells(
-    include_stats: bool = Query(False),
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    include_stats: Annotated[bool, Query()] = False,
 ):
     records = await mgr.list_shells()
     if not include_stats:
-        payloads: List[Dict[str, Any]] = []
+        payloads: list[JsonDict] = []
         for rec in records:
             payloads.append(await _payload_with_capabilities(mgr, rec))
         return {"ok": True, "data": payloads}
-    described: List[Dict[str, Any]] = []
+    described: list[JsonDict] = []
     for rec in records:
         try:
             described.append(await mgr.describe(rec))
@@ -77,8 +120,8 @@ async def list_shells(
 @router.get("/api/framework_shells/{shell_id}")
 async def get_shell(
     shell_id: str,
-    include_stats: bool = Query(False),
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    include_stats: Annotated[bool, Query()] = False,
 ):
     record = await mgr.get_shell(shell_id)
     if not record:
@@ -94,19 +137,18 @@ async def get_shell(
 
 @router.post("/api/framework_shells")
 async def find_or_create_shell(
-    payload: Dict[str, Any] = Body(...),
-    authorization: str = Header(None), # Verify explicit param vs dependency
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
-    _: None = Depends(require_auth)
+    payload: Annotated[JsonDict, Body(...)],
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    _: Annotated[None, Depends(require_auth)],
 ):
-    command = payload.get("command")
-    cwd = payload.get("cwd")
-    env = payload.get("env")
-    label = payload.get("label")
-    subgroups = payload.get("subgroups")
-    ui = payload.get("ui")
-    pty_mode = payload.get("pty_mode")
-    autostart = payload.get("autostart", True)
+    command = _json_str_list(payload.get("command"))
+    cwd = _json_str(payload.get("cwd"))
+    env = _json_str_dict(payload.get("env"))
+    label = _json_str(payload.get("label"))
+    subgroups = _json_str_list(payload.get("subgroups"))
+    ui = _json_dict(payload.get("ui")) if isinstance(payload.get("ui"), dict) else None
+    pty_mode = _json_str(payload.get("pty_mode"))
+    autostart = _json_bool(payload.get("autostart"), default=True)
 
     # Idempotency check
     if label:
@@ -126,8 +168,8 @@ async def find_or_create_shell(
 @router.post('/api/framework_shells/{shell_id}/terminate')
 async def terminate_shell(
     shell_id: str,
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
-    _: None = Depends(require_auth)
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    _: Annotated[None, Depends(require_auth)],
 ):
     await mgr.terminate_shell(shell_id)
     return {"ok": True}
@@ -135,14 +177,14 @@ async def terminate_shell(
 @router.post('/api/framework_shells/{shell_id}/action')
 async def shell_action(
     shell_id: str,
-    payload: Dict[str, Any] = Body(...),
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
-    _: None = Depends(require_auth)
+    payload: Annotated[JsonDict, Body(...)],
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    _: Annotated[None, Depends(require_auth)],
 ):
     """Handle shell actions (terminate, etc.)."""
-    action = payload.get("action")
+    action = _json_str(payload.get("action"))
     if action == "terminate":
-        force = payload.get("force", False)
+        force = _json_bool(payload.get("force"))
         await mgr.terminate_shell(shell_id, force=force)
         return {"ok": True}
     else:
@@ -152,13 +194,13 @@ async def shell_action(
 @router.post('/api/framework_shells/{shell_id}/input')
 async def shell_input(
     shell_id: str,
-    payload: Dict[str, Any] = Body(...),
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
-    _: None = Depends(require_auth),
+    payload: Annotated[JsonDict, Body(...)],
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    _: Annotated[None, Depends(require_auth)],
 ):
     data = payload.get("data")
-    append_newline = bool(payload.get("append_newline", False))
-    eof = bool(payload.get("eof", False))
+    append_newline = _json_bool(payload.get("append_newline"))
+    eof = _json_bool(payload.get("eof"))
 
     if eof and data not in (None, ""):
         raise HTTPException(400, "Provide either data or eof=true, not both")
@@ -187,9 +229,9 @@ async def shell_input(
 @router.delete('/api/framework_shells/{shell_id}')
 async def remove_shell(
     shell_id: str,
-    force: bool = Query(False),
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
-    _: None = Depends(require_auth),
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    _: Annotated[None, Depends(require_auth)],
+    force: Annotated[bool, Query()] = False,
 ):
     """Purge a shell's metadata and logs.
 
@@ -203,18 +245,17 @@ async def remove_shell(
 
 @router.post('/api/framework_shells/purge_exited')
 async def purge_exited_shells(
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
-    _: None = Depends(require_auth),
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    _: Annotated[None, Depends(require_auth)],
 ):
     """Purge metadata/logs for all exited shells."""
     records = await mgr.list_shells()
-    exited = [r for r in records if (getattr(r, 'status', None) or '') == 'exited']
+    exited = [r for r in records if r.status == "exited"]
     errors: list[str] = []
     purged = 0
     for rec in exited:
         try:
-            await mgr.remove_shell(rec.id, force=True)
-            purged += 1
+            purged += int(await mgr.remove_shell(rec.id, force=True))
         except Exception as exc:
             errors.append(f"{rec.id}: {exc}")
     return {"ok": True, "data": {"purged": purged, "errors": errors}}
@@ -222,8 +263,8 @@ async def purge_exited_shells(
 @router.post("/api/framework_shells/app/{app_id}/shutdown")
 async def shutdown_app_group(
     app_id: str,
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
-    _: None = Depends(require_auth),
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    _: Annotated[None, Depends(require_auth)],
 ):
     """UI-equivalent group shutdown for downstream consumers."""
     return await mgr.shutdown_app_group(app_id)
@@ -232,9 +273,9 @@ async def shutdown_app_group(
 @router.get("/api/framework_shells/logs/{shell_id}/tail")
 async def get_log_tail(
     shell_id: str,
-    stream: str = Query("both"),
-    lines: int = Query(200, ge=0, le=5000),
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    stream: Annotated[str, Query()] = "both",
+    lines: Annotated[int, Query(ge=0, le=5000)] = 200,
 ):
     try:
         data = await mgr.get_log_tail(shell_id, stream=stream, lines=lines)
@@ -248,12 +289,12 @@ async def get_log_tail(
 @router.get("/api/framework_shells/logs/{shell_id}/search")
 async def search_logs(
     shell_id: str,
-    query: str = Query(..., min_length=1),
-    stream: str = Query("both"),
-    limit: int = Query(100, ge=1, le=1000),
-    regex: bool = Query(False),
-    ignore_case: bool = Query(False),
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    query: Annotated[str, Query(min_length=1)],
+    stream: Annotated[str, Query()] = "both",
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    regex: Annotated[bool, Query()] = False,
+    ignore_case: Annotated[bool, Query()] = False,
 ):
     try:
         data = await mgr.search_logs(
@@ -276,16 +317,16 @@ async def search_logs(
 @router.get("/api/framework_shells/logs/{shell_id}/inspect")
 async def inspect_logs(
     shell_id: str,
-    stream: str = Query("both"),
-    lines: int = Query(200, ge=0, le=5000),
-    query: Optional[str] = Query(None),
-    exclude_query: Optional[str] = Query(None),
-    regex: bool = Query(False),
-    ignore_case: bool = Query(False),
-    format: Optional[str] = Query(None),
-    signature: Optional[str] = Query(None),
-    exclude_signature: Optional[str] = Query(None),
-    mgr: FrameworkShellManager = Depends(get_manager_dep),
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    stream: Annotated[str, Query()] = "both",
+    lines: Annotated[int, Query(ge=0, le=5000)] = 200,
+    query: Annotated[str | None, Query()] = None,
+    exclude_query: Annotated[str | None, Query()] = None,
+    regex: Annotated[bool, Query()] = False,
+    ignore_case: Annotated[bool, Query()] = False,
+    format: Annotated[str | None, Query()] = None,
+    signature: Annotated[str | None, Query()] = None,
+    exclude_signature: Annotated[str | None, Query()] = None,
 ):
     try:
         data = await mgr.inspect_logs(
@@ -306,13 +347,10 @@ async def inspect_logs(
         raise HTTPException(400, str(exc))
     return {"ok": True, "data": data}
 
-
-from fastapi.responses import FileResponse
-
 @router.get("/api/framework_shells/{shell_id}/replay")
 async def replay_log(
     shell_id: str,
-    mgr: FrameworkShellManager = Depends(get_manager_dep)
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
 ):
     """Serve the stdout log for a shell."""
     record = await mgr.get_shell(shell_id)

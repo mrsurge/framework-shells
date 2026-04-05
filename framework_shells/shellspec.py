@@ -4,11 +4,16 @@ import os
 import re
 import shlex
 import socket
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import TypeAlias, cast
 
 import yaml
+
+ScalarValue: TypeAlias = str | int | float | bool | None
+SpecValue: TypeAlias = ScalarValue | list["SpecValue"] | dict[str, "SpecValue"]
+SpecMap: TypeAlias = dict[str, SpecValue]
 
 
 @dataclass(frozen=True)
@@ -16,13 +21,13 @@ class ReadinessProbe:
     type: str  # "stdout_regex" | "tcp_port" | "http_ok"
     timeout: float = 30.0
     # stdout_regex
-    pattern: Optional[str] = None
+    pattern: str | None = None
     # tcp_port
     host: str = "127.0.0.1"
-    port: Optional[int] = None
+    port: int | None = None
     # http_ok
-    url: Optional[str] = None
-    status_codes: List[int] = field(default_factory=lambda: [200])
+    url: str | None = None
+    status_codes: list[int] = field(default_factory=lambda: [200])
 
 
 @dataclass(frozen=True)
@@ -35,18 +40,18 @@ class RestartPolicy:
 @dataclass(frozen=True)
 class ShellSpec:
     id: str
-    command: Union[str, List[str]]
-    cwd: Optional[str] = None
-    env: Dict[str, str] = field(default_factory=dict)
-    subgroups: List[str] = field(default_factory=list)
-    ui: Dict[str, Any] = field(default_factory=dict)
+    command: str | list[str]
+    cwd: str | None = None
+    env: dict[str, str] = field(default_factory=dict)
+    subgroups: list[str] = field(default_factory=list)
+    ui: dict[str, object] = field(default_factory=dict)
     pty_mode: str = "raw"  # "raw" | "interactive"
-    readiness: Optional[ReadinessProbe] = None
+    readiness: ReadinessProbe | None = None
     restart: RestartPolicy = field(default_factory=RestartPolicy)
     backend: str = "proc"  # "proc" | "pty" | "pipe" | "dtach"
     autostart: bool = True
 
-    def normalized_command(self) -> List[str]:
+    def normalized_command(self) -> list[str]:
         if isinstance(self.command, str):
             return shlex.split(self.command)
         return [str(part) for part in self.command]
@@ -58,10 +63,71 @@ _TEMPLATE_RE = re.compile(r"\$\{([^}]+)\}")
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
-        return int(s.getsockname()[1])
+        sockaddr_obj = cast(object, s.getsockname())
+        if isinstance(sockaddr_obj, tuple):
+            sockaddr = cast(tuple[object, ...], sockaddr_obj)
+            if len(sockaddr) >= 2 and isinstance(sockaddr[1], (str, int)):
+                return int(sockaddr[1])
+        raise RuntimeError("unexpected socket address shape")
 
 
-def _render_string(template: str, *, ctx: Mapping[str, Any], env: Mapping[str, str], state: Dict[str, Any]) -> str:
+def _as_spec_map(value: object) -> SpecMap:
+    return cast(SpecMap, value) if isinstance(value, dict) else {}
+
+
+def _string_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _string_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    value_map = cast(dict[object, object], value)
+    return {str(k): str(v) for k, v in value_map.items()}
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    value_list = cast(list[object], value)
+    return [str(item) for item in value_list]
+
+
+def _float_or_default(value: object, default: float) -> float:
+    if not isinstance(value, (str, int, float)):
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _int_or_default(value: object, default: int) -> int:
+    if not isinstance(value, (str, int, float)):
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _int_list(value: object, default: list[int] | None = None) -> list[int]:
+    if not isinstance(value, list):
+        return list(default or [])
+    out: list[int] = []
+    for item in cast(list[object], value):
+        if not isinstance(item, (str, int, float)):
+            continue
+        try:
+            out.append(int(item))
+        except Exception:
+            continue
+    return out or list(default or [])
+
+
+def _render_string(template: str, *, ctx: Mapping[str, object], env: Mapping[str, str], state: SpecMap) -> str:
     def _replace(match: re.Match[str]) -> str:
         key = match.group(1).strip()
         if not key:
@@ -88,7 +154,7 @@ def _render_string(template: str, *, ctx: Mapping[str, Any], env: Mapping[str, s
     return _TEMPLATE_RE.sub(_replace, template)
 
 
-def _render_value(value: Any, *, ctx: Mapping[str, Any], env: Mapping[str, str], state: Dict[str, Any]) -> Any:
+def _render_value(value: SpecValue, *, ctx: Mapping[str, object], env: Mapping[str, str], state: SpecMap) -> SpecValue:
     if isinstance(value, str):
         return _render_string(value, ctx=ctx, env=env, state=state)
     if isinstance(value, list):
@@ -98,18 +164,18 @@ def _render_value(value: Any, *, ctx: Mapping[str, Any], env: Mapping[str, str],
     return value
 
 
-def render_shellspec(spec: ShellSpec, *, ctx: Optional[Mapping[str, Any]] = None, env: Optional[Mapping[str, str]] = None) -> ShellSpec:
+def render_shellspec(spec: ShellSpec, *, ctx: Mapping[str, object] | None = None, env: Mapping[str, str] | None = None) -> ShellSpec:
     """Render templates in a spec (e.g. ${free_port}, ${ctx:APP_ID}, ${env:HOME}).
 
     Rendering is per-shell: `${free_port}` is stable within a rendered spec, but
     different shells render with different values.
     """
-    ctx = dict(ctx or {})
-    env_map = dict(env or os.environ)
-    state: Dict[str, Any] = {}
+    ctx_map: dict[str, object] = dict(ctx or {})
+    env_map: dict[str, str] = dict(env or os.environ)
+    state: SpecMap = {}
 
-    rendered = _render_value(
-        {
+    rendered = cast(SpecMap, _render_value(
+        cast(SpecValue, {
             "id": spec.id,
             "command": spec.command,
             "cwd": spec.cwd,
@@ -125,16 +191,16 @@ def render_shellspec(spec: ShellSpec, *, ctx: Optional[Mapping[str, Any]] = None
             },
             "backend": spec.backend,
             "autostart": spec.autostart,
-        },
-        ctx=ctx,
+        }),
+        ctx=ctx_map,
         env=env_map,
         state=state,
-    )
+    ))
 
     readiness = spec.readiness
     if readiness:
-        rendered_probe_raw = _render_value(
-            {
+        rendered_probe_raw = cast(SpecMap, _render_value(
+            cast(SpecValue, {
                 "type": readiness.type,
                 "timeout": readiness.timeout,
                 "pattern": readiness.pattern,
@@ -142,11 +208,11 @@ def render_shellspec(spec: ShellSpec, *, ctx: Optional[Mapping[str, Any]] = None
                 "port": readiness.port,
                 "url": readiness.url,
                 "status_codes": list(readiness.status_codes or [200]),
-            },
-            ctx=ctx,
+            }),
+            ctx=ctx_map,
             env=env_map,
             state=state,
-        )
+        ))
 
         port = rendered_probe_raw.get("port")
         try:
@@ -157,28 +223,32 @@ def render_shellspec(spec: ShellSpec, *, ctx: Optional[Mapping[str, Any]] = None
 
         readiness = ReadinessProbe(
             type=str(rendered_probe_raw.get("type") or readiness.type),
-            timeout=float(rendered_probe_raw.get("timeout") or readiness.timeout),
-            pattern=(rendered_probe_raw.get("pattern") or None),
+            timeout=_float_or_default(rendered_probe_raw.get("timeout"), readiness.timeout),
+            pattern=_string_or_none(rendered_probe_raw.get("pattern")),
             host=str(rendered_probe_raw.get("host") or readiness.host),
             port=port if isinstance(port, int) else None,
-            url=(rendered_probe_raw.get("url") or None),
-            status_codes=[int(x) for x in (rendered_probe_raw.get("status_codes") or [200])],
+            url=_string_or_none(rendered_probe_raw.get("url")),
+            status_codes=_int_list(rendered_probe_raw.get("status_codes"), [200]),
         )
 
-    restart_raw = rendered.get("restart") or {}
+    restart_raw = _as_spec_map(rendered.get("restart"))
     restart = RestartPolicy(
         policy=str(restart_raw.get("policy") or spec.restart.policy),
-        max_restarts=int(restart_raw.get("max_restarts") or spec.restart.max_restarts),
-        backoff_ms=int(restart_raw.get("backoff_ms") or spec.restart.backoff_ms),
+        max_restarts=_int_or_default(restart_raw.get("max_restarts"), spec.restart.max_restarts),
+        backoff_ms=_int_or_default(restart_raw.get("backoff_ms"), spec.restart.backoff_ms),
     )
 
     return ShellSpec(
         id=str(rendered.get("id") or spec.id),
-        command=rendered.get("command"),
-        cwd=(rendered.get("cwd") or None),
-        env={str(k): str(v) for k, v in (rendered.get("env") or {}).items()},
-        subgroups=[str(x) for x in (rendered.get("subgroups") or [])],
-        ui=rendered.get("ui") or {},
+        command=(
+            str(rendered["command"])
+            if isinstance(rendered.get("command"), str)
+            else _string_list(rendered.get("command"))
+        ),
+        cwd=_string_or_none(rendered.get("cwd")),
+        env=_string_dict(rendered.get("env")),
+        subgroups=_string_list(rendered.get("subgroups")),
+        ui=cast(dict[str, object], _as_spec_map(rendered.get("ui"))),
         pty_mode=str(rendered.get("pty_mode") or spec.pty_mode or "raw"),
         readiness=readiness,
         restart=restart,
@@ -187,16 +257,17 @@ def render_shellspec(spec: ShellSpec, *, ctx: Optional[Mapping[str, Any]] = None
     )
 
 
-def _parse_readiness(raw: Any) -> Optional[ReadinessProbe]:
+def _parse_readiness(raw: object) -> ReadinessProbe | None:
     if not isinstance(raw, dict):
         return None
-    type_val = raw.get("type")
+    raw_map = _as_spec_map(cast(object, raw))
+    type_val = raw_map.get("type")
     if not type_val:
         return None
-    status_codes = raw.get("status_codes") or raw.get("statusCodes") or [200]
+    status_codes = raw_map.get("status_codes") or raw_map.get("statusCodes") or [200]
     if not isinstance(status_codes, list):
         status_codes = [200]
-    port_val = raw.get("port")
+    port_val = raw_map.get("port")
     if isinstance(port_val, str) and port_val.strip().isdigit():
         port_val = int(port_val.strip())
     elif isinstance(port_val, (int, float)):
@@ -205,26 +276,27 @@ def _parse_readiness(raw: Any) -> Optional[ReadinessProbe]:
         port_val = None
     return ReadinessProbe(
         type=str(type_val),
-        timeout=float(raw.get("timeout", 30.0)),
-        pattern=raw.get("pattern"),
-        host=str(raw.get("host", "127.0.0.1")),
+        timeout=_float_or_default(raw_map.get("timeout", 30.0), 30.0),
+        pattern=_string_or_none(raw_map.get("pattern")),
+        host=str(raw_map.get("host", "127.0.0.1")),
         port=port_val,
-        url=raw.get("url"),
-        status_codes=[int(x) for x in status_codes],
+        url=_string_or_none(raw_map.get("url")),
+        status_codes=_int_list(status_codes, [200]),
     )
 
 
-def _parse_restart(raw: Any) -> RestartPolicy:
+def _parse_restart(raw: object) -> RestartPolicy:
     if not isinstance(raw, dict):
         return RestartPolicy()
+    raw_map = _as_spec_map(cast(object, raw))
     return RestartPolicy(
-        policy=str(raw.get("policy", "never")),
-        max_restarts=int(raw.get("max_restarts", 3)),
-        backoff_ms=int(raw.get("backoff_ms", 1000)),
+        policy=str(raw_map.get("policy", "never")),
+        max_restarts=_int_or_default(raw_map.get("max_restarts", 3), 3),
+        backoff_ms=_int_or_default(raw_map.get("backoff_ms", 1000), 1000),
     )
 
 
-def _spec_from_dict(shell_id: str, raw: Dict[str, Any]) -> ShellSpec:
+def _spec_from_dict(shell_id: str, raw: SpecMap) -> ShellSpec:
     command = raw.get("command")
     if not command:
         raise ValueError(f"shellspec '{shell_id}' missing command")
@@ -248,10 +320,10 @@ def _spec_from_dict(shell_id: str, raw: Dict[str, Any]) -> ShellSpec:
     return ShellSpec(
         id=str(raw.get("id") or shell_id),
         command=command if isinstance(command, str) else [str(x) for x in command],
-        cwd=raw.get("cwd"),
-        env={str(k): str(v) for k, v in env_raw.items()},
+        cwd=_string_or_none(raw.get("cwd")),
+        env={str(k): str(v) for k, v in cast(dict[object, object], env_raw).items()},
         subgroups=[str(x) for x in subgroups],
-        ui=dict(ui),
+        ui=cast(dict[str, object], dict(cast(dict[object, object], ui))),
         pty_mode=str(raw.get("pty_mode") or raw.get("ptyMode") or "raw"),
         readiness=_parse_readiness(raw.get("readiness")),
         restart=_parse_restart(raw.get("restart")),
@@ -260,7 +332,7 @@ def _spec_from_dict(shell_id: str, raw: Dict[str, Any]) -> ShellSpec:
     )
 
 
-def parse_shellspec_data(raw: Any, *, default_id: Optional[str] = None) -> Dict[str, ShellSpec]:
+def parse_shellspec_data(raw: object, *, default_id: str | None = None) -> dict[str, ShellSpec]:
     """Parse an in-memory shellspec document into a mapping of id -> ShellSpec.
 
     Supported shapes:
@@ -269,31 +341,33 @@ def parse_shellspec_data(raw: Any, *, default_id: Optional[str] = None) -> Dict[
     """
     if not isinstance(raw, dict):
         return {}
+    raw_map = _as_spec_map(cast(object, raw))
 
-    if isinstance(raw.get("shells"), dict):
-        out: Dict[str, ShellSpec] = {}
-        for shell_id, shell_def in raw.get("shells", {}).items():
+    shells_value = raw_map.get("shells")
+    if isinstance(shells_value, dict):
+        out: dict[str, ShellSpec] = {}
+        for shell_id, shell_def in cast(dict[object, object], shells_value).items():
             if not isinstance(shell_def, dict):
                 continue
-            spec = _spec_from_dict(str(shell_id), shell_def)
+            spec = _spec_from_dict(str(shell_id), cast(SpecMap, shell_def))
             out[spec.id] = spec
         return out
 
     # Single-shell format
-    if "command" in raw:
-        shell_id = str(raw.get("id") or default_id or "shell")
-        return {shell_id: _spec_from_dict(shell_id, raw)}
+    if "command" in raw_map:
+        shell_id = str(raw_map.get("id") or default_id or "shell")
+        return {shell_id: _spec_from_dict(shell_id, raw_map)}
 
     return {}
 
 
-def load_shellspec(path: Union[str, Path]) -> Dict[str, ShellSpec]:
+def load_shellspec(path: str | Path) -> dict[str, ShellSpec]:
     p = Path(path)
     if not p.exists():
         return {}
 
     if p.is_dir():
-        merged: Dict[str, ShellSpec] = {}
+        merged: dict[str, ShellSpec] = {}
         for child in sorted(p.iterdir()):
             if child.suffix.lower() not in (".yaml", ".yml"):
                 continue
@@ -305,11 +379,11 @@ def load_shellspec(path: Union[str, Path]) -> Dict[str, ShellSpec]:
         return merged
 
     with p.open("r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
+        raw = cast(object, yaml.safe_load(f))
     return parse_shellspec_data(raw, default_id=p.stem)
 
 
-def parse_shellspec_ref(ref: str) -> Tuple[str, Optional[str]]:
+def parse_shellspec_ref(ref: str) -> tuple[str, str | None]:
     """Parse `path[#id]` references."""
     if "#" not in ref:
         return ref, None

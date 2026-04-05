@@ -8,7 +8,7 @@ import re
 import signal
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Annotated, cast
 
 import aiofiles
 import fnmatch
@@ -17,15 +17,18 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from .. import get_manager
 from ..events import get_event_bus
+from ..process_snapshot import ProcessRecord
 from ..shutdown import ShutdownPolicy, shutdown_snapshot
 
 
 router = APIRouter()
 
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
+ShellInfo = dict[str, object]
+StyleMap = dict[str, dict[str, str]]
 
 
-def _escape_html(value: Any) -> str:
+def _escape_html(value: object | None) -> str:
     s = "" if value is None else str(value)
     return (
         s.replace("&", "&amp;")
@@ -35,10 +38,19 @@ def _escape_html(value: Any) -> str:
         .replace("'", "&#39;")
     )
 
-def _fmt_bytes(n: Any) -> str:
-    try:
+def _fmt_bytes(n: object) -> str:
+    if isinstance(n, bool):
+        return "-"
+    if isinstance(n, int):
+        val = n
+    elif isinstance(n, float):
         val = int(n)
-    except Exception:
+    elif isinstance(n, str):
+        try:
+            val = int(n)
+        except ValueError:
+            return "-"
+    else:
         return "-"
     if val <= 0:
         return "0"
@@ -48,25 +60,64 @@ def _fmt_bytes(n: Any) -> str:
         return f"{gib:.1f} GiB"
     return f"{mib:.0f} MiB"
 
-def _fmt_cpu(pct: Any) -> str:
-    try:
+def _fmt_cpu(pct: object) -> str:
+    if isinstance(pct, bool):
+        return "-"
+    if isinstance(pct, (int, float)):
         val = float(pct)
-    except Exception:
+    elif isinstance(pct, str):
+        try:
+            val = float(pct)
+        except ValueError:
+            return "-"
+    else:
         return "-"
     if val < 0:
         return "-"
     return f"{val:.1f}%"
 
 
-def _as_dict(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+def _as_dict(value: object) -> ShellInfo:
+    if isinstance(value, dict):
+        return cast(ShellInfo, value)
+    return {}
 
 
-def _as_list(value: Any) -> List[Any]:
-    return value if isinstance(value, list) else []
+def _as_list(value: object) -> list[object]:
+    if isinstance(value, list):
+        return cast(list[object], value)
+    return []
 
 
-def _shell_backend(info: Dict[str, Any]) -> str:
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _float_or_zero(value: object) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _shell_backend(info: ShellInfo) -> str:
     if info.get("backend"):
         return str(info.get("backend"))
     if info.get("uses_dtach"):
@@ -78,7 +129,7 @@ def _shell_backend(info: Dict[str, Any]) -> str:
     return "proc"
 
 
-def _is_shell_live(info: Dict[str, Any]) -> bool:
+def _is_shell_live(info: ShellInfo) -> bool:
     if not info:
         return False
     if info.get("status") != "running":
@@ -94,7 +145,7 @@ def _is_shell_live(info: Dict[str, Any]) -> bool:
 _CSS_COLOR_RE = re.compile(r"^[#()0-9a-zA-Z.,%\s-]+$")
 
 
-def _safe_css_value(value: Any) -> str:
+def _safe_css_value(value: object) -> str:
     s = "" if value is None else str(value).strip()
     if not s:
         return ""
@@ -103,22 +154,24 @@ def _safe_css_value(value: Any) -> str:
     return s
 
 
-def _collect_subgroup_styles(shells: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
-    merged: Dict[str, Dict[str, str]] = {}
+def _collect_subgroup_styles(shells: list[ShellInfo]) -> StyleMap:
+    merged: StyleMap = {}
     for info in shells:
-        ui = info.get("ui")
-        if not isinstance(ui, dict):
+        ui = _as_dict(info.get("ui"))
+        if not ui:
             continue
         raw = ui.get("subgroup_styles") or ui.get("subgroupStyles")
-        if not isinstance(raw, dict):
+        raw_styles = _as_dict(raw)
+        if not raw_styles:
             continue
-        for key, style in raw.items():
-            if not isinstance(style, dict):
+        for key, style_value in raw_styles.items():
+            style = _as_dict(style_value)
+            if not style:
                 continue
             bg = _safe_css_value(style.get("bg") or style.get("background"))
             border = _safe_css_value(style.get("border") or style.get("border_color") or style.get("borderColor"))
             color = _safe_css_value(style.get("color") or style.get("fg") or style.get("foreground"))
-            normalized: Dict[str, str] = {}
+            normalized: dict[str, str] = {}
             if bg:
                 normalized["bg"] = bg
             if border:
@@ -130,12 +183,12 @@ def _collect_subgroup_styles(shells: List[Dict[str, Any]]) -> Dict[str, Dict[str
     return merged
 
 
-def _subgroup_style_for(name: str, styles: Dict[str, Dict[str, str]]) -> Dict[str, str]:
+def _subgroup_style_for(name: str, styles: StyleMap) -> dict[str, str]:
     if not name:
         return {}
     if name in styles:
         return styles.get(name, {})
-    best_key: Optional[str] = None
+    best_key: str | None = None
     for pattern in styles.keys():
         if pattern == name:
             best_key = pattern
@@ -148,7 +201,7 @@ def _subgroup_style_for(name: str, styles: Dict[str, Dict[str, str]]) -> Dict[st
     return styles.get(best_key, {})
 
 
-def _card_style_for_subgroups(subgroups: List[str], styles: Dict[str, Dict[str, str]]) -> Dict[str, str]:
+def _card_style_for_subgroups(subgroups: list[str], styles: StyleMap) -> dict[str, str]:
     if not subgroups:
         return {}
     preferred = list(subgroups[1:]) + list(subgroups[:1])
@@ -159,14 +212,14 @@ def _card_style_for_subgroups(subgroups: List[str], styles: Dict[str, Dict[str, 
     return {}
 
 
-def _render_subgroup_pills(subgroups: List[Any], styles: Dict[str, Dict[str, str]]) -> str:
-    pills: List[str] = []
+def _render_subgroup_pills(subgroups: list[object], styles: StyleMap) -> str:
+    pills: list[str] = []
     for raw in subgroups:
         name = str(raw or "").strip()
         if not name:
             continue
         style = _subgroup_style_for(name, styles)
-        css_bits: List[str] = []
+        css_bits: list[str] = []
         if style.get("bg"):
             css_bits.append(f"background: {style['bg']};")
         if style.get("border"):
@@ -180,7 +233,7 @@ def _render_subgroup_pills(subgroups: List[Any], styles: Dict[str, Dict[str, str
     return '<div class="row">' + "".join(pills) + "</div>"
 
 
-def _render_copy_field(label: str, value: Any, *, extra_classes: str = "") -> str:
+def _render_copy_field(label: str, value: object | None, *, extra_classes: str = "") -> str:
     raw = "" if value is None else str(value)
     classes = "copy-field"
     if extra_classes:
@@ -194,16 +247,13 @@ def _render_copy_field(label: str, value: Any, *, extra_classes: str = "") -> st
     )
 
 
-def _exited_timestamp(info: Dict[str, Any]) -> float:
+def _exited_timestamp(info: ShellInfo) -> float:
     raw = info.get("updated_at")
     if raw is None:
         raw = info.get("created_at")
     if raw is None:
         return 0.0
-    try:
-        return float(raw)
-    except Exception:
-        return 0.0
+    return _float_or_zero(raw)
 
 
 def _fmt_exited_timestamp(ts: float) -> str:
@@ -216,7 +266,7 @@ def _fmt_exited_timestamp(ts: float) -> str:
     return dt.strftime("%m/%d/%Y %H:%M")
 
 
-def _exited_token(exited: List[Dict[str, Any]]) -> str:
+def _exited_token(exited: list[ShellInfo]) -> str:
     digest = hashlib.sha1()
     for item in sorted(exited, key=_exited_timestamp, reverse=True):
         digest.update(str(item.get("id") or "").encode("utf-8", errors="replace"))
@@ -226,8 +276,8 @@ def _exited_token(exited: List[Dict[str, Any]]) -> str:
     return digest.hexdigest()
 
 
-def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[str, Dict[str, str]]) -> str:
-    parts: List[str] = []
+def _render_exited_content(exited: list[ShellInfo], subgroup_styles: StyleMap) -> str:
+    parts: list[str] = []
     if not exited:
         parts.append('<div class="shell-card"><div class="shell-meta">No exited shells.</div></div>')
         return "\n".join(parts)
@@ -241,7 +291,7 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
         exited_stamp = _fmt_exited_timestamp(exited_ts)
         subgroups = _as_list(s.get("subgroups"))
         style = _card_style_for_subgroups([str(x) for x in subgroups], subgroup_styles)
-        style_bits: List[str] = []
+        style_bits: list[str] = []
         if style.get("bg"):
             style_bits.append(f"background: {style['bg']};")
         if style.get("border"):
@@ -265,15 +315,12 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
         parts.append(f'<button class="btn btn-small" type="button" data-collapse-toggle="{_escape_html(sid)}" aria-expanded="false">Expand</button>')
         if logs_available:
             parts.append(
-                f'<button class="btn btn-small" type="button" data-log-open="{_escape_html(sid)}" '
-                f'data-log-label="{_escape_html(label)}">Logs</button>'
+                f'<button class="btn btn-small" type="button" data-log-open="{_escape_html(sid)}" data-log-label="{_escape_html(label)}">Logs</button>'
             )
         else:
             parts.append('<button class="btn btn-small" type="button" disabled>Logs Purged</button>')
         parts.append(
-            f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/purge" data-fws-ajax="1">'
-            f'<button class="btn btn-small" type="submit">Purge</button>'
-            f"</form>"
+            f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/purge" data-fws-ajax="1"><button class="btn btn-small" type="submit">Purge</button></form>'
         )
         parts.append("</div>")
         parts.append("</div>")
@@ -299,7 +346,7 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
 async def _render_dashboard_html() -> str:
     mgr = await get_manager()
     shells = await mgr.list_shells()
-    described: List[Dict[str, Any]] = []
+    described: list[ShellInfo] = []
     for rec in shells:
         try:
             described.append(await mgr.describe(rec))
@@ -309,7 +356,7 @@ async def _render_dashboard_html() -> str:
     snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
 
     shell_pid_set = {info.get("pid") for info in described if info.get("pid")}
-    children_by_parent: Dict[int, List[Any]] = {}
+    children_by_parent: dict[int, list[ProcessRecord]] = {}
     for proc in snapshot.processes.values():
         if proc.parent_pid is None:
             continue
@@ -323,7 +370,7 @@ async def _render_dashboard_html() -> str:
     exited_token = _exited_token(exited)
     subgroup_styles = _collect_subgroup_styles(described)
 
-    parts: List[str] = []
+    parts: list[str] = []
 
     parts.append('<div class="section">')
     parts.append('<div class="section-title">Running <span class="muted">(%d)</span></div>' % len(running))
@@ -331,7 +378,7 @@ async def _render_dashboard_html() -> str:
     if not running:
         parts.append('<div class="shell-card"><div class="shell-meta">No running shells.</div></div>')
     else:
-        groups: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        groups: dict[str, dict[str, list[ShellInfo]]] = {}
         for s in running:
             subgroups = _as_list(s.get("subgroups"))
             normalized = [str(x) for x in subgroups if str(x).strip()]
@@ -339,13 +386,13 @@ async def _render_dashboard_html() -> str:
             subgroup = normalized[1] if len(normalized) >= 2 else "(root)"
             groups.setdefault(umbrella, {}).setdefault(subgroup, []).append(s)
 
-        def _group_sort_key(name: str) -> Any:
+        def _group_sort_key(name: str) -> tuple[int, str]:
             return (1, "") if name == "(ungrouped)" else (0, name.lower())
 
-        def _subgroup_sort_key(name: str) -> Any:
+        def _subgroup_sort_key(name: str) -> tuple[int, str]:
             return (0, "") if name == "app-worker" else (1, name.lower())
 
-        def _shell_sort_key(info: Dict[str, Any]) -> Any:
+        def _shell_sort_key(info: ShellInfo) -> tuple[int, str, str]:
             label = str(info.get("label") or "")
             return (0 if label.startswith("app-worker:") else 1, label.lower(), str(info.get("id") or ""))
 
@@ -359,14 +406,11 @@ async def _render_dashboard_html() -> str:
             parts.append('<div class="group-title">%s</div>' % _escape_html(umbrella))
             parts.append('<div class="shell-actions">')
             parts.append(
-                f'<button class="btn btn-small" type="button" data-group-toggle="{_escape_html(group_id)}" '
-                f'aria-expanded="false">Expand</button>'
+                f'<button class="btn btn-small" type="button" data-group-toggle="{_escape_html(group_id)}" aria-expanded="false">Expand</button>'
             )
             if umbrella != "(ungrouped)":
                 parts.append(
-                    f'<form method="post" action="/fws/action/app/{_escape_html(umbrella)}/shutdown" data-fws-ajax="1">'
-                    f'<button class="btn btn-small btn-danger" type="submit">Shutdown Group</button>'
-                    f"</form>"
+                    f'<form method="post" action="/fws/action/app/{_escape_html(umbrella)}/shutdown" data-fws-ajax="1"><button class="btn btn-small btn-danger" type="submit">Shutdown Group</button></form>'
                 )
             parts.append("</div>")
             parts.append("</div>")
@@ -378,7 +422,7 @@ async def _render_dashboard_html() -> str:
             parts.append(f'<div class="group-content" data-group-content="{_escape_html(group_id)}">')
             for subgroup in sorted(subgroup_map.keys(), key=_subgroup_sort_key):
                 style = _subgroup_style_for(subgroup, subgroup_styles)
-                style_bits: List[str] = []
+                style_bits: list[str] = []
                 if style.get("bg"):
                     style_bits.append(f"background: {style['bg']};")
                 if style.get("border"):
@@ -403,7 +447,7 @@ async def _render_dashboard_html() -> str:
                     rss = _fmt_bytes(stats.get("memory_rss"))
 
                     row_style = _card_style_for_subgroups([str(x) for x in subgroups], subgroup_styles)
-                    row_style_bits: List[str] = []
+                    row_style_bits: list[str] = []
                     if row_style.get("bg"):
                         row_style_bits.append(f"background: {row_style['bg']};")
                     if row_style.get("border"):
@@ -421,13 +465,10 @@ async def _render_dashboard_html() -> str:
                     parts.append('<div class="shell-actions">')
                     parts.append(f'<button class="btn btn-small" type="button" data-collapse-toggle="{_escape_html(sid)}" aria-expanded="false">Expand</button>')
                     parts.append(
-                        f'<button class="btn btn-small" type="button" data-log-open="{_escape_html(sid)}" '
-                        f'data-log-label="{_escape_html(label)}">Logs</button>'
+                        f'<button class="btn btn-small" type="button" data-log-open="{_escape_html(sid)}" data-log-label="{_escape_html(label)}">Logs</button>'
                     )
                     parts.append(
-                        f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/terminate" data-fws-ajax="1">'
-                        f'<button class="btn btn-small btn-danger" type="submit">Stop</button>'
-                        f"</form>"
+                        f'<form method="post" action="/fws/action/shell/{_escape_html(sid)}/terminate" data-fws-ajax="1"><button class="btn btn-small btn-danger" type="submit">Stop</button></form>'
                     )
                     parts.append("</div>")
                     parts.append("</div>")
@@ -446,8 +487,9 @@ async def _render_dashboard_html() -> str:
                         parts.append(pills)
 
                     # Hard tree children (pid parent/child).
-                    if pid and int(pid) in children_by_parent:
-                        children = [p for p in children_by_parent.get(int(pid), []) if p.pid not in shell_pid_set]
+                    pid_int = _int_or_none(pid)
+                    if pid_int is not None and pid_int in children_by_parent:
+                        children = [p for p in children_by_parent.get(pid_int, []) if p.pid not in shell_pid_set]
                         if children:
                             parts.append('<div class="children">')
                             parts.append('<div class="children-title">Child Processes (%d)</div>' % len(children))
@@ -462,9 +504,7 @@ async def _render_dashboard_html() -> str:
                                 )
                                 parts.append('<div class="row child-actions-inline">')
                                 parts.append(
-                                    f'<form method="post" action="/fws/action/pid/{_escape_html(child.pid)}/terminate" data-fws-ajax="1">'
-                                    f'<button class="btn btn-small btn-danger" type="submit">Kill</button>'
-                                    f"</form>"
+                                    f'<form method="post" action="/fws/action/pid/{_escape_html(child.pid)}/terminate" data-fws-ajax="1"><button class="btn btn-small btn-danger" type="submit">Kill</button></form>'
                                 )
                                 parts.append("</div>")
                                 parts.append("</div>")
@@ -488,16 +528,12 @@ async def _render_dashboard_html() -> str:
     parts.append('<button class="btn btn-small" type="button" id="fws-exited-toggle" aria-expanded="false">Expand Exited</button>')
     if exited:
         parts.append(
-            '<form method="post" action="/fws/action/exited/purge" data-fws-ajax="1" '
-            'data-confirm="Purge ALL exited shells (delete their logs + metadata)?">'
-            '<button class="btn btn-small btn-danger" type="submit">Purge Exited</button>'
-            "</form>"
+            '<form method="post" action="/fws/action/exited/purge" data-fws-ajax="1" data-confirm="Purge ALL exited shells (delete their logs + metadata)?"><button class="btn btn-small btn-danger" type="submit">Purge Exited</button></form>'
         )
     parts.append("</div>")
     parts.append("</div>")
     parts.append(
-        '<div class="exited-content is-collapsed" id="fws-exited-content" '
-        f'data-loaded="0" data-count="{_escape_html(len(exited))}" data-token="{_escape_html(exited_token)}"></div>'
+        f'<div class="exited-content is-collapsed" id="fws-exited-content" data-loaded="0" data-count="{_escape_html(len(exited))}" data-token="{_escape_html(exited_token)}"></div>'
     )
     parts.append("</div>")
     parts.append("</div>")
@@ -527,7 +563,7 @@ async def fws_index() -> FileResponse:
 async def fws_exited_fragment() -> HTMLResponse:
     mgr = await get_manager()
     shells = await mgr.list_shells()
-    described: List[Dict[str, Any]] = []
+    described: list[ShellInfo] = []
     for rec in shells:
         try:
             described.append(await mgr.describe(rec))
@@ -584,7 +620,7 @@ async def fws_purge_logs(request: Request) -> Response:
     shells = await mgr.list_shells()
 
     logs_root = Path(mgr.logs_dir).resolve(strict=False)
-    candidates: List[Path] = []
+    candidates: list[Path] = []
     for rec in shells:
         candidates.append(Path(rec.stdout_log))
         candidates.append(Path(rec.stderr_log))
@@ -600,7 +636,7 @@ async def fws_purge_logs(request: Request) -> Response:
         if resolved in seen:
             continue
         seen.add(resolved)
-        await _truncate_log_file(resolved, logs_root=logs_root)
+        _ = await _truncate_log_file(resolved, logs_root=logs_root)
 
     if _is_ajax(request):
         return Response(status_code=204)
@@ -614,7 +650,7 @@ async def fws_purge_exited(request: Request) -> Response:
     exited = [s for s in shells if (getattr(s, "status", None) or "") == "exited"]
     for rec in exited:
         try:
-            await mgr.remove_shell(rec.id, force=True)
+            _ = await mgr.remove_shell(rec.id, force=True)
         except Exception:
             pass
     if _is_ajax(request):
@@ -634,7 +670,7 @@ async def fws_terminate_shell(shell_id: str, request: Request) -> Response:
 @router.post("/fws/action/shell/{shell_id}/purge")
 async def fws_purge_shell(shell_id: str, request: Request) -> Response:
     mgr = await get_manager()
-    await mgr.remove_shell(shell_id, force=True)
+    _ = await mgr.remove_shell(shell_id, force=True)
     if _is_ajax(request):
         return Response(status_code=204)
     return RedirectResponse(url="/fws/", status_code=303)
@@ -658,14 +694,14 @@ async def fws_shutdown_app(app_id: str, request: Request) -> Response:
     targets = [s for s in shells if (s.derive_app_id() or "") == app_id and s.pid and s.status == "running"]
     snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
     root_pids = [s.pid for s in targets if s.pid]
-    await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]), root_pids=root_pids)
+    _ = await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]), root_pids=root_pids)
     if _is_ajax(request):
         return Response(status_code=204)
     return RedirectResponse(url="/fws/", status_code=303)
 
 
 @router.post("/fws/action/shutdown")
-async def fws_shutdown(scope: str = Form("tree")) -> RedirectResponse:
+async def fws_shutdown(scope: Annotated[str, Form()] = "tree") -> RedirectResponse:
     mgr = await get_manager()
     shells = await mgr.list_shells()
 
@@ -676,7 +712,7 @@ async def fws_shutdown(scope: str = Form("tree")) -> RedirectResponse:
         return RedirectResponse(url="/fws/", status_code=303)
 
     snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
-    await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]))
+    _ = await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]))
     return RedirectResponse(url="/fws/", status_code=303)
 
 
@@ -743,12 +779,12 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
         return
 
     try:
-        stdout_lines: List[str] = []
+        stdout_lines: list[str] = []
         if stdout_path.exists():
             async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
                 stdout_lines = (await f.read()).splitlines()
 
-        stderr_lines: List[str] = []
+        stderr_lines: list[str] = []
         if stderr_path.exists():
             async with aiofiles.open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
                 stderr_lines = (await f.read()).splitlines()
@@ -771,7 +807,7 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
                 current = stdout_path.stat().st_size
                 if current > stdout_size:
                     async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
-                        await f.seek(stdout_size)
+                        _ = await f.seek(stdout_size)
                         new = await f.read()
                     await websocket.send_json({"type": "update", "stream": "stdout", "data": new})
                     stdout_size = current
@@ -783,7 +819,7 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
                 current = stderr_path.stat().st_size
                 if current > stderr_size:
                     async with aiofiles.open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
-                        await f.seek(stderr_size)
+                        _ = await f.seek(stderr_size)
                         new = await f.read()
                     await websocket.send_json({"type": "update", "stream": "stderr", "data": new})
                     stderr_size = current

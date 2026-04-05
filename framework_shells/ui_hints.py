@@ -1,11 +1,14 @@
 import json
 from pathlib import Path
-from typing import Dict, Any, Union
+from typing import cast
 
-def load_ui_hints(apps_dir: Union[str, Path]) -> Dict[str, Any]:
+ManifestMap = dict[str, object]
+
+
+def load_ui_hints(apps_dir: str | Path) -> dict[str, object]:
     """Load framework shell UI hints from app manifests in a directory."""
     apps_dir = Path(apps_dir)
-    out: Dict[str, Any] = {}
+    out: dict[str, object] = {}
     
     if not apps_dir.exists():
         return out
@@ -20,14 +23,18 @@ def load_ui_hints(apps_dir: Union[str, Path]) -> Dict[str, Any]:
             
         try:
             with open(manifest_path, "r", encoding="utf-8") as fh:
-                manifest = json.load(fh)
+                loaded = cast(object, json.load(fh))
         except Exception:
             continue
-            
-        app_id = manifest.get("id") or entry.name
+
+        if not isinstance(loaded, dict):
+            continue
+        manifest = cast(ManifestMap, loaded)
+        app_id = manifest.get("id")
         ui = manifest.get("framework_shell_ui")
+        resolved_app_id = str(app_id) if app_id else entry.name
         
         if isinstance(ui, dict) and ui:
-            out[app_id] = ui
+            out[resolved_app_id] = cast(object, ui)
             
     return out

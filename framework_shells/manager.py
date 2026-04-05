@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import fcntl
 import json
 import os
@@ -16,13 +15,11 @@ import subprocess
 import termios
 import time
 import uuid
-import socket
 import inspect
 from asyncio import Lock as AsyncLock
 from asyncio import Queue as AsyncQueue
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, cast
 
 import aiofiles
 
@@ -36,7 +33,7 @@ from .record import (
     normalize_backend,
 )
 from .pty import PTYState, PipeState
-from .events import get_event_bus, ShellEvent, EventType
+from .events import EventBus, EventType, ShellEvent, get_event_bus
 from .hooks import ShellLifecycleHooks
 from .process_snapshot import (
     ExternalProcessProvider,
@@ -62,6 +59,8 @@ except Exception:
 HOME_DIR = Path(os.path.expanduser("~"))
 PTY_MODE_RAW = "raw"
 PTY_MODE_INTERACTIVE = "interactive"
+JSONMap = dict[str, object]
+JSONList = list[JSONMap]
 
 def _truthy_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -85,6 +84,27 @@ def _normalize_pty_mode(value: Optional[str], *, default: str = PTY_MODE_RAW) ->
 
 class FrameworkShellManager:
     """Creates and tracks background framework shells with runtime isolation."""
+
+    store: RuntimeStore
+    metadata_dir: Path
+    logs_dir: Path
+    sockets_dir: Path
+    max_app_shells: int
+    max_service_shells: int
+    run_id: str | None
+    launcher_pid: int
+    started_at: float
+    _pty: dict[str, PTYState]
+    _pipes: dict[str, PipeState]
+    _event_bus: EventBus
+    _lock_instance: AsyncLock | None
+    _dtach_bin: str | None
+    _enable_dtach_proxy: bool
+    _signal_winch_on_resize: bool
+    _default_pty_mode: str
+    _hooks: ShellLifecycleHooks | None
+    external_process_provider: ExternalProcessProvider | None
+    _procfs_provider: ProcfsProcessProvider | None
 
     def __init__(
         self,
@@ -110,8 +130,8 @@ class FrameworkShellManager:
         self.run_id = run_id
         self.launcher_pid = os.getpid()
         self.started_at = time.time()
-        self._pty: Dict[str, PTYState] = {}
-        self._pipes: Dict[str, PipeState] = {}
+        self._pty = {}
+        self._pipes = {}
         
         self._event_bus = get_event_bus()
         self._lock_instance: AsyncLock | None = None
@@ -1202,7 +1222,7 @@ class FrameworkShellManager:
         *,
         include_logs: bool = False,
         tail_lines: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> JSONMap:
         """Return a dict with shell payload, stats, and optionally logs."""
         payload = record.to_payload()
         payload["capabilities"] = await self.get_shell_capabilities(record)
@@ -1214,8 +1234,8 @@ class FrameworkShellManager:
             }
         return payload
 
-    async def _process_stats(self, record: ShellRecord) -> Dict[str, Any]:
-        stats: Dict[str, Any] = {
+    async def _process_stats(self, record: ShellRecord) -> JSONMap:
+        stats: JSONMap = {
             "alive": False,
             "uptime": None,
         }
@@ -1262,7 +1282,7 @@ class FrameworkShellManager:
             decoded_data = data.decode("utf-8", errors="replace")
         return decoded_data.splitlines(keepends=True)[-lines:]
 
-    async def _prune_exited_shells_locked(self, *, max_count: int = 50) -> Dict[str, Any]:
+    async def _prune_exited_shells_locked(self, *, max_count: int = 50) -> JSONMap:
         records: List[ShellRecord] = []
         async for record in self._aiter_records():
             records.append(record)
@@ -1296,12 +1316,12 @@ class FrameworkShellManager:
 
         return {"kept": max_count, "purged": len(removed_ids), "removed_ids": removed_ids}
 
-    async def prune_exited_shells(self, *, max_count: int = 50) -> Dict[str, Any]:
+    async def prune_exited_shells(self, *, max_count: int = 50) -> JSONMap:
         """Keep only the newest exited shell records, removing older metadata/logs."""
         async with self._get_lock():
             return await self._prune_exited_shells_locked(max_count=max_count)
 
-    async def _prune_exited_logs_locked(self, *, max_count: int = 50) -> Dict[str, Any]:
+    async def _prune_exited_logs_locked(self, *, max_count: int = 50) -> JSONMap:
         records: List[ShellRecord] = []
         async for record in self._aiter_records():
             records.append(record)
@@ -1337,7 +1357,7 @@ class FrameworkShellManager:
 
         return {"kept": max_count, "trimmed_logs": len(trimmed_shell_ids), "shell_ids": trimmed_shell_ids}
 
-    async def prune_exited_logs(self, *, max_count: int = 50) -> Dict[str, Any]:
+    async def prune_exited_logs(self, *, max_count: int = 50) -> JSONMap:
         """Keep only the newest exited shell log files, preserving metadata records."""
         async with self._get_lock():
             return await self._prune_exited_logs_locked(max_count=max_count)
@@ -1347,14 +1367,14 @@ class FrameworkShellManager:
         path: Path,
         *,
         lines: Optional[List[str]] = None,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        extra: JSONMap | None = None,
+    ) -> JSONMap:
         exists = path.exists()
         stat = await asyncio.to_thread(path.stat) if exists else None
         mtime = float(stat.st_mtime) if stat else None
         size = int(stat.st_size) if stat else 0
         age_seconds = max(0.0, time.time() - mtime) if mtime is not None else None
-        payload: Dict[str, Any] = {
+        payload: JSONMap = {
             "path": str(path),
             "mtime": mtime,
             "size": size,
@@ -1372,7 +1392,7 @@ class FrameworkShellManager:
         *,
         stream: str = "both",
         lines: int = 200,
-    ) -> Dict[str, Any]:
+    ) -> JSONMap:
         rec = await self.get_shell(shell_id)
         if not rec:
             raise KeyError(f"Shell not found: {shell_id}")
@@ -1381,7 +1401,7 @@ class FrameworkShellManager:
         if stream_name not in {"stdout", "stderr", "both"}:
             raise ValueError(f"Invalid stream: {stream}")
 
-        result: Dict[str, Any] = {
+        result: JSONMap = {
             "shell_id": shell_id,
             "created_at": rec.created_at,
             "updated_at": rec.updated_at,
@@ -1394,9 +1414,10 @@ class FrameworkShellManager:
                 lines=max(0, int(lines)),
                 max_bytes=self.LOG_TAIL_BYTES,
             )
+            stdout_records = cast(list[dict[str, object]], stdout_window["records"])
             result["stdout"] = await self._log_stream_payload(
                 stdout_path,
-                lines=[str(record.get("text") or "") for record in stdout_window["records"]],
+                lines=[str(record.get("text") or "") for record in stdout_records],
                 extra={
                     "byte_window_start": stdout_window["byte_window_start"],
                     "byte_window_end": stdout_window["byte_window_end"],
@@ -1412,9 +1433,10 @@ class FrameworkShellManager:
                 lines=max(0, int(lines)),
                 max_bytes=self.LOG_TAIL_BYTES,
             )
+            stderr_records = cast(list[dict[str, object]], stderr_window["records"])
             result["stderr"] = await self._log_stream_payload(
                 stderr_path,
-                lines=[str(record.get("text") or "") for record in stderr_window["records"]],
+                lines=[str(record.get("text") or "") for record in stderr_records],
                 extra={
                     "byte_window_start": stderr_window["byte_window_start"],
                     "byte_window_end": stderr_window["byte_window_end"],
@@ -1433,13 +1455,13 @@ class FrameworkShellManager:
         limit: int,
         regex: bool,
         ignore_case: bool,
-    ) -> List[Dict[str, Any]]:
+    ) -> JSONList:
         if not query or limit <= 0 or not path.exists():
             return []
 
         flags = re.IGNORECASE if ignore_case else 0
         matcher = re.compile(query, flags) if regex else None
-        matches: List[Dict[str, Any]] = []
+        matches: JSONList = []
 
         async with aiofiles.open(path, "r", encoding="utf-8", errors="replace") as fh:
             line_number = 0
@@ -1465,7 +1487,7 @@ class FrameworkShellManager:
         limit: int = 100,
         regex: bool = False,
         ignore_case: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> JSONMap:
         rec = await self.get_shell(shell_id)
         if not rec:
             raise KeyError(f"Shell not found: {shell_id}")
@@ -1475,7 +1497,7 @@ class FrameworkShellManager:
             raise ValueError(f"Invalid stream: {stream}")
 
         clamped_limit = max(1, min(int(limit), 1000))
-        result: Dict[str, Any] = {
+        result: JSONMap = {
             "shell_id": shell_id,
             "created_at": rec.created_at,
             "updated_at": rec.updated_at,
@@ -1523,7 +1545,7 @@ class FrameworkShellManager:
         format: Optional[str] = None,
         signature: Optional[str] = None,
         exclude_signature: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> JSONMap:
         rec = await self.get_shell(shell_id)
         if not rec:
             raise KeyError(f"Shell not found: {shell_id}")
@@ -1539,7 +1561,8 @@ class FrameworkShellManager:
         signature_value = str(signature or "").strip() or None
         line_count = max(0, int(lines))
 
-        result: Dict[str, Any] = {
+        exclude_signature_value = str(exclude_signature or "").strip() or None
+        result: JSONMap = {
             "shell_id": shell_id,
             "created_at": rec.created_at,
             "updated_at": rec.updated_at,
@@ -1551,7 +1574,7 @@ class FrameworkShellManager:
             "ignore_case": bool(ignore_case),
             "format": format_name,
             "signature": signature_value,
-            "exclude_signature": str(exclude_signature or "").strip() or None,
+            "exclude_signature": exclude_signature_value,
         }
 
         if stream_name in {"stdout", "both"}:
@@ -1567,7 +1590,7 @@ class FrameworkShellManager:
                 ignore_case=ignore_case,
                 format_filter=format_name,
                 signature_filter=signature_value,
-                exclude_signature=result["exclude_signature"],
+                exclude_signature=exclude_signature_value,
             )
             result["stdout"] = await self._log_stream_payload(
                 stdout_path,
@@ -1587,7 +1610,7 @@ class FrameworkShellManager:
                 ignore_case=ignore_case,
                 format_filter=format_name,
                 signature_filter=signature_value,
-                exclude_signature=result["exclude_signature"],
+                exclude_signature=exclude_signature_value,
             )
             result["stderr"] = await self._log_stream_payload(
                 stderr_path,
@@ -1607,7 +1630,7 @@ class FrameworkShellManager:
         """
         return self._pipes.get(shell_id)
 
-    async def get_shell_capabilities(self, record_or_shell_id: ShellRecord | str) -> Dict[str, Any]:
+    async def get_shell_capabilities(self, record_or_shell_id: ShellRecord | str) -> JSONMap:
         if isinstance(record_or_shell_id, str):
             record = await self.get_shell(record_or_shell_id)
             if record is None:
@@ -1786,7 +1809,7 @@ class FrameworkShellManager:
         data: str,
         *,
         append_newline: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> JSONMap:
         record = await self.get_shell(shell_id)
         if not record:
             raise KeyError(f"Shell not found: {shell_id}")
@@ -1816,7 +1839,7 @@ class FrameworkShellManager:
             "eof_sent": False,
         }
 
-    async def send_shell_eof(self, shell_id: str) -> Dict[str, Any]:
+    async def send_shell_eof(self, shell_id: str) -> JSONMap:
         record = await self.get_shell(shell_id)
         if not record:
             raise KeyError(f"Shell not found: {shell_id}")
@@ -1841,7 +1864,7 @@ class FrameworkShellManager:
 
     async def resize_pty(self, shell_id: str, cols: int, rows: int) -> None:
         """Resize a shell's PTY."""
-        proxy_pid: Optional[int] = None
+        proxy_pid: int | None = None
         async with self._get_lock():
             state = self._pty.get(shell_id)
             if not state:
@@ -1849,7 +1872,7 @@ class FrameworkShellManager:
             proxy_pid = state.proxy_pid
             winsz = struct.pack("HHHH", max(1, rows), max(1, cols), 0, 0)
             try:
-                await asyncio.to_thread(fcntl.ioctl, state.master_fd, termios.TIOCSWINSZ, winsz)
+                _ = await asyncio.to_thread(fcntl.ioctl, state.master_fd, termios.TIOCSWINSZ, winsz)
             except Exception:
                 pass
 

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
 
 from .record import ShellRecord
 
 
-MaybeAwaitable = Any
+MaybeAwaitable = Awaitable[object] | object | None
 
 
 @dataclass(frozen=True)
@@ -18,11 +18,11 @@ class ShellLifecycleHooks:
     """
 
     # Called after a shell is confirmed running and persisted.
-    on_shell_running: Optional[Callable[[ShellRecord], MaybeAwaitable]] = None
+    on_shell_running: Callable[[ShellRecord], MaybeAwaitable] | None = None
 
     # Called when a running shell from a previous run is adopted.
-    on_shell_adopted: Optional[Callable[[ShellRecord], MaybeAwaitable]] = None
+    on_shell_adopted: Callable[[ShellRecord], MaybeAwaitable] | None = None
 
     # Called when a shell is marked exited (often discovered during adoption).
     # `last_pid` is the PID that was previously associated with the shell.
-    on_shell_exited: Optional[Callable[[ShellRecord, Optional[int]], MaybeAwaitable]] = None
+    on_shell_exited: Callable[[ShellRecord, int | None], MaybeAwaitable] | None = None

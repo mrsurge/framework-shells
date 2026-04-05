@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Optional
 import os
 import hashlib
 
@@ -17,7 +16,14 @@ def _default_base_dir() -> Path:
 class RuntimeStore:
     """Namespaced storage paths for a framework runtime."""
     
-    def __init__(self, base_dir: Optional[Path] = None):
+    secret: str
+    runtime_id: str
+    root: Path
+    metadata_dir: Path
+    logs_dir: Path
+    sockets_dir: Path
+
+    def __init__(self, base_dir: Path | None = None):
         self.secret = get_secret()
         self.runtime_id = derive_runtime_id(self.secret)
         

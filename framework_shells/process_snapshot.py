@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Protocol
+from typing import Protocol, TypeVar, cast
+
+MetadataValue = object
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -15,17 +19,17 @@ class ProcessRecord:
     """
 
     pid: int
-    parent_pid: Optional[int] = None
+    parent_pid: int | None = None
     type: str = "process"
-    label: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    shell_id: Optional[str] = None
+    label: str | None = None
+    metadata: dict[str, MetadataValue] = field(default_factory=dict)
+    shell_id: str | None = None
 
 
 @dataclass(frozen=True)
 class ProcessSnapshot:
     captured_at: float
-    processes: Dict[int, ProcessRecord]
+    processes: dict[int, ProcessRecord]
 
 
 class ExternalProcessProvider(Protocol):
@@ -34,14 +38,14 @@ class ExternalProcessProvider(Protocol):
     Implementations may be sync or async.
     """
 
-    def list_processes(self, *, root_pids: List[int]) -> Any:  # pragma: no cover
+    def list_processes(self, *, root_pids: list[int]) -> list[ProcessRecord] | Awaitable[list[ProcessRecord]]:  # pragma: no cover
         raise NotImplementedError
 
 
-async def _maybe_await(value: Any) -> Any:
+async def _maybe_await(value: T | Awaitable[T]) -> T:
     if asyncio.iscoroutine(value) or asyncio.isfuture(value):
-        return await value
-    return value
+        return cast(T, await value)
+    return cast(T, value)
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -52,7 +56,7 @@ def _is_pid_alive(pid: int) -> bool:
     return True
 
 
-def _read_text(path: str) -> Optional[str]:
+def _read_text(path: str) -> str | None:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             return fh.read()
@@ -60,14 +64,14 @@ def _read_text(path: str) -> Optional[str]:
         return None
 
 
-def _children_of(pid: int) -> List[int]:
+def _children_of(pid: int) -> list[int]:
     # Prefer /proc/<pid>/task/<pid>/children (fast).
     txt = _read_text(f"/proc/{pid}/task/{pid}/children")
     if txt is not None:
         txt = txt.strip()
         if not txt:
             return []
-        out: List[int] = []
+        out: list[int] = []
         for part in txt.split():
             try:
                 out.append(int(part))
@@ -102,14 +106,14 @@ def _children_of(pid: int) -> List[int]:
     return out
 
 
-def _read_comm(pid: int) -> Optional[str]:
+def _read_comm(pid: int) -> str | None:
     txt = _read_text(f"/proc/{pid}/comm")
     if not txt:
         return None
     return txt.strip() or None
 
 
-def _read_cmdline(pid: int) -> Optional[str]:
+def _read_cmdline(pid: int) -> str | None:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as fh:
             raw = fh.read()
@@ -132,11 +136,11 @@ class ProcfsProcessProvider:
         self._max_depth = max_depth
         self._max_processes = max_processes
 
-    def list_processes(self, *, root_pids: List[int]) -> List[ProcessRecord]:
+    def list_processes(self, *, root_pids: list[int]) -> list[ProcessRecord]:
         visited: set[int] = set()
-        out: List[ProcessRecord] = []
+        out: list[ProcessRecord] = []
 
-        queue: List[tuple[int, int]] = []
+        queue: list[tuple[int, int]] = []
         for root in root_pids:
             try:
                 root_pid = int(root)
@@ -181,16 +185,15 @@ class ProcfsProcessProvider:
 async def collect_external_processes(
     provider: ExternalProcessProvider,
     *,
-    root_pids: List[int],
-) -> List[ProcessRecord]:
+    root_pids: list[int],
+) -> list[ProcessRecord]:
     """Call a provider that may be sync or async."""
     value = provider.list_processes(root_pids=root_pids)
     processes = await _maybe_await(value)
     if not isinstance(processes, list):
         return []
-    out: List[ProcessRecord] = []
+    out: list[ProcessRecord] = []
     for item in processes:
         if isinstance(item, ProcessRecord):
             out.append(item)
     return out
-

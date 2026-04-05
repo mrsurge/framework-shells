@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import signal
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Set
+from typing import Protocol, TypedDict
 
 from .process_snapshot import ProcessRecord, ProcessSnapshot
 
@@ -13,12 +14,20 @@ class ShellTerminator(Protocol):
     async def terminate_shell(self, shell_id: str, force: bool = False) -> None: ...
 
 
+class ShutdownStats(TypedDict):
+    total: int
+    terminated: int
+    clean_exits: int
+    force_killed: int
+    errors: list[str]
+
+
 @dataclass(frozen=True)
 class ShutdownPolicy:
     sigterm_timeout_s: float = 2.0
     sigkill_timeout_s: float = 2.0
     poll_interval_s: float = 0.1
-    types_last: List[str] = field(default_factory=list)
+    types_last: list[str] = field(default_factory=list)
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -55,18 +64,18 @@ def _wait_pid_exit(pid: int, *, timeout_s: float, poll_interval_s: float) -> boo
 def plan_shutdown(
     processes: Iterable[ProcessRecord],
     *,
-    policy: Optional[ShutdownPolicy] = None,
-) -> List[ProcessRecord]:
+    policy: ShutdownPolicy | None = None,
+) -> list[ProcessRecord]:
     """Return processes in dependency order: children first, parents last.
 
     The planner is host-agnostic. Hosts may supply semantics via `type` and
     `policy.types_last` (e.g. kill "framework" last).
     """
     policy = policy or ShutdownPolicy()
-    by_pid: Dict[int, ProcessRecord] = {rec.pid: rec for rec in processes if rec and rec.pid}
-    depth_cache: Dict[int, int] = {}
+    by_pid: dict[int, ProcessRecord] = {rec.pid: rec for rec in processes if rec and rec.pid}
+    depth_cache: dict[int, int] = {}
 
-    def depth(pid: int, visiting: Optional[Set[int]] = None) -> int:
+    def depth(pid: int, visiting: set[int] | None = None) -> int:
         if pid in depth_cache:
             return depth_cache[pid]
         visiting = visiting or set()
@@ -101,15 +110,15 @@ def collect_descendants(
     snapshot: ProcessSnapshot,
     *,
     root_pids: Iterable[int],
-) -> Set[int]:
-    children_by_parent: Dict[int, List[int]] = {}
+) -> set[int]:
+    children_by_parent: dict[int, list[int]] = {}
     for rec in snapshot.processes.values():
         if not rec.parent_pid:
             continue
         children_by_parent.setdefault(rec.parent_pid, []).append(rec.pid)
 
-    out: Set[int] = set()
-    queue: List[int] = []
+    out: set[int] = set()
+    queue: list[int] = []
     for root in root_pids:
         try:
             pid = int(root)
@@ -129,17 +138,17 @@ def collect_descendants(
 
 
 async def execute_shutdown_plan(
-    plan: List[ProcessRecord],
+    plan: list[ProcessRecord],
     *,
-    manager: Optional[ShellTerminator] = None,
-    policy: Optional[ShutdownPolicy] = None,
-    exclude_pids: Optional[Set[int]] = None,
-    log: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
+    manager: ShellTerminator | None = None,
+    policy: ShutdownPolicy | None = None,
+    exclude_pids: set[int] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> ShutdownStats:
     policy = policy or ShutdownPolicy()
     exclude_pids = exclude_pids or set()
 
-    stats: Dict[str, Any] = {
+    stats: ShutdownStats = {
         "total": len(plan),
         "terminated": 0,
         "clean_exits": 0,
@@ -200,7 +209,7 @@ async def execute_shutdown_plan(
             except Exception as exc:
                 stats["errors"].append(f"PID {pid} SIGKILL: {exc}")
 
-        _wait_pid_exit(pid, timeout_s=policy.sigkill_timeout_s, poll_interval_s=policy.poll_interval_s)
+        _ = _wait_pid_exit(pid, timeout_s=policy.sigkill_timeout_s, poll_interval_s=policy.poll_interval_s)
         stats["terminated"] += 1
 
     return stats
@@ -209,12 +218,12 @@ async def execute_shutdown_plan(
 async def shutdown_snapshot(
     snapshot: ProcessSnapshot,
     *,
-    manager: Optional[ShellTerminator] = None,
-    policy: Optional[ShutdownPolicy] = None,
-    root_pids: Optional[Iterable[int]] = None,
-    exclude_pids: Optional[Set[int]] = None,
-    log: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
+    manager: ShellTerminator | None = None,
+    policy: ShutdownPolicy | None = None,
+    root_pids: Iterable[int] | None = None,
+    exclude_pids: set[int] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> ShutdownStats:
     """Plan and execute a shutdown against a snapshot.
 
     If `root_pids` is provided, only that subtree is shut down.

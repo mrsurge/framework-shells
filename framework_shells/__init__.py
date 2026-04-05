@@ -12,12 +12,25 @@ from .shutdown import ShutdownPolicy, plan_shutdown, shutdown_snapshot
 from .shellspec import ShellSpec, ReadinessProbe, RestartPolicy, load_shellspec, render_shellspec
 
 import asyncio
-from typing import Any, Optional
+from typing import TypedDict, Unpack
+
+
+class FrameworkShellManagerConfig(TypedDict, total=False):
+    store: RuntimeStore
+    max_app_shells: int
+    max_service_shells: int
+    run_id: str
+    enable_dtach_proxy: bool
+    signal_winch_on_resize: bool
+    default_pty_mode: str
+    process_hooks: ShellLifecycleHooks
+    external_process_provider: ExternalProcessProvider
+    enable_procfs_process_discovery: bool
 
 # Singleton manager instance
-_manager_instance: Optional[FrameworkShellManager] = None
-_manager_lock: Optional[asyncio.Lock] = None
-_manager_kwargs: Optional[dict[str, Any]] = None
+_manager_instance: FrameworkShellManager | None = None
+_manager_lock: asyncio.Lock | None = None
+_manager_kwargs: FrameworkShellManagerConfig | None = None
 
 def _get_lock() -> asyncio.Lock:
     global _manager_lock
@@ -25,7 +38,7 @@ def _get_lock() -> asyncio.Lock:
         _manager_lock = asyncio.Lock()
     return _manager_lock
 
-async def get_manager(**kwargs) -> FrameworkShellManager:
+async def get_manager(**kwargs: Unpack[FrameworkShellManagerConfig]) -> FrameworkShellManager:
     """Get or create the singleton FrameworkShellManager instance.
 
     This is a process-wide singleton. If kwargs are provided after the manager
@@ -40,11 +53,13 @@ async def get_manager(**kwargs) -> FrameworkShellManager:
     
     async with _get_lock():
         if _manager_instance is None:
-            _manager_kwargs = dict(kwargs)
+            _manager_kwargs = kwargs
             _manager_instance = FrameworkShellManager(**kwargs)
-            async with _manager_instance._get_lock():
-                await _manager_instance._adopt_orphaned_shells()
+            manager = _manager_instance
+            async with manager._get_lock():
+                await manager._adopt_orphaned_shells()
     
+    assert _manager_instance is not None
     return _manager_instance
 
 __all__ = [

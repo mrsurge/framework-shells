@@ -6,10 +6,11 @@ import sys
 import shutil
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from ..manager import FrameworkShellManager
 from ..process_snapshot import ProcfsProcessProvider, ProcessSnapshot
+from ..record import ShellRecord
 from ..shutdown import ShutdownPolicy, shutdown_snapshot
 from ..shellspec import load_shellspec
 from ..orchestrator import Orchestrator
@@ -66,7 +67,7 @@ def setup_environment():
         secret = os.environ.get("FRAMEWORK_SHELLS_SECRET", "")
         if secret:
             if had_secret_env or not secret_file.exists():
-                secret_file.write_text(secret)
+                _ = secret_file.write_text(secret)
                 try:
                     os.chmod(secret_file, 0o600)
                 except Exception:
@@ -74,8 +75,8 @@ def setup_environment():
     except Exception:
         pass
 
-def _parse_env_kv(pairs: Optional[List[str]]) -> Dict[str, str]:
-    out: Dict[str, str] = {}
+def _parse_env_kv(pairs: list[str] | None) -> dict[str, str]:
+    out: dict[str, str] = {}
     for item in pairs or []:
         if "=" not in item:
             raise ValueError(f"Invalid --env value {item!r} (expected KEY=VALUE)")
@@ -86,43 +87,73 @@ def _parse_env_kv(pairs: Optional[List[str]]) -> Dict[str, str]:
         out[k] = v
     return out
 
-def _print_shell_candidates(cands: List[Any]) -> None:
+def _print_shell_candidates(cands: list[ShellRecord]) -> None:
     for s in cands:
         try:
             backend = (
-                getattr(s, "backend", None)
+                s.backend
                 or (
                     "dtach"
-                    if getattr(s, "uses_dtach", False)
-                    else ("pipe" if getattr(s, "uses_pipes", False) else ("pty" if getattr(s, "uses_pty", False) else "proc"))
+                    if s.uses_dtach
+                    else ("pipe" if s.uses_pipes else ("pty" if s.uses_pty else "proc"))
                 )
             )
             print(f"- {s.id}  label={s.label or '-'}  status={s.status}  pid={s.pid or '-'}  backend={backend}")
         except Exception:
             try:
-                print(f"- {getattr(s, 'id', '-')}: {s}")
+                print(f"- {s.id}: {s}")
             except Exception:
                 pass
+
+
+def _arg_str(args: argparse.Namespace, name: str, default: str = "") -> str:
+    value = getattr(args, name, default)
+    return default if value is None else str(value)
+
+
+def _arg_bool(args: argparse.Namespace, name: str, default: bool = False) -> bool:
+    return bool(getattr(args, name, default))
+
+
+def _arg_int(args: argparse.Namespace, name: str, default: int) -> int:
+    value = getattr(args, name, default)
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _arg_float(args: argparse.Namespace, name: str, default: float) -> float:
+    value = getattr(args, name, default)
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _arg_str_list(args: argparse.Namespace, name: str) -> list[str]:
+    value = getattr(args, name, None)
+    return [str(item) for item in value] if isinstance(value, list) else []
 
 async def _resolve_shell_target(
     manager: FrameworkShellManager,
     target: str,
     *,
     allow_exited: bool,
-) -> Any:
+) -> ShellRecord:
     target = str(target or "").strip()
     if not target:
         raise SystemExit("Target shell is required.")
 
     rec = await manager.get_shell(target)
-    if rec and (allow_exited or getattr(rec, "status", None) == "running"):
+    if rec and (allow_exited or rec.status == "running"):
         return rec
 
     shells = await manager.list_shells()
     if not allow_exited:
-        shells = [s for s in shells if getattr(s, "status", None) == "running"]
+        shells = [s for s in shells if s.status == "running"]
 
-    label_matches = [s for s in shells if (getattr(s, "label", None) or "") == target]
+    label_matches = [s for s in shells if (s.label or "") == target]
     if len(label_matches) == 1:
         return label_matches[0]
     if len(label_matches) > 1:
@@ -130,7 +161,7 @@ async def _resolve_shell_target(
         _print_shell_candidates(label_matches)
         raise SystemExit(2)
 
-    prefix_matches = [s for s in shells if str(getattr(s, "id", "")).startswith(target)]
+    prefix_matches = [s for s in shells if s.id.startswith(target)]
     if len(prefix_matches) == 1:
         return prefix_matches[0]
     if len(prefix_matches) > 1:
@@ -142,7 +173,7 @@ async def _resolve_shell_target(
 
 async def _terminate_one(
     manager: FrameworkShellManager,
-    rec: Any,
+    rec: ShellRecord,
     *,
     tree: bool,
     force: bool,
@@ -150,9 +181,6 @@ async def _terminate_one(
     grace_s: float,
     sigkill_timeout_s: float,
 ) -> None:
-    if not getattr(rec, "id", None):
-        return
-
     if not tree:
         await manager.terminate_shell(rec.id, force=force)
         return
@@ -173,7 +201,7 @@ async def _terminate_one(
         sigkill_timeout_s=max(0.0, float(sigkill_timeout_s)),
     )
     snapshot = await manager.build_process_snapshot(shells=[rec], include_procfs_descendants=True)
-    await shutdown_snapshot(
+    _ = await shutdown_snapshot(
         snapshot,
         manager=manager,
         policy=policy,
@@ -187,82 +215,82 @@ def main():
     
     # fs up [spec.yaml]
     up_parser = subparsers.add_parser("up", help="Apply a shell specification")
-    up_parser.add_argument("spec", nargs="?", default="shells.yaml", help="Path to spec file")
-    up_parser.add_argument("--prune", action="store_true", help="Remove shells not in spec")
+    _ = up_parser.add_argument("spec", nargs="?", default="shells.yaml", help="Path to spec file")
+    _ = up_parser.add_argument("--prune", action="store_true", help="Remove shells not in spec")
     
     # fs list
     list_parser = subparsers.add_parser("list", help="List running shells")
-    list_parser.add_argument("--stats", action="store_true", help="Include CPU/RSS stats (best-effort)")
-    list_parser.add_argument("--all", action="store_true", help="Include exited shells too")
+    _ = list_parser.add_argument("--stats", action="store_true", help="Include CPU/RSS stats (best-effort)")
+    _ = list_parser.add_argument("--all", action="store_true", help="Include exited shells too")
     
     # fs down
     down_parser = subparsers.add_parser("down", help="Terminate shells")
-    down_parser.add_argument("spec", nargs="?", help="Optional spec file/dir; if provided, only those specs are terminated")
-    down_parser.add_argument("--force", action="store_true", help="Force kill (SIGKILL)")
-    down_parser.add_argument("--tree", action="store_true", help="Also terminate procfs descendants (best-effort)")
-    down_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
-    down_parser.add_argument("--grace", type=float, default=2.0, help="SIGTERM wait time in seconds for --tree (default: 2.0)")
-    down_parser.add_argument("--kill-wait", type=float, default=2.0, help="SIGKILL wait time in seconds for --tree (default: 2.0)")
+    _ = down_parser.add_argument("spec", nargs="?", help="Optional spec file/dir; if provided, only those specs are terminated")
+    _ = down_parser.add_argument("--force", action="store_true", help="Force kill (SIGKILL)")
+    _ = down_parser.add_argument("--tree", action="store_true", help="Also terminate procfs descendants (best-effort)")
+    _ = down_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
+    _ = down_parser.add_argument("--grace", type=float, default=2.0, help="SIGTERM wait time in seconds for --tree (default: 2.0)")
+    _ = down_parser.add_argument("--kill-wait", type=float, default=2.0, help="SIGKILL wait time in seconds for --tree (default: 2.0)")
 
     # fs shutdown-group <app_id>
     sg_parser = subparsers.add_parser("shutdown-group", help="Shutdown an app/group (UI-equivalent)")
-    sg_parser.add_argument("app_id", help="App/group id (matches derive_app_id())")
-    sg_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    _ = sg_parser.add_argument("app_id", help="App/group id (matches derive_app_id())")
+    _ = sg_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # fs inspect <shell_id>
     inspect_parser = subparsers.add_parser("inspect", help="Inspect structured log events for a shell")
-    inspect_parser.add_argument("shell_id", help="Shell ID")
-    inspect_parser.add_argument("--stream", default="both", choices=["stdout", "stderr", "both"], help="Log stream to inspect")
-    inspect_parser.add_argument("--lines", type=int, default=200, help="Number of recent event containers to inspect")
-    inspect_parser.add_argument("--query", help="Raw text substring or regex filter")
-    inspect_parser.add_argument("--exclude-query", help="Exclude records matching this substring or regex")
-    inspect_parser.add_argument("--regex", action="store_true", help="Treat --query as a regex")
-    inspect_parser.add_argument("--ignore-case", action="store_true", help="Case-insensitive matching")
-    inspect_parser.add_argument("--format", choices=["plain", "json", "jsonrpc"], help="Filter by detected format")
-    inspect_parser.add_argument("--signature", help="Filter by event signature (supports * wildcards)")
-    inspect_parser.add_argument("--exclude-signature", help="Exclude event signatures (supports * wildcards)")
-    inspect_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    _ = inspect_parser.add_argument("shell_id", help="Shell ID")
+    _ = inspect_parser.add_argument("--stream", default="both", choices=["stdout", "stderr", "both"], help="Log stream to inspect")
+    _ = inspect_parser.add_argument("--lines", type=int, default=200, help="Number of recent event containers to inspect")
+    _ = inspect_parser.add_argument("--query", help="Raw text substring or regex filter")
+    _ = inspect_parser.add_argument("--exclude-query", help="Exclude records matching this substring or regex")
+    _ = inspect_parser.add_argument("--regex", action="store_true", help="Treat --query as a regex")
+    _ = inspect_parser.add_argument("--ignore-case", action="store_true", help="Case-insensitive matching")
+    _ = inspect_parser.add_argument("--format", choices=["plain", "json", "jsonrpc"], help="Filter by detected format")
+    _ = inspect_parser.add_argument("--signature", help="Filter by event signature (supports * wildcards)")
+    _ = inspect_parser.add_argument("--exclude-signature", help="Exclude event signatures (supports * wildcards)")
+    _ = inspect_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # fs terminate <id|label>
     term_parser = subparsers.add_parser("terminate", help="Terminate a single shell")
-    term_parser.add_argument("target", help="Shell ID, label, or unique ID prefix")
-    term_parser.add_argument("--force", action="store_true", help="Force kill (SIGKILL)")
+    _ = term_parser.add_argument("target", help="Shell ID, label, or unique ID prefix")
+    _ = term_parser.add_argument("--force", action="store_true", help="Force kill (SIGKILL)")
     term_parser.set_defaults(tree=True)
-    term_parser.add_argument("--no-tree", dest="tree", action="store_false", help="Do not scan /proc for descendants")
-    term_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
-    term_parser.add_argument("--grace", type=float, default=2.0, help="SIGTERM wait time in seconds (default: 2.0)")
-    term_parser.add_argument("--kill-wait", type=float, default=2.0, help="SIGKILL wait time in seconds (default: 2.0)")
-    term_parser.add_argument("--purge", action="store_true", help="Also remove metadata/logs after termination")
+    _ = term_parser.add_argument("--no-tree", dest="tree", action="store_false", help="Do not scan /proc for descendants")
+    _ = term_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
+    _ = term_parser.add_argument("--grace", type=float, default=2.0, help="SIGTERM wait time in seconds (default: 2.0)")
+    _ = term_parser.add_argument("--kill-wait", type=float, default=2.0, help="SIGKILL wait time in seconds (default: 2.0)")
+    _ = term_parser.add_argument("--purge", action="store_true", help="Also remove metadata/logs after termination")
 
     # fs rm <id|label>
     rm_parser = subparsers.add_parser("rm", help="Terminate (optional) and remove shell metadata/logs", aliases=["remove"])
-    rm_parser.add_argument("target", help="Shell ID, label, or unique ID prefix")
-    rm_parser.add_argument("--force", action="store_true", help="Force kill (SIGKILL)")
+    _ = rm_parser.add_argument("target", help="Shell ID, label, or unique ID prefix")
+    _ = rm_parser.add_argument("--force", action="store_true", help="Force kill (SIGKILL)")
     rm_parser.set_defaults(tree=True)
-    rm_parser.add_argument("--no-tree", dest="tree", action="store_false", help="Do not scan /proc for descendants")
-    rm_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
-    rm_parser.add_argument("--grace", type=float, default=2.0, help="SIGTERM wait time in seconds (default: 2.0)")
-    rm_parser.add_argument("--kill-wait", type=float, default=2.0, help="SIGKILL wait time in seconds (default: 2.0)")
+    _ = rm_parser.add_argument("--no-tree", dest="tree", action="store_false", help="Do not scan /proc for descendants")
+    _ = rm_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
+    _ = rm_parser.add_argument("--grace", type=float, default=2.0, help="SIGTERM wait time in seconds (default: 2.0)")
+    _ = rm_parser.add_argument("--kill-wait", type=float, default=2.0, help="SIGKILL wait time in seconds (default: 2.0)")
     
     # fs attach [id]
     attach_parser = subparsers.add_parser("attach", help="Attach to a shell (dtach)")
-    attach_parser.add_argument("id", help="Shell ID or Label")
+    _ = attach_parser.add_argument("id", help="Shell ID or Label")
 
     # fs run -- <command...>
     run_parser = subparsers.add_parser("run", help="Spawn a one-off shell without a shellspec")
-    run_parser.add_argument("--backend", choices=["proc", "pty", "pipe", "dtach"], default="proc", help="Backend (default: proc)")
-    run_parser.add_argument("--pty-mode", choices=["raw", "interactive"], default=None, help="PTY discipline for pty/dtach backends (default: manager/env default)")
-    run_parser.add_argument("--label", default=None, help="Optional shell label")
-    run_parser.add_argument("--cwd", default=None, help="Working directory")
-    run_parser.add_argument("--env", action="append", default=None, help="Environment override KEY=VALUE (repeatable)")
-    run_parser.add_argument("--subgroup", action="append", default=None, help="Subgroup tag (repeatable)")
-    run_parser.add_argument("--no-start", action="store_true", help="Create record only (do not start process)")
-    run_parser.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run (prefix with --)")
+    _ = run_parser.add_argument("--backend", choices=["proc", "pty", "pipe", "dtach"], default="proc", help="Backend (default: proc)")
+    _ = run_parser.add_argument("--pty-mode", choices=["raw", "interactive"], default=None, help="PTY discipline for pty/dtach backends (default: manager/env default)")
+    _ = run_parser.add_argument("--label", default=None, help="Optional shell label")
+    _ = run_parser.add_argument("--cwd", default=None, help="Working directory")
+    _ = run_parser.add_argument("--env", action="append", default=None, help="Environment override KEY=VALUE (repeatable)")
+    _ = run_parser.add_argument("--subgroup", action="append", default=None, help="Subgroup tag (repeatable)")
+    _ = run_parser.add_argument("--no-start", action="store_true", help="Create record only (do not start process)")
+    _ = run_parser.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run (prefix with --)")
 
     # fs tree
     tree_parser = subparsers.add_parser("tree", help="Show shell process trees (includes procfs descendants)")
-    tree_parser.add_argument("--all", action="store_true", help="Include exited shells (if pid still known)")
-    tree_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
+    _ = tree_parser.add_argument("--all", action="store_true", help="Include exited shells (if pid still known)")
+    _ = tree_parser.add_argument("--depth", type=int, default=8, help="Max procfs discovery depth (default: 8)")
 
     args = parser.parse_args()
     
@@ -277,20 +305,21 @@ def main():
     except KeyboardInterrupt:
         pass
 
-async def run_async(args):
+async def run_async(args: argparse.Namespace) -> None:
     manager = FrameworkShellManager()
+    command = _arg_str(args, "command")
 
-    if getattr(args, "command", None) == "run":
-        cmd = list(getattr(args, "cmd", []) or [])
+    if command == "run":
+        cmd = _arg_str_list(args, "cmd")
         if cmd and cmd[0] == "--":
             cmd = cmd[1:]
         if not cmd:
             raise SystemExit("fws run requires a command. Example: fws run --backend pty -- bash -l -i")
 
-        env = _parse_env_kv(getattr(args, "env", None))
-        subgroups = [str(x) for x in (getattr(args, "subgroup", None) or []) if str(x).strip()]
-        autostart = not bool(getattr(args, "no_start", False))
-        backend = getattr(args, "backend", "proc")
+        env = _parse_env_kv(_arg_str_list(args, "env"))
+        subgroups = [x for x in _arg_str_list(args, "subgroup") if x.strip()]
+        autostart = not _arg_bool(args, "no_start", False)
+        backend = _arg_str(args, "backend", "proc")
         pty_mode = getattr(args, "pty_mode", None)
 
         if backend == "pty":
@@ -305,8 +334,8 @@ async def run_async(args):
         print(rec.id)
         return
 
-    if getattr(args, "command", None) == "tree":
-        depth = int(getattr(args, "depth", 8) or 8)
+    if command == "tree":
+        depth = _arg_int(args, "depth", 8)
         if depth < 1:
             depth = 1
         # CLI convenience: allow deeper/shallower procfs scanning.
@@ -316,12 +345,12 @@ async def run_async(args):
             pass
 
         shells = await manager.list_shells()
-        if not getattr(args, "all", False):
-            live: List[Any] = []
+        if not _arg_bool(args, "all", False):
+            live: list[ShellRecord] = []
             for s in shells:
-                if (getattr(s, "status", None) or "") != "running":
+                if s.status != "running":
                     continue
-                pid = getattr(s, "pid", None)
+                pid = s.pid
                 if not pid:
                     continue
                 if not await manager._is_pid_alive(pid):  # type: ignore[attr-defined]
@@ -329,7 +358,7 @@ async def run_async(args):
                 live.append(s)
             shells = live
 
-        described: List[Dict[str, Any]] = []
+        described: list[dict[str, Any]] = []
         for rec in shells:
             try:
                 described.append(await manager.describe(rec))
@@ -339,7 +368,7 @@ async def run_async(args):
         snapshot: ProcessSnapshot = await manager.build_process_snapshot(shells=shells, include_procfs_descendants=True)
         processes = snapshot.processes
 
-        children_by_parent: Dict[int, List[int]] = {}
+        children_by_parent: dict[int, list[int]] = {}
         for pid, proc in processes.items():
             if proc.parent_pid is None:
                 continue
@@ -352,7 +381,7 @@ async def run_async(args):
             except Exception:
                 continue
 
-        def backend_for(info: Dict[str, Any]) -> str:
+        def backend_for(info: dict[str, Any]) -> str:
             if info.get("backend"):
                 return str(info.get("backend"))
             if info.get("uses_dtach"):
@@ -405,41 +434,41 @@ async def run_async(args):
             render_node(int(pid), indent="  ", shell_pid_set=shell_pid_set, visited=set())
         return
 
-    if getattr(args, "command", None) == "terminate":
-        rec = await _resolve_shell_target(manager, getattr(args, "target", ""), allow_exited=False)
+    if command == "terminate":
+        rec = await _resolve_shell_target(manager, _arg_str(args, "target"), allow_exited=False)
         print(f"Terminating {rec.id}...")
         await _terminate_one(
             manager,
             rec,
-            tree=bool(getattr(args, "tree", True)),
-            force=bool(getattr(args, "force", False)),
-            depth=int(getattr(args, "depth", 8) or 8),
-            grace_s=float(getattr(args, "grace", 2.0) or 2.0),
-            sigkill_timeout_s=float(getattr(args, "kill_wait", 2.0) or 2.0),
+            tree=_arg_bool(args, "tree", True),
+            force=_arg_bool(args, "force", False),
+            depth=_arg_int(args, "depth", 8),
+            grace_s=_arg_float(args, "grace", 2.0),
+            sigkill_timeout_s=_arg_float(args, "kill_wait", 2.0),
         )
-        if bool(getattr(args, "purge", False)):
-            await manager.remove_shell(rec.id, force=bool(getattr(args, "force", False)))
+        if _arg_bool(args, "purge", False):
+            await manager.remove_shell(rec.id, force=_arg_bool(args, "force", False))
         return
 
-    if getattr(args, "command", None) in {"rm", "remove"}:
-        rec = await _resolve_shell_target(manager, getattr(args, "target", ""), allow_exited=True)
-        if getattr(rec, "status", None) == "running":
+    if command in {"rm", "remove"}:
+        rec = await _resolve_shell_target(manager, _arg_str(args, "target"), allow_exited=True)
+        if rec.status == "running":
             print(f"Terminating {rec.id}...")
             await _terminate_one(
                 manager,
                 rec,
-                tree=bool(getattr(args, "tree", True)),
-                force=bool(getattr(args, "force", False)),
-                depth=int(getattr(args, "depth", 8) or 8),
-                grace_s=float(getattr(args, "grace", 2.0) or 2.0),
-                sigkill_timeout_s=float(getattr(args, "kill_wait", 2.0) or 2.0),
+                tree=_arg_bool(args, "tree", True),
+                force=_arg_bool(args, "force", False),
+                depth=_arg_int(args, "depth", 8),
+                grace_s=_arg_float(args, "grace", 2.0),
+                sigkill_timeout_s=_arg_float(args, "kill_wait", 2.0),
             )
         print(f"Removing {rec.id}...")
-        await manager.remove_shell(rec.id, force=bool(getattr(args, "force", False)))
+        await manager.remove_shell(rec.id, force=_arg_bool(args, "force", False))
         return
     
-    if args.command == "up":
-        spec_path = Path(args.spec)
+    if command == "up":
+        spec_path = Path(_arg_str(args, "spec", "shells.yaml"))
         if not spec_path.exists():
             print(f"Spec file not found: {spec_path}")
             sys.exit(1)
@@ -448,7 +477,7 @@ async def run_async(args):
         specs_map = load_shellspec(spec_path)
         specs = list(specs_map.values())
         orch = Orchestrator(manager)
-        await orch.apply(specs, prune=args.prune)
+        await orch.apply(specs, prune=_arg_bool(args, "prune", False))
         print(f"Applied {len(specs)} specs.")
         
         # Keep alive for managing PTYs?
@@ -462,11 +491,11 @@ async def run_async(args):
         while True:
             await asyncio.sleep(1)
 
-    elif args.command == "list":
+    elif command == "list":
         shells = await manager.list_shells()
-        if not bool(getattr(args, "all", False)):
-            shells = [s for s in shells if (getattr(s, "status", None) or "") == "running" and getattr(s, "pid", None)]
-        show_stats = bool(getattr(args, "stats", False))
+        if not _arg_bool(args, "all", False):
+            shells = [s for s in shells if s.status == "running" and s.pid]
+        show_stats = _arg_bool(args, "stats", False)
         if show_stats:
             print(f"{'ID':<20} {'SPEC':<14} {'LABEL':<15} {'STATUS':<10} {'PID':<6} {'CPU':>6} {'RSS':>9} {'BACKEND'}")
         else:
@@ -486,7 +515,7 @@ async def run_async(args):
             try:
                 info = await manager.describe(s)
                 stats_obj = info.get("stats")
-                stats: Dict[str, Any] = stats_obj if isinstance(stats_obj, dict) else {}
+                stats: dict[str, Any] = stats_obj if isinstance(stats_obj, dict) else {}
                 cpu = stats.get("cpu_percent")
                 rss = stats.get("memory_rss")
                 cpu_s = "-" if cpu is None else f"{float(cpu):.1f}%"
@@ -496,21 +525,22 @@ async def run_async(args):
                 rss_s = "-"
             print(f"{s.id:<20} {(getattr(s, 'spec_id', None) or '-'): <14} {s.label or '-':<15} {s.status:<10} {s.pid or '-':<6} {cpu_s:>6} {rss_s:>9} {backend}")
 
-    elif args.command == "down":
+    elif command == "down":
         spec_ids = None
-        if getattr(args, "spec", None):
-            spec_path = Path(args.spec)
+        spec_arg = _arg_str(args, "spec")
+        if spec_arg:
+            spec_path = Path(spec_arg)
             specs_map = load_shellspec(spec_path)
             spec_ids = set(specs_map.keys())
 
         shells = await manager.list_shells()
-        selected: List[Any] = []
+        selected: list[ShellRecord] = []
         for s in shells:
-            if spec_ids is not None and getattr(s, "spec_id", None) not in spec_ids:
+            if spec_ids is not None and s.spec_id not in spec_ids:
                 continue
-            if (getattr(s, "status", None) or "") != "running":
+            if s.status != "running":
                 continue
-            pid = getattr(s, "pid", None)
+            pid = s.pid
             if not pid or not await manager._is_pid_alive(pid):  # type: ignore[attr-defined]
                 continue
             selected.append(s)
@@ -518,32 +548,32 @@ async def run_async(args):
         if not selected:
             return
 
-        if bool(getattr(args, "tree", False)):
-            depth = max(1, int(getattr(args, "depth", 8) or 8))
+        if _arg_bool(args, "tree", False):
+            depth = max(1, _arg_int(args, "depth", 8))
             try:
                 manager._procfs_provider = ProcfsProcessProvider(max_depth=depth)  # type: ignore[attr-defined]
             except Exception:
                 pass
 
             policy = ShutdownPolicy(
-                sigterm_timeout_s=0.0 if bool(getattr(args, "force", False)) else max(0.0, float(getattr(args, "grace", 2.0) or 2.0)),
-                sigkill_timeout_s=max(0.0, float(getattr(args, "kill_wait", 2.0) or 2.0)),
+                sigterm_timeout_s=0.0 if _arg_bool(args, "force", False) else max(0.0, _arg_float(args, "grace", 2.0)),
+                sigkill_timeout_s=max(0.0, _arg_float(args, "kill_wait", 2.0)),
             )
             snapshot = await manager.build_process_snapshot(shells=selected, include_procfs_descendants=True)
-            await shutdown_snapshot(snapshot, manager=manager, policy=policy, log=print)
+            _ = await shutdown_snapshot(snapshot, manager=manager, policy=policy, log=print)
             return
 
         for s in selected:
             print(f"Terminating {s.id}...")
-            await manager.terminate_shell(s.id, force=bool(getattr(args, "force", False)))
+            await manager.terminate_shell(s.id, force=_arg_bool(args, "force", False))
             
-    elif args.command == "shutdown-group":
-        app_id = str(getattr(args, "app_id", "") or "").strip()
+    elif command == "shutdown-group":
+        app_id = _arg_str(args, "app_id").strip()
         if not app_id:
             print("Missing app_id")
             sys.exit(1)
         result = await manager.shutdown_app_group(app_id)
-        if bool(getattr(args, "json", False)):
+        if _arg_bool(args, "json", False):
             print(json.dumps(result, sort_keys=True))
             return
         data = result.get("data") if isinstance(result, dict) else None
@@ -551,16 +581,16 @@ async def run_async(args):
         print(f"Shutdown group {app_id} (root_pids={root_pids or []})")
         return
 
-    elif args.command == "inspect":
+    elif command == "inspect":
         try:
             result = await manager.inspect_logs(
-                str(getattr(args, "shell_id", "") or "").strip(),
-                stream=str(getattr(args, "stream", "both") or "both"),
-                lines=max(0, int(getattr(args, "lines", 200) or 0)),
+                _arg_str(args, "shell_id").strip(),
+                stream=_arg_str(args, "stream", "both"),
+                lines=max(0, _arg_int(args, "lines", 200)),
                 query=getattr(args, "query", None),
                 exclude_query=getattr(args, "exclude_query", None),
-                regex=bool(getattr(args, "regex", False)),
-                ignore_case=bool(getattr(args, "ignore_case", False)),
+                regex=_arg_bool(args, "regex", False),
+                ignore_case=_arg_bool(args, "ignore_case", False),
                 format=getattr(args, "format", None),
                 signature=getattr(args, "signature", None),
                 exclude_signature=getattr(args, "exclude_signature", None),
@@ -571,7 +601,7 @@ async def run_async(args):
         except ValueError as exc:
             print(str(exc))
             sys.exit(1)
-        if bool(getattr(args, "json", False)):
+        if _arg_bool(args, "json", False):
             print(json.dumps(result, sort_keys=True))
             return
 
@@ -595,9 +625,10 @@ async def run_async(args):
                     continue
         return
 
-    elif args.command == "attach":
+    elif command == "attach":
         # Check specific shell
-        record = await manager.find_shell_by_label(args.id) or await manager.get_shell(args.id)
+        target_id = _arg_str(args, "id")
+        record = await manager.find_shell_by_label(target_id) or await manager.get_shell(target_id)
         if not record:
              print("Shell not found")
              sys.exit(1)

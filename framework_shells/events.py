@@ -1,8 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional, Callable, Set, List
 from asyncio import Queue as AsyncQueue
-import asyncio
 import time
 
 class EventType(Enum):
@@ -20,14 +18,14 @@ class ShellEvent:
     type: EventType
     shell_id: str
     timestamp: float = field(default_factory=time.time)
-    data: Dict[str, Any] = field(default_factory=dict)
+    data: dict[str, object] = field(default_factory=dict)
     
     # App context (derived from record)
-    app_id: Optional[str] = None
-    parent_shell_id: Optional[str] = None
+    app_id: str | None = None
+    parent_shell_id: str | None = None
     is_app_worker: bool = False
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "type": self.type.value,
             "shell_id": self.shell_id,
@@ -47,7 +45,7 @@ class EventBus:
     """
     
     def __init__(self):
-        self._subscribers: Set[AsyncQueue[ShellEvent]] = set()
+        self._subscribers: set[AsyncQueue[ShellEvent]] = set()
     
     def subscribe(self) -> AsyncQueue[ShellEvent]:
         q: AsyncQueue[ShellEvent] = AsyncQueue()
@@ -65,7 +63,7 @@ class EventBus:
                 self._subscribers.discard(q)
 
 # Singleton
-_bus: Optional[EventBus] = None
+_bus: EventBus | None = None
 
 def get_event_bus() -> EventBus:
     global _bus

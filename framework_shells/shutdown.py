@@ -4,12 +4,13 @@ import os
 import signal
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Set
 
 from .process_snapshot import ProcessRecord, ProcessSnapshot
 
-if TYPE_CHECKING:
-    from .manager import FrameworkShellManager
+
+class ShellTerminator(Protocol):
+    async def terminate_shell(self, shell_id: str, force: bool = False) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,7 @@ def collect_descendants(
 async def execute_shutdown_plan(
     plan: List[ProcessRecord],
     *,
-    manager: Optional[FrameworkShellManager] = None,
+    manager: Optional[ShellTerminator] = None,
     policy: Optional[ShutdownPolicy] = None,
     exclude_pids: Optional[Set[int]] = None,
     log: Optional[Callable[[str], None]] = None,
@@ -208,7 +209,7 @@ async def execute_shutdown_plan(
 async def shutdown_snapshot(
     snapshot: ProcessSnapshot,
     *,
-    manager: Optional["FrameworkShellManager"] = None,
+    manager: Optional[ShellTerminator] = None,
     policy: Optional[ShutdownPolicy] = None,
     root_pids: Optional[Iterable[int]] = None,
     exclude_pids: Optional[Set[int]] = None,

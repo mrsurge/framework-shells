@@ -58,6 +58,14 @@ def _fmt_cpu(pct: Any) -> str:
     return f"{val:.1f}%"
 
 
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _shell_backend(info: Dict[str, Any]) -> str:
     if info.get("backend"):
         return str(info.get("backend"))
@@ -77,7 +85,7 @@ def _is_shell_live(info: Dict[str, Any]) -> bool:
         return False
     if not info.get("pid"):
         return False
-    stats = info.get("stats") if isinstance(info.get("stats"), dict) else {}
+    stats = _as_dict(info.get("stats"))
     if stats and stats.get("alive") is False:
         return False
     return True
@@ -190,6 +198,8 @@ def _exited_timestamp(info: Dict[str, Any]) -> float:
     raw = info.get("updated_at")
     if raw is None:
         raw = info.get("created_at")
+    if raw is None:
+        return 0.0
     try:
         return float(raw)
     except Exception:
@@ -229,7 +239,7 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
         exit_code = s.get("exit_code")
         exited_ts = _exited_timestamp(s)
         exited_stamp = _fmt_exited_timestamp(exited_ts)
-        subgroups = s.get("subgroups") if isinstance(s.get("subgroups"), list) else []
+        subgroups = _as_list(s.get("subgroups"))
         style = _card_style_for_subgroups([str(x) for x in subgroups], subgroup_styles)
         style_bits: List[str] = []
         if style.get("bg"):
@@ -240,7 +250,7 @@ def _render_exited_content(exited: List[Dict[str, Any]], subgroup_styles: Dict[s
         meta = status
         if exit_code is not None:
             meta += f" · exit: {exit_code}"
-        cmd = s.get("command") if isinstance(s.get("command"), list) else []
+        cmd = _as_list(s.get("command"))
         command_text = " ".join(map(str, cmd))
         stdout_log = str(s.get("stdout_log") or "")
         stderr_log = str(s.get("stderr_log") or "")
@@ -323,7 +333,7 @@ async def _render_dashboard_html() -> str:
     else:
         groups: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         for s in running:
-            subgroups = s.get("subgroups") if isinstance(s.get("subgroups"), list) else []
+            subgroups = _as_list(s.get("subgroups"))
             normalized = [str(x) for x in subgroups if str(x).strip()]
             umbrella = normalized[0] if len(normalized) >= 1 else "(ungrouped)"
             subgroup = normalized[1] if len(normalized) >= 2 else "(root)"
@@ -387,8 +397,8 @@ async def _render_dashboard_html() -> str:
                     label = str(s.get("label") or sid)
                     pid = s.get("pid")
                     backend = _shell_backend(s)
-                    subgroups = s.get("subgroups") if isinstance(s.get("subgroups"), list) else []
-                    stats = s.get("stats") if isinstance(s.get("stats"), dict) else {}
+                    subgroups = _as_list(s.get("subgroups"))
+                    stats = _as_dict(s.get("stats"))
                     cpu = _fmt_cpu(stats.get("cpu_percent"))
                     rss = _fmt_bytes(stats.get("memory_rss"))
 
@@ -400,7 +410,7 @@ async def _render_dashboard_html() -> str:
                         row_style_bits.append(f"border-left: 3px solid {row_style['border']};")
                     row_style_attr = f' style="{" ".join(row_style_bits)}"' if row_style_bits else ""
                     status = str(s.get("status") or "running")
-                    cmd = s.get("command") if isinstance(s.get("command"), list) else []
+                    cmd = _as_list(s.get("command"))
                     command_text = " ".join(map(str, cmd))
                     stdout_log = str(s.get("stdout_log") or "")
                     stderr_log = str(s.get("stderr_log") or "")

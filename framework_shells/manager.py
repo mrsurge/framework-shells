@@ -114,6 +114,7 @@ class FrameworkShellManager:
         self._pipes: Dict[str, PipeState] = {}
         
         self._event_bus = get_event_bus()
+        self._lock_instance: AsyncLock | None = None
         self._dtach_bin = shutil.which("dtach")
         self._enable_dtach_proxy = bool(enable_dtach_proxy)
         self._signal_winch_on_resize = (
@@ -228,7 +229,7 @@ class FrameworkShellManager:
         if not inspect.isawaitable(result):
             return
         try:
-            asyncio.create_task(result)
+            asyncio.ensure_future(result)
         except Exception:
             return
 
@@ -259,9 +260,9 @@ class FrameworkShellManager:
         except Exception:
             return
 
-    def _get_lock(self):
-        if not hasattr(self, '_lock_instance'):
-            self._lock_instance = asyncio.Lock()
+    def _get_lock(self) -> AsyncLock:
+        if self._lock_instance is None:
+            self._lock_instance = AsyncLock()
         return self._lock_instance
 
     async def _emit(self, event_type: EventType, record: ShellRecord, **extra):
@@ -1566,7 +1567,7 @@ class FrameworkShellManager:
                 ignore_case=ignore_case,
                 format_filter=format_name,
                 signature_filter=signature_value,
-                exclude_signature_filter=result["exclude_signature"],
+                exclude_signature=result["exclude_signature"],
             )
             result["stdout"] = await self._log_stream_payload(
                 stdout_path,
@@ -1586,7 +1587,7 @@ class FrameworkShellManager:
                 ignore_case=ignore_case,
                 format_filter=format_name,
                 signature_filter=signature_value,
-                exclude_signature_filter=result["exclude_signature"],
+                exclude_signature=result["exclude_signature"],
             )
             result["stderr"] = await self._log_stream_payload(
                 stderr_path,
@@ -1607,11 +1608,12 @@ class FrameworkShellManager:
         return self._pipes.get(shell_id)
 
     async def get_shell_capabilities(self, record_or_shell_id: ShellRecord | str) -> Dict[str, Any]:
-        record = record_or_shell_id
         if isinstance(record_or_shell_id, str):
             record = await self.get_shell(record_or_shell_id)
             if record is None:
                 raise KeyError(f"Shell not found: {record_or_shell_id}")
+        else:
+            record = record_or_shell_id
 
         backend = self._backend_name(record)
         async with self._get_lock():

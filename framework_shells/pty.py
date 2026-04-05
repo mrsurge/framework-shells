@@ -11,7 +11,7 @@ class PTYState:
     subscribers: List[AsyncQueue[str]] = field(default_factory=list)
     subscribers_bytes: List[AsyncQueue[bytes]] = field(default_factory=list)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
-    reader: Optional[asyncio.Task] = None
+    reader: Optional[asyncio.Task[None]] = None
     proxy_pid: Optional[int] = None
 
 
@@ -24,5 +24,5 @@ class PipeState:
     stdout_subscribers: List[AsyncQueue[str]] = field(default_factory=list)
     stdout_subscribers_bytes: List[AsyncQueue[bytes]] = field(default_factory=list)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
-    stdout_reader: Optional[asyncio.Task] = None
-    waiter: Optional[asyncio.Task] = None
+    stdout_reader: Optional[asyncio.Task[None]] = None
+    waiter: Optional[asyncio.Task[None]] = None

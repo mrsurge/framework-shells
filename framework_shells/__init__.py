@@ -12,12 +12,12 @@ from .shutdown import ShutdownPolicy, plan_shutdown, shutdown_snapshot
 from .shellspec import ShellSpec, ReadinessProbe, RestartPolicy, load_shellspec, render_shellspec
 
 import asyncio
-from typing import Optional
+from typing import Any, Optional
 
 # Singleton manager instance
 _manager_instance: Optional[FrameworkShellManager] = None
 _manager_lock: Optional[asyncio.Lock] = None
-_manager_kwargs: Optional[dict] = None
+_manager_kwargs: Optional[dict[str, Any]] = None
 
 def _get_lock() -> asyncio.Lock:
     global _manager_lock

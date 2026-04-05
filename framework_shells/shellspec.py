@@ -62,7 +62,7 @@ def _find_free_port() -> int:
 
 
 def _render_string(template: str, *, ctx: Mapping[str, Any], env: Mapping[str, str], state: Dict[str, Any]) -> str:
-    def _replace(match: re.Match) -> str:
+    def _replace(match: re.Match[str]) -> str:
         key = match.group(1).strip()
         if not key:
             return ""

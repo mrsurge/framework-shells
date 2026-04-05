@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Body
 from fastapi.responses import FileResponse
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 import hmac
 from pathlib import Path
 
@@ -19,10 +19,10 @@ async def get_manager_dep() -> FrameworkShellManager:
 
 async def _payload_with_capabilities(
     mgr: FrameworkShellManager,
-    record,
+    record: Any,
     *,
     include_env: bool = False,
-):
+) -> Dict[str, Any]:
     payload = record.to_payload(include_env=include_env)
     payload["capabilities"] = await mgr.get_shell_capabilities(record)
     return payload
@@ -62,11 +62,11 @@ async def list_shells(
 ):
     records = await mgr.list_shells()
     if not include_stats:
-        payloads: List[dict] = []
+        payloads: List[Dict[str, Any]] = []
         for rec in records:
             payloads.append(await _payload_with_capabilities(mgr, rec))
         return {"ok": True, "data": payloads}
-    described: List[dict] = []
+    described: List[Dict[str, Any]] = []
     for rec in records:
         try:
             described.append(await mgr.describe(rec))
@@ -94,7 +94,7 @@ async def get_shell(
 
 @router.post("/api/framework_shells")
 async def find_or_create_shell(
-    payload: dict = Body(...),
+    payload: Dict[str, Any] = Body(...),
     authorization: str = Header(None), # Verify explicit param vs dependency
     mgr: FrameworkShellManager = Depends(get_manager_dep),
     _: None = Depends(require_auth)
@@ -135,7 +135,7 @@ async def terminate_shell(
 @router.post('/api/framework_shells/{shell_id}/action')
 async def shell_action(
     shell_id: str,
-    payload: dict = Body(...),
+    payload: Dict[str, Any] = Body(...),
     mgr: FrameworkShellManager = Depends(get_manager_dep),
     _: None = Depends(require_auth)
 ):
@@ -152,7 +152,7 @@ async def shell_action(
 @router.post('/api/framework_shells/{shell_id}/input')
 async def shell_input(
     shell_id: str,
-    payload: dict = Body(...),
+    payload: Dict[str, Any] = Body(...),
     mgr: FrameworkShellManager = Depends(get_manager_dep),
     _: None = Depends(require_auth),
 ):

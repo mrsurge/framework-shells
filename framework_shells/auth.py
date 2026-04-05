@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import json
 import os
-from typing import Optional
+from typing import Any
 
 def get_secret() -> str:
     """Get secret from environment, raise if missing."""
@@ -19,13 +19,13 @@ def derive_api_token(secret: str) -> str:
     """HMAC(secret, 'api') — bearer token for mutations."""
     return hmac.new(secret.encode(), b"api", hashlib.sha256).hexdigest()
 
-def sign_record(secret: str, record_dict: dict) -> str:
+def sign_record(secret: str, record_dict: dict[str, Any]) -> str:
     """HMAC signature over canonical JSON (excludes signature field)."""
     clean = {k: v for k, v in record_dict.items() if k != "signature"}
     canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"))
     return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 
-def verify_record(secret: str, record_dict: dict) -> bool:
+def verify_record(secret: str, record_dict: dict[str, Any]) -> bool:
     """Verify record signature matches."""
     expected = sign_record(secret, record_dict)
     return hmac.compare_digest(record_dict.get("signature", ""), expected)

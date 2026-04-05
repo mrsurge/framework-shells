@@ -485,7 +485,8 @@ async def run_async(args):
                 continue
             try:
                 info = await manager.describe(s)
-                stats = info.get("stats") if isinstance(info.get("stats"), dict) else {}
+                stats_obj = info.get("stats")
+                stats: Dict[str, Any] = stats_obj if isinstance(stats_obj, dict) else {}
                 cpu = stats.get("cpu_percent")
                 rss = stats.get("memory_rss")
                 cpu_s = "-" if cpu is None else f"{float(cpu):.1f}%"

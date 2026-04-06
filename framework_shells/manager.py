@@ -49,6 +49,11 @@ from .log_inspection import (
     inspect_log_file,
     read_event_window,
 )
+from .native_pipe import (
+    NATIVE_PIPE_TESTING_MODE,
+    native_extension_available,
+    normalize_pipe_config,
+)
 from .shutdown import ShutdownPolicy, shutdown_snapshot
 
 try:
@@ -884,14 +889,21 @@ class FrameworkShellManager:
 
         log_path = Path(record.stdout_log)
         async with aiofiles.open(log_path, "ab") as log_fh:
+            pending_flush_bytes = 0
             while not state.stop.is_set():
                 try:
-                    data = await stream.read(4096)
+                    data = await asyncio.wait_for(
+                        stream.read(self.PIPE_READ_CHUNK_BYTES),
+                        timeout=self.PIPE_LOG_FLUSH_INTERVAL_SECONDS,
+                    )
                     if not data:
                         break
 
                     await log_fh.write(data)
-                    await log_fh.flush()
+                    pending_flush_bytes += len(data)
+                    if pending_flush_bytes >= self.PIPE_LOG_FLUSH_BYTES:
+                        await log_fh.flush()
+                        pending_flush_bytes = 0
 
                     text = data.decode("utf-8", errors="replace")
                     event = ShellEvent(
@@ -915,10 +927,16 @@ class FrameworkShellManager:
                         except Exception:
                             pass
 
+                except asyncio.TimeoutError:
+                    if pending_flush_bytes > 0:
+                        await log_fh.flush()
+                        pending_flush_bytes = 0
                 except asyncio.CancelledError:
                     break
                 except Exception:
                     break
+            if pending_flush_bytes > 0:
+                await log_fh.flush()
 
     async def _pipe_waiter(self, record: ShellRecord, state: PipeState) -> None:
         proc = state.process
@@ -938,10 +956,28 @@ class FrameworkShellManager:
         if rec and getattr(rec, "status", None) != "exited":
             await self._mark_exited(rec, exit_code)
 
-    async def _launch_pipe(self, record: ShellRecord) -> ShellRecord:
+    async def _launch_pipe(
+        self,
+        record: ShellRecord,
+        *,
+        pipe_config: dict[str, object] | None = None,
+    ) -> ShellRecord:
         """Launch shell with live stdin/stdout pipes for bidirectional streaming."""
         record.set_backend(BACKEND_PIPE)
         env = self._prepare_env(record)
+        resolved_pipe_config = normalize_pipe_config(pipe_config)
+
+        if resolved_pipe_config.mode == NATIVE_PIPE_TESTING_MODE:
+            if native_extension_available():
+                _shell_debug(
+                    "native_pipe",
+                    f"shell={record.id} requested native_pipe_testing; Phase 0 manager hook is dormant, using Python pipe pump",
+                )
+            else:
+                _shell_debug(
+                    "native_pipe",
+                    f"shell={record.id} requested native_pipe_testing but native extension is unavailable, using Python pipe pump",
+                )
         
         stdout_path = Path(record.stdout_log)
         stderr_path = Path(record.stderr_log)
@@ -1060,6 +1096,7 @@ class FrameworkShellManager:
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
         ui: Optional[Dict[str, Any]] = None,
+        pipe_config: dict[str, object] | None = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
     ) -> ShellRecord:
@@ -1070,7 +1107,7 @@ class FrameworkShellManager:
             parent_shell_id=parent_shell_id
         )
         if autostart:
-            await self._launch_pipe(record)
+            await self._launch_pipe(record, pipe_config=pipe_config)
         else:
             await self._save_record(record)
             await self._emit(EventType.SHELL_CREATED, record)
@@ -1213,8 +1250,11 @@ class FrameworkShellManager:
     # ------------------------------------------------------------------
     # Describe / stats
 
-    LOG_TAIL_BYTES = 4096
-    MAX_EXITED_SHELLS = 50
+    LOG_TAIL_BYTES: int = 4096
+    MAX_EXITED_SHELLS: int = 50
+    PIPE_READ_CHUNK_BYTES: int = 64 * 1024
+    PIPE_LOG_FLUSH_BYTES: int = 256 * 1024
+    PIPE_LOG_FLUSH_INTERVAL_SECONDS: float = 0.25
 
     async def describe(
         self,

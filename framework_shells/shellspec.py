@@ -45,6 +45,7 @@ class ShellSpec:
     env: dict[str, str] = field(default_factory=dict)
     subgroups: list[str] = field(default_factory=list)
     ui: dict[str, object] = field(default_factory=dict)
+    pipe: dict[str, object] = field(default_factory=dict)
     pty_mode: str = "raw"  # "raw" | "interactive"
     readiness: ReadinessProbe | None = None
     restart: RestartPolicy = field(default_factory=RestartPolicy)
@@ -182,6 +183,7 @@ def render_shellspec(spec: ShellSpec, *, ctx: Mapping[str, object] | None = None
             "env": dict(spec.env or {}),
             "subgroups": list(spec.subgroups or []),
             "ui": dict(spec.ui or {}),
+            "pipe": dict(spec.pipe or {}),
             "pty_mode": spec.pty_mode,
             "readiness": None,
             "restart": {
@@ -249,6 +251,7 @@ def render_shellspec(spec: ShellSpec, *, ctx: Mapping[str, object] | None = None
         env=_string_dict(rendered.get("env")),
         subgroups=_string_list(rendered.get("subgroups")),
         ui=cast(dict[str, object], _as_spec_map(rendered.get("ui"))),
+        pipe=cast(dict[str, object], _as_spec_map(rendered.get("pipe"))),
         pty_mode=str(rendered.get("pty_mode") or spec.pty_mode or "raw"),
         readiness=readiness,
         restart=restart,
@@ -317,6 +320,10 @@ def _spec_from_dict(shell_id: str, raw: SpecMap) -> ShellSpec:
     if not isinstance(ui, dict):
         ui = {}
 
+    pipe = raw.get("pipe") or {}
+    if not isinstance(pipe, dict):
+        pipe = {}
+
     return ShellSpec(
         id=str(raw.get("id") or shell_id),
         command=command if isinstance(command, str) else [str(x) for x in command],
@@ -324,6 +331,7 @@ def _spec_from_dict(shell_id: str, raw: SpecMap) -> ShellSpec:
         env={str(k): str(v) for k, v in cast(dict[object, object], env_raw).items()},
         subgroups=[str(x) for x in subgroups],
         ui=cast(dict[str, object], dict(cast(dict[object, object], ui))),
+        pipe=cast(dict[str, object], dict(cast(dict[object, object], pipe))),
         pty_mode=str(raw.get("pty_mode") or raw.get("ptyMode") or "raw"),
         readiness=_parse_readiness(raw.get("readiness")),
         restart=_parse_restart(raw.get("restart")),

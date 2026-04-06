@@ -190,6 +190,7 @@ class Orchestrator:
                 spec_id=stored_spec_id,
                 subgroups=subgroups,
                 ui=ui_final,
+                pipe_config=dict(rendered.pipe or {}),
                 autostart=rendered.autostart,
                 parent_shell_id=parent_shell_id,
             )

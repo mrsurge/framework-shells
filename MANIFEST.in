@@ -1,2 +1,8 @@
 recursive-include framework_shells/ui *
-
+recursive-include framework_shells/bin *
+recursive-include native/fws_terminal_stream_broker *
+recursive-include native/fws_pipe_pump *
+recursive-include scripts/release *
+prune native/fws_terminal_stream_broker/target
+prune native/fws_pipe_pump/target
+global-exclude __pycache__ *.py[cod]

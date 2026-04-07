@@ -11,6 +11,11 @@ from typing import TypeAlias, cast
 
 import yaml
 
+from .native_pipe import (
+    NATIVE_TERMINAL_PIPE_TESTING_MODE,
+    NATIVE_TERMINAL_PLACEHOLDER_COMMAND,
+)
+
 ScalarValue: TypeAlias = str | int | float | bool | None
 SpecValue: TypeAlias = ScalarValue | list["SpecValue"] | dict[str, "SpecValue"]
 SpecMap: TypeAlias = dict[str, SpecValue]
@@ -300,9 +305,22 @@ def _parse_restart(raw: object) -> RestartPolicy:
 
 
 def _spec_from_dict(shell_id: str, raw: SpecMap) -> ShellSpec:
+    pipe = raw.get("pipe") or {}
+    if not isinstance(pipe, dict):
+        pipe = {}
+
+    backend = str(raw.get("backend") or "proc")
     command = raw.get("command")
     if not command:
-        raise ValueError(f"shellspec '{shell_id}' missing command")
+        native_terminal_only = (
+            backend == "pipe"
+            and str(cast(dict[object, object], pipe).get("mode") or "")
+            == NATIVE_TERMINAL_PIPE_TESTING_MODE
+        )
+        if native_terminal_only:
+            command = [NATIVE_TERMINAL_PLACEHOLDER_COMMAND]
+        else:
+            raise ValueError(f"shellspec '{shell_id}' missing command")
     if not isinstance(command, (str, list)):
         raise ValueError(f"shellspec '{shell_id}' command must be string or list")
     if isinstance(command, list) and not all(isinstance(x, (str, int, float)) for x in command):
@@ -320,10 +338,6 @@ def _spec_from_dict(shell_id: str, raw: SpecMap) -> ShellSpec:
     if not isinstance(ui, dict):
         ui = {}
 
-    pipe = raw.get("pipe") or {}
-    if not isinstance(pipe, dict):
-        pipe = {}
-
     return ShellSpec(
         id=str(raw.get("id") or shell_id),
         command=command if isinstance(command, str) else [str(x) for x in command],
@@ -335,7 +349,7 @@ def _spec_from_dict(shell_id: str, raw: SpecMap) -> ShellSpec:
         pty_mode=str(raw.get("pty_mode") or raw.get("ptyMode") or "raw"),
         readiness=_parse_readiness(raw.get("readiness")),
         restart=_parse_restart(raw.get("restart")),
-        backend=str(raw.get("backend") or "proc"),
+        backend=backend,
         autostart=bool(raw.get("autostart", True)),
     )
 

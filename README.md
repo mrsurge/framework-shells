@@ -107,6 +107,9 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 - Good for LSP servers, daemons
 - FWS now tees pipe `stdout` into the shell's `stdout_log`
 - Supports live stdin write / EOF while the current manager process owns the live pipe state
+- Supports experimental native modes under `pipe.mode`, including:
+  - `native_pipe_testing` for the raw high-traffic pipe pump
+  - `native_terminal_pipe_testing` for the PTY-backed terminal stream broker
 - **Not re-attachable across manager process restarts** (pipe handles are in-memory)
 
 ### Pipe Migration Notes
@@ -119,10 +122,11 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 - Pipe output subscriptions are raw stream chunks, not line-framed records. Downstream consumers that assume one callback per line need to reassemble lines or messages themselves.
 - Reconnection now means reconnecting to the live FWS manager for that `shell_id`, not reconstructing the raw OS pipe in a new manager process.
 - If the manager process dies, raw `pipe` shells are still not reattachable. That is future `uds_pipe` territory, not current `pipe` behavior.
+- `pipe.mode: native_terminal_pipe_testing` can now be native-only: if the shellspec omits `command`, FWS resolves the native terminal broker automatically and fails with an explicit broker-unavailable error if no native broker binary is present.
 
 **Dtach** (`spawn_shell_dtach`):
 - Wraps shell in dtach for persistence
-- Survives framework restarts
+- Keeps a dtach-backed external session
 - Can attach/detach from CLI
 - Uses the same `pty_mode` setting when the local attach proxy is created/re-attached
 - Socket-based communication
@@ -330,6 +334,32 @@ shells:
     subgroups: ["terminal", "project:${ctx:APP_ID}"]
     command: ["bash", "-l", "-i"]
 ```
+
+Experimental native terminal stream over `pipe`:
+
+```yaml
+version: "1"
+shells:
+  terminal-stream:
+    backend: pipe
+    pipe:
+      mode: native_terminal_pipe_testing
+    cwd: ${ctx:PROJECT_ROOT}
+    env:
+      TERMINAL_STREAM_CWD: ${ctx:PROJECT_ROOT}
+      TERMINAL_STREAM_COLS: ${ctx:COLS}
+      TERMINAL_STREAM_ROWS: ${ctx:ROWS}
+      TERMINAL_STREAM_SHELL_CMD_JSON: ${ctx:SHELL_CMD_JSON}
+```
+
+Notes:
+
+- This mode runs a native PTY broker under an outer `pipe` shell.
+- The terminal stream contract stays asymmetric:
+  - stdin uses JSON-RPC notifications
+  - stdout uses framed JSONL records
+- If no `command` is provided, FWS treats the spec as native-only and resolves the broker automatically.
+- If you do provide `command`, it is treated as the fallback broker path when the native broker is unavailable.
 
 ### UI Hints (`shellspec.ui`)
 

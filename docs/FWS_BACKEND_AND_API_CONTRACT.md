@@ -250,6 +250,17 @@ Migration notes:
 - Pipe subscriptions are stream-chunk oriented, not line-framed; downstream consumers must reassemble their own line or message boundaries when needed.
 - A client can reconnect through the live FWS manager and the shell's `shell_id` while that manager still owns the pipe state.
 - A new manager process still cannot reconstruct an old raw pipe session after the original owner dies or restarts.
+- Experimental `pipe.mode` values now include:
+  - `native_pipe_testing` for the raw native stdout pump
+  - `native_terminal_pipe_testing` for the PTY-backed native terminal broker over `pipe`
+- `pipe.mode: native_terminal_pipe_testing` may be declared without a shellspec `command`.
+  - In that native-only shape, the shellspec parser injects an internal placeholder command.
+  - The manager replaces it with the native broker binary at launch time.
+  - If no native broker binary is available, launch fails with an explicit broker-unavailable error instead of a generic shellspec parse failure.
+  - If a shellspec still provides `command`, that command remains the fallback broker path when the native broker is unavailable.
+- The native terminal broker preserves the current asymmetric wire contract:
+  - stdin uses JSON-RPC notifications
+  - stdout uses framed JSONL records
 
 ### `dtach`
 
@@ -268,7 +279,8 @@ Behavior:
 
 - terminal-like process wrapped by `dtach`
 - local attach proxy provides PTY interaction
-- supports reattach across manager restarts
+- advertises `reattach: true` because the backend retains dtach-backed external session semantics
+- current FWS product/API flow still does not provide a polished restart-safe rebind workflow for terminal UIs
 - live output subscriptions are through the local attach proxy state
 - resize supported while attached
 

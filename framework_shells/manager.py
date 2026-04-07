@@ -51,11 +51,16 @@ from .log_inspection import (
 )
 from .native_pipe import (
     NATIVE_PIPE_TESTING_MODE,
+    NATIVE_TERMINAL_BROKER_BIN,
+    NATIVE_TERMINAL_PIPE_ENGINE,
+    NATIVE_TERMINAL_PIPE_TESTING_MODE,
     NativePipePumpHandle,
     create_native_pipe_pump,
+    is_native_terminal_placeholder_command,
     native_extension_phase,
     native_extension_available,
     normalize_pipe_config,
+    resolve_native_terminal_broker_command,
 )
 from .shutdown import ShutdownPolicy, shutdown_snapshot
 
@@ -1222,6 +1227,21 @@ class FrameworkShellManager:
         record.set_backend(BACKEND_PIPE)
         env = self._prepare_env(record)
         resolved_pipe_config = normalize_pipe_config(pipe_config)
+        launch_command = list(record.command)
+        native_terminal_mode_requested = (
+            resolved_pipe_config.mode == NATIVE_TERMINAL_PIPE_TESTING_MODE
+        )
+        native_terminal_resolution = resolve_native_terminal_broker_command(launch_command)
+        native_terminal_mode_active = False
+        if native_terminal_mode_requested and native_terminal_resolution.engine:
+            launch_command = list(native_terminal_resolution.command)
+            native_terminal_mode_active = True
+        elif native_terminal_mode_requested and is_native_terminal_placeholder_command(launch_command):
+            raise RuntimeError(
+                f"native terminal broker unavailable for pipe.mode={NATIVE_TERMINAL_PIPE_TESTING_MODE}; "
+                "set FRAMEWORK_SHELLS_NATIVE_TERMINAL_BROKER, "
+                f"put {NATIVE_TERMINAL_BROKER_BIN} on PATH, or provide a fallback command"
+            )
         
         stdout_path = Path(record.stdout_log)
         stderr_path = Path(record.stderr_log)
@@ -1234,7 +1254,7 @@ class FrameworkShellManager:
         try:
             # We use pipes for stdin/stdout, but file for stderr
             proc = await asyncio.create_subprocess_exec(
-                *record.command,
+                *launch_command,
                 cwd=record.cwd,
                 env=env,
                 stdin=asyncio.subprocess.PIPE,
@@ -1255,6 +1275,25 @@ class FrameworkShellManager:
                 label=record.label,
                 shell_id=record.id,
             )
+            if native_terminal_mode_requested:
+                if native_terminal_mode_active:
+                    state.native_engine = NATIVE_TERMINAL_PIPE_ENGINE
+                    state.native_phase = "prototype"
+                    _shell_debug(
+                        "native_terminal_pipe",
+                        (
+                            f"shell={record.id} activated {NATIVE_TERMINAL_PIPE_TESTING_MODE} "
+                            f"source={native_terminal_resolution.source or 'unknown'}"
+                        ),
+                    )
+                else:
+                    _shell_debug(
+                        "native_terminal_pipe",
+                        (
+                            f"shell={record.id} requested {NATIVE_TERMINAL_PIPE_TESTING_MODE} "
+                            "but using shellspec command fallback"
+                        ),
+                    )
             native_mode_requested = resolved_pipe_config.mode == NATIVE_PIPE_TESTING_MODE
             native_mode_active = False
             if native_mode_requested:
@@ -1561,7 +1600,10 @@ class FrameworkShellManager:
             return None
         payload: JSONMap = {
             "engine": str(state.native_engine),
-            "active": bool(state.native_pump is not None),
+            "active": bool(
+                state.native_pump is not None
+                or state.native_engine == NATIVE_TERMINAL_PIPE_ENGINE
+            ),
         }
         phase = state.native_phase or native_extension_phase()
         if phase:

@@ -3,10 +3,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
+import os
+from pathlib import Path
+import shutil
 from types import ModuleType
 from typing import Protocol, cast
 
 NATIVE_PIPE_TESTING_MODE = "native_pipe_testing"
+NATIVE_TERMINAL_PIPE_TESTING_MODE = "native_terminal_pipe_testing"
+NATIVE_TERMINAL_PIPE_ENGINE = "native-terminal-pipe"
+NATIVE_TERMINAL_PLACEHOLDER_COMMAND = "__fws_native_terminal_pipe__"
+NATIVE_TERMINAL_BROKER_ENV = "FRAMEWORK_SHELLS_NATIVE_TERMINAL_BROKER"
+NATIVE_TERMINAL_BROKER_BIN = "fws-terminal-stream-broker"
 PIPE_PROFILE_LOW_LATENCY = "low_latency"
 PIPE_PROFILE_BALANCED = "balanced"
 PIPE_PROFILE_HIGH_THROUGHPUT = "high_throughput"
@@ -43,6 +51,13 @@ class NativePipePumpHandle(Protocol):
 
     def wait_for_chunks(self, max_items: int | None = None, timeout_ms: int = 0) -> list[bytes]:
         ...
+
+
+@dataclass(frozen=True)
+class NativeTerminalBrokerResolution:
+    command: list[str]
+    engine: str | None = None
+    source: str | None = None
 
 
 def _string_or_none(value: object) -> str | None:
@@ -125,3 +140,52 @@ def create_native_pipe_pump(
         int(log_flush_interval_ms),
     )
     return cast(NativePipePumpHandle, handle)
+
+
+def _candidate_terminal_broker_paths() -> list[Path]:
+    package_root = Path(__file__).resolve().parent.parent
+    return [
+        package_root / "framework_shells" / "bin" / NATIVE_TERMINAL_BROKER_BIN,
+        package_root / "native" / "fws_terminal_stream_broker" / "target" / "release" / NATIVE_TERMINAL_BROKER_BIN,
+        package_root / "native" / "fws_terminal_stream_broker" / "target" / "debug" / NATIVE_TERMINAL_BROKER_BIN,
+    ]
+
+
+def resolve_native_terminal_broker_command(
+    fallback_command: list[str] | tuple[str, ...],
+) -> NativeTerminalBrokerResolution:
+    fallback = [str(part) for part in fallback_command]
+
+    override = os.environ.get(NATIVE_TERMINAL_BROKER_ENV, "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return NativeTerminalBrokerResolution(
+                command=[str(path)],
+                engine=NATIVE_TERMINAL_PIPE_ENGINE,
+                source=f"env:{NATIVE_TERMINAL_BROKER_ENV}",
+            )
+
+    for path in _candidate_terminal_broker_paths():
+        if path.is_file() and os.access(path, os.X_OK):
+            return NativeTerminalBrokerResolution(
+                command=[str(path)],
+                engine=NATIVE_TERMINAL_PIPE_ENGINE,
+                source=str(path),
+            )
+
+    which_path = shutil.which(NATIVE_TERMINAL_BROKER_BIN)
+    if which_path:
+        return NativeTerminalBrokerResolution(
+            command=[which_path],
+            engine=NATIVE_TERMINAL_PIPE_ENGINE,
+            source=f"PATH:{which_path}",
+        )
+
+    return NativeTerminalBrokerResolution(command=fallback)
+
+
+def is_native_terminal_placeholder_command(
+    command: list[str] | tuple[str, ...],
+) -> bool:
+    return len(command) == 1 and str(command[0]) == NATIVE_TERMINAL_PLACEHOLDER_COMMAND

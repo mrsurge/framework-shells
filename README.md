@@ -98,7 +98,7 @@ class ShellRecord:
 - Good for interactive shells
 - `pty_mode="raw"` preserves the legacy raw-ish termios behavior
 - `pty_mode="interactive"` keeps a normal cooked tty (echo/canonical input/signals)
-- **Not re-attachable across manager process restarts** (PTY file descriptors are in-memory)
+- No current manager-adoption path for resuming live PTY I/O after a manager restart
 
 The compatibility booleans remain in payloads, but `backend` is the canonical backend descriptor going forward.
 
@@ -110,7 +110,7 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 - Supports experimental native modes under `pipe.mode`, including:
   - `native_pipe_testing` for the raw high-traffic pipe pump
   - `native_terminal_pipe_testing` for the PTY-backed terminal stream broker
-- **Not re-attachable across manager process restarts** (pipe handles are in-memory)
+- No current manager-adoption path for resuming live raw-pipe I/O after a manager restart
 
 ### Pipe Migration Notes
 
@@ -120,8 +120,8 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 - Review wrappers that use `exec 1>&2`, `2>&1`, or `tee /dev/stderr`; they may now duplicate output or pollute protocol stdout.
 - For stdio protocol servers, keep protocol/data traffic on stdout and human diagnostics on stderr.
 - Pipe output subscriptions are raw stream chunks, not line-framed records. Downstream consumers that assume one callback per line need to reassemble lines or messages themselves.
-- Reconnection now means reconnecting to the live FWS manager for that `shell_id`, not reconstructing the raw OS pipe in a new manager process.
-- If the manager process dies, raw `pipe` shells are still not reattachable. That is future `uds_pipe` territory, not current `pipe` behavior.
+- In this repo, `reattach` means manager/runtime-level resumed communication with an adopted shell session.
+- Raw `pipe` currently has no supported adoption path for resuming live I/O in a successor manager process.
 - `pipe.mode: native_terminal_pipe_testing` can now be native-only: if the shellspec omits `command`, FWS resolves the native terminal broker automatically and fails with an explicit broker-unavailable error if no native broker binary is present.
 
 **Dtach** (`spawn_shell_dtach`):

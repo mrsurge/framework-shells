@@ -83,6 +83,7 @@ Notes:
 
 - `pty_mode` is only meaningful for `pty` and `dtach`
 - `capabilities` are live-state-sensitive and may change while the shell is running or after it exits
+- In this document, `reattach` means manager/runtime-level resumed communication with an adopted shell session.
 
 ## Backend Contracts
 
@@ -198,7 +199,7 @@ Behavior:
 - live stdout subscriptions supported
 - stderr remains file-logged
 - no resize
-- no reconnect across manager restarts
+- no current manager-adoption path for resuming live raw-pipe I/O after a manager restart
 - output subscriptions are raw stream chunks, not line-framed records
 
 Capabilities while live:
@@ -279,8 +280,8 @@ Behavior:
 
 - terminal-like process wrapped by `dtach`
 - local attach proxy provides PTY interaction
-- advertises `reattach: true` because the backend retains dtach-backed external session semantics
-- current FWS product/API flow still does not provide a polished restart-safe rebind workflow for terminal UIs
+- `reattach: true` refers to manager/runtime-level resumed communication with an adopted dtach-backed session
+- current FWS product/API flow still does not provide a polished terminal-UI rebind workflow around that adoption path
 - live output subscriptions are through the local attach proxy state
 - resize supported while attached
 

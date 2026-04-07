@@ -2001,8 +2001,9 @@ class FrameworkShellManager:
     def get_pipe_state(self, shell_id: str) -> Optional[PipeState]:
         """Return the live PipeState for a running pipe-backed shell, if present.
 
-        Note: pipe shells cannot be re-attached across process restarts, so this
-        will only be available in the process that spawned the pipe shell.
+        Note: raw pipe I/O currently has no manager-adoption path after a manager
+        restart, so this is only available in the process that currently owns
+        the live pipe state.
         """
         return self._pipes.get(shell_id)
 

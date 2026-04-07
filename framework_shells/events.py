@@ -51,6 +51,9 @@ class EventBus:
         q: AsyncQueue[ShellEvent] = AsyncQueue()
         self._subscribers.add(q)
         return q
+
+    def has_subscribers(self) -> bool:
+        return bool(self._subscribers)
     
     def unsubscribe(self, q: AsyncQueue[ShellEvent]) -> None:
         self._subscribers.discard(q)
@@ -58,7 +61,7 @@ class EventBus:
     async def publish(self, event: ShellEvent) -> None:
         for q in list(self._subscribers):
             try:
-                await q.put(event)
+                q.put_nowait(event)
             except Exception:
                 self._subscribers.discard(q)
 

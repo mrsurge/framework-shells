@@ -118,15 +118,23 @@ def _float_or_zero(value: object) -> float:
 
 
 def _shell_backend(info: ShellInfo) -> str:
+    backend = ""
     if info.get("backend"):
-        return str(info.get("backend"))
-    if info.get("uses_dtach"):
-        return "dtach"
-    if info.get("uses_pipes"):
-        return "pipes"
-    if info.get("uses_pty"):
-        return "pty"
-    return "proc"
+        backend = str(info.get("backend"))
+    elif info.get("uses_dtach"):
+        backend = "dtach"
+    elif info.get("uses_pipes"):
+        backend = "pipes"
+    elif info.get("uses_pty"):
+        backend = "pty"
+    else:
+        backend = "proc"
+
+    pipe_runtime = _as_dict(info.get("pipe_runtime"))
+    if backend == "pipe" and pipe_runtime.get("engine") == "native-pipe":
+        return "pipe:native-pipe"
+
+    return backend
 
 
 def _is_shell_live(info: ShellInfo) -> bool:

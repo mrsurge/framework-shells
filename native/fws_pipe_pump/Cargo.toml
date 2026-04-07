@@ -9,4 +9,5 @@ name = "fws_pipe_pump"
 crate-type = ["cdylib"]
 
 [dependencies]
+libc = "0.2"
 pyo3 = { version = "0.22", features = ["extension-module"] }

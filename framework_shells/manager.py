@@ -19,7 +19,7 @@ import inspect
 from asyncio import Lock as AsyncLock
 from asyncio import Queue as AsyncQueue
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, cast
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Protocol, cast
 
 import aiofiles
 
@@ -32,7 +32,7 @@ from .record import (
     ShellRecord,
     normalize_backend,
 )
-from .pty import PTYState, PipeState
+from .pty import PTYState, PTYWriteRequest, PipeState
 from .events import EventBus, EventType, ShellEvent, get_event_bus
 from .hooks import ShellLifecycleHooks
 from .process_snapshot import (
@@ -51,6 +51,9 @@ from .log_inspection import (
 )
 from .native_pipe import (
     NATIVE_PIPE_TESTING_MODE,
+    NativePipePumpHandle,
+    create_native_pipe_pump,
+    native_extension_phase,
     native_extension_available,
     normalize_pipe_config,
 )
@@ -66,6 +69,22 @@ PTY_MODE_RAW = "raw"
 PTY_MODE_INTERACTIVE = "interactive"
 JSONMap = dict[str, object]
 JSONList = list[JSONMap]
+
+
+class _PipeReadTransport(Protocol):
+    def get_extra_info(self, name: str, default: object | None = None) -> object:
+        ...
+
+    def pause_reading(self) -> None:
+        ...
+
+    def resume_reading(self) -> None:
+        ...
+
+
+class _HasFileno(Protocol):
+    def fileno(self) -> int:
+        ...
 
 def _truthy_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -532,6 +551,15 @@ class FrameworkShellManager:
         except Exception:
             pass
 
+    def _set_fd_nonblocking(self, fd: int) -> None:
+        try:
+            flags = int(fcntl.fcntl(fd, fcntl.F_GETFL))
+            if flags & os.O_NONBLOCK:
+                return
+            _ = fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        except Exception:
+            pass
+
     def _create_record(
         self,
         command: Iterable[str],
@@ -698,6 +726,7 @@ class FrameworkShellManager:
             return # Cannot attach
             
         master_fd, slave_fd = await asyncio.to_thread(pty.openpty)
+        self._set_fd_nonblocking(master_fd)
         self._configure_pty_slave(slave_fd, pty_mode=getattr(record, "pty_mode", PTY_MODE_RAW))
 
         # dtach -a <socket>
@@ -727,15 +756,18 @@ class FrameworkShellManager:
             master_fd=master_fd,
             label=record.label,
             shell_id=record.id,
+            backend=BACKEND_DTACH,
             proxy_pid=proc.pid # Store proxy PID
         )
         
         state.reader = asyncio.create_task(self._pty_reader(record, state))
+        state.writer = asyncio.create_task(self._pty_writer(state))
         self._pty[record.id] = state
 
     async def _launch_pty(self, record: ShellRecord) -> ShellRecord:
         record.set_backend(BACKEND_PTY)
         master_fd, slave_fd = await asyncio.to_thread(pty.openpty)
+        self._set_fd_nonblocking(master_fd)
         envp = self._prepare_env(record)
         envp.setdefault("TERM", "xterm-256color")
         self._configure_pty_slave(slave_fd, pty_mode=getattr(record, "pty_mode", PTY_MODE_RAW))
@@ -767,9 +799,11 @@ class FrameworkShellManager:
             master_fd=master_fd,
             label=record.label,
             shell_id=record.id,
+            backend=BACKEND_PTY,
         )
         
         state.reader = asyncio.create_task(self._pty_reader(record, state))
+        state.writer = asyncio.create_task(self._pty_writer(state))
         self._pty[record.id] = state
         return record
 
@@ -824,10 +858,93 @@ class FrameworkShellManager:
                 except Exception:
                     break
         
+        state.stop.set()
+        try:
+            state.input_queue.put_nowait(None)
+        except Exception:
+            pass
         try:
             await asyncio.to_thread(os.close, state.master_fd)
         except Exception:
             pass
+
+    async def _wait_fd_writable(self, fd: int) -> None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+
+        def _mark_writable() -> None:
+            loop.remove_writer(fd)
+            if not future.done():
+                future.set_result(None)
+
+        loop.add_writer(fd, _mark_writable)
+        try:
+            await future
+        finally:
+            if not future.done():
+                loop.remove_writer(fd)
+
+    async def _write_fd_all(self, fd: int, data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            try:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise RuntimeError("PTY write returned no bytes")
+                view = view[written:]
+            except BlockingIOError:
+                await self._wait_fd_writable(fd)
+            except InterruptedError:
+                continue
+
+    def _fail_pending_pty_writes(self, state: PTYState, message: str) -> None:
+        while True:
+            try:
+                request = state.input_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if request is None:
+                continue
+            _, done = request
+            if not done.done():
+                done.set_exception(RuntimeError(message))
+
+    async def _pty_writer(self, state: PTYState) -> None:
+        failure_message = f"PTY input unavailable for shell {state.shell_id or '?'}"
+        try:
+            while not state.stop.is_set():
+                request = await state.input_queue.get()
+                if request is None:
+                    break
+                data, done = request
+                try:
+                    await self._write_fd_all(state.master_fd, data)
+                except asyncio.CancelledError:
+                    if not done.done():
+                        done.set_exception(RuntimeError(failure_message))
+                    raise
+                except Exception as exc:
+                    failure_message = f"PTY write failed for shell {state.shell_id or '?'}: {exc}"
+                    if not done.done():
+                        done.set_exception(RuntimeError(failure_message))
+                    break
+                else:
+                    if not done.done():
+                        done.set_result(None)
+        finally:
+            self._fail_pending_pty_writes(state, failure_message)
+
+    async def _write_live_pty_state(self, state: PTYState, data: str) -> None:
+        if state.stop.is_set():
+            raise RuntimeError(f"PTY input unavailable for shell {state.shell_id or '?'}")
+        writer = state.writer
+        if writer is None or writer.done():
+            raise RuntimeError(f"PTY input unavailable for shell {state.shell_id or '?'}")
+        encoded = data.encode("utf-8")
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        request: PTYWriteRequest = (encoded, done)
+        state.input_queue.put_nowait(request)
+        await done
 
     async def _is_pid_alive(self, pid: Optional[int]) -> bool:
         if not pid: return False
@@ -863,8 +980,14 @@ class FrameworkShellManager:
         state = self._pty.pop(shell_id, None)
         if not state: return
         state.stop.set()
+        try:
+            state.input_queue.put_nowait(None)
+        except Exception:
+            pass
         if state.reader:
             state.reader.cancel()
+        if state.writer and state.writer is not asyncio.current_task():
+            state.writer.cancel()
         
         # If proxy pid exists, kill it (detach)
         if state.proxy_pid:
@@ -905,27 +1028,7 @@ class FrameworkShellManager:
                         await log_fh.flush()
                         pending_flush_bytes = 0
 
-                    text = data.decode("utf-8", errors="replace")
-                    event = ShellEvent(
-                        type=EventType.LOG_CHUNK,
-                        shell_id=record.id,
-                        data={"stream": "stdout", "chunk": text},
-                        app_id=record.app_id or record.derive_app_id(),
-                        parent_shell_id=record.parent_shell_id,
-                        is_app_worker=record.is_app_worker,
-                    )
-                    await self._event_bus.publish(event)
-
-                    for q in list(state.stdout_subscribers):
-                        try:
-                            await q.put(text)
-                        except Exception:
-                            pass
-                    for q in list(state.stdout_subscribers_bytes):
-                        try:
-                            await q.put(data)
-                        except Exception:
-                            pass
+                    await self._dispatch_pipe_chunk(record, state, data)
 
                 except asyncio.TimeoutError:
                     if pending_flush_bytes > 0:
@@ -937,6 +1040,159 @@ class FrameworkShellManager:
                     break
             if pending_flush_bytes > 0:
                 await log_fh.flush()
+
+    async def _dispatch_pipe_chunk(self, record: ShellRecord, state: PipeState, data: bytes) -> None:
+        text_subscribers = list(state.stdout_subscribers)
+        bytes_subscribers = list(state.stdout_subscribers_bytes)
+        should_publish_log_chunk = self._event_bus.has_subscribers()
+        text: str | None = None
+
+        if should_publish_log_chunk or text_subscribers:
+            text = data.decode("utf-8", errors="replace")
+
+        if should_publish_log_chunk and text is not None:
+            event = ShellEvent(
+                type=EventType.LOG_CHUNK,
+                shell_id=record.id,
+                data={"stream": "stdout", "chunk": text},
+                app_id=record.app_id or record.derive_app_id(),
+                parent_shell_id=record.parent_shell_id,
+                is_app_worker=record.is_app_worker,
+            )
+            await self._event_bus.publish(event)
+
+        if text is not None:
+            for q in text_subscribers:
+                try:
+                    q.put_nowait(text)
+                except Exception:
+                    pass
+        for q in bytes_subscribers:
+            try:
+                q.put_nowait(data)
+            except Exception:
+                pass
+
+    def _pipe_stream_transport(self, stream: asyncio.StreamReader | None) -> _PipeReadTransport | None:
+        if stream is None:
+            return None
+        transport = getattr(stream, "_transport", None)
+        if transport is None:
+            return None
+        return cast(_PipeReadTransport, transport)
+
+    def _pipe_stream_fd(self, stream: asyncio.StreamReader | None) -> int | None:
+        transport = self._pipe_stream_transport(stream)
+        if transport is None or not hasattr(transport, "get_extra_info"):
+            return None
+        try:
+            pipe_obj = transport.get_extra_info("pipe")
+        except Exception:
+            return None
+        if pipe_obj is None or not hasattr(pipe_obj, "fileno"):
+            return None
+        try:
+            return int(cast(_HasFileno, pipe_obj).fileno())
+        except Exception:
+            return None
+
+    async def _activate_native_pipe_stdout(
+        self,
+        record: ShellRecord,
+        state: PipeState,
+        *,
+        read_chunk_bytes: int,
+        log_flush_bytes: int,
+        log_flush_interval_ms: int,
+    ) -> bool:
+        stream = state.process.stdout
+        transport = self._pipe_stream_transport(stream)
+        stdout_fd = self._pipe_stream_fd(stream)
+        if stream is None or transport is None or stdout_fd is None:
+            return False
+
+        paused = False
+        prebuffer = b""
+        try:
+            if hasattr(transport, "pause_reading"):
+                transport.pause_reading()
+                paused = True
+
+            buffer_obj = getattr(stream, "_buffer", None)
+            if isinstance(buffer_obj, (bytes, bytearray)):
+                prebuffer = bytes(buffer_obj)
+                if isinstance(buffer_obj, bytearray):
+                    try:
+                        buffer_obj.clear()
+                    except Exception:
+                        pass
+
+            if prebuffer:
+                async with aiofiles.open(record.stdout_log, "ab") as log_fh:
+                    await log_fh.write(prebuffer)
+                    await log_fh.flush()
+
+            native_pump = create_native_pipe_pump(
+                stdout_fd=stdout_fd,
+                log_path=record.stdout_log,
+                read_chunk_bytes=read_chunk_bytes,
+                log_flush_bytes=log_flush_bytes,
+                log_flush_interval_ms=log_flush_interval_ms,
+            )
+            if native_pump is None:
+                if paused and hasattr(transport, "resume_reading"):
+                    transport.resume_reading()
+                return False
+
+            state.native_pump = native_pump
+            state.native_engine = "native-pipe"
+            state.native_phase = native_extension_phase()
+            if prebuffer:
+                state.native_initial_chunks.append(prebuffer)
+            state.stdout_reader = asyncio.create_task(self._native_pipe_stdout_relay(record, state))
+            return True
+        except Exception:
+            if paused and hasattr(transport, "resume_reading"):
+                try:
+                    transport.resume_reading()
+                except Exception:
+                    pass
+            return False
+
+    async def _native_pipe_stdout_relay(self, record: ShellRecord, state: PipeState) -> None:
+        native_pump = cast(Optional[NativePipePumpHandle], state.native_pump)
+        if native_pump is None:
+            return
+
+        try:
+            if state.native_initial_chunks:
+                initial_chunks = list(state.native_initial_chunks)
+                state.native_initial_chunks.clear()
+                for chunk in initial_chunks:
+                    await self._dispatch_pipe_chunk(record, state, chunk)
+
+            while not state.stop.is_set():
+                chunks = await asyncio.to_thread(
+                    native_pump.wait_for_chunks,
+                    self.PIPE_NATIVE_MAX_DRAIN_CHUNKS,
+                    self.PIPE_NATIVE_WAIT_TIMEOUT_MS,
+                )
+                for chunk in chunks:
+                    await self._dispatch_pipe_chunk(record, state, chunk)
+                if not chunks and native_pump.is_finished():
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        finally:
+            state.native_initial_chunks.clear()
+            if state.native_pump is native_pump:
+                state.native_pump = None
+            try:
+                await asyncio.to_thread(native_pump.stop)
+            except Exception:
+                pass
 
     async def _pipe_waiter(self, record: ShellRecord, state: PipeState) -> None:
         proc = state.process
@@ -966,18 +1222,6 @@ class FrameworkShellManager:
         record.set_backend(BACKEND_PIPE)
         env = self._prepare_env(record)
         resolved_pipe_config = normalize_pipe_config(pipe_config)
-
-        if resolved_pipe_config.mode == NATIVE_PIPE_TESTING_MODE:
-            if native_extension_available():
-                _shell_debug(
-                    "native_pipe",
-                    f"shell={record.id} requested native_pipe_testing; Phase 0 manager hook is dormant, using Python pipe pump",
-                )
-            else:
-                _shell_debug(
-                    "native_pipe",
-                    f"shell={record.id} requested native_pipe_testing but native extension is unavailable, using Python pipe pump",
-                )
         
         stdout_path = Path(record.stdout_log)
         stderr_path = Path(record.stderr_log)
@@ -1011,7 +1255,30 @@ class FrameworkShellManager:
                 label=record.label,
                 shell_id=record.id,
             )
-            state.stdout_reader = asyncio.create_task(self._pipe_stdout_reader(record, state))
+            native_mode_requested = resolved_pipe_config.mode == NATIVE_PIPE_TESTING_MODE
+            native_mode_active = False
+            if native_mode_requested:
+                if native_extension_available():
+                    native_mode_active = await self._activate_native_pipe_stdout(
+                        record,
+                        state,
+                        read_chunk_bytes=resolved_pipe_config.read_chunk_bytes or self.PIPE_READ_CHUNK_BYTES,
+                        log_flush_bytes=resolved_pipe_config.log_flush_bytes or self.PIPE_LOG_FLUSH_BYTES,
+                        log_flush_interval_ms=resolved_pipe_config.log_flush_interval_ms or int(self.PIPE_LOG_FLUSH_INTERVAL_SECONDS * 1000),
+                    )
+                    if native_mode_active:
+                        _shell_debug(
+                            "native_pipe",
+                            f"shell={record.id} activated native_pipe_testing phase={native_extension_phase() or 'unknown'}",
+                        )
+                if not native_mode_active:
+                    _shell_debug(
+                        "native_pipe",
+                        f"shell={record.id} requested native_pipe_testing but using Python pipe pump",
+                    )
+
+            if not native_mode_active:
+                state.stdout_reader = asyncio.create_task(self._pipe_stdout_reader(record, state))
             state.waiter = asyncio.create_task(self._pipe_waiter(record, state))
             self._pipes[record.id] = state
             return record
@@ -1025,6 +1292,13 @@ class FrameworkShellManager:
         state.stop.set()
         if state.stdout_reader:
             state.stdout_reader.cancel()
+        native_pump = cast(Optional[NativePipePumpHandle], state.native_pump)
+        if native_pump is not None:
+            try:
+                await asyncio.to_thread(native_pump.stop)
+            except Exception:
+                pass
+            state.native_pump = None
         if state.waiter and state.waiter is not asyncio.current_task():
             state.waiter.cancel()
         proc = state.process
@@ -1255,6 +1529,8 @@ class FrameworkShellManager:
     PIPE_READ_CHUNK_BYTES: int = 64 * 1024
     PIPE_LOG_FLUSH_BYTES: int = 256 * 1024
     PIPE_LOG_FLUSH_INTERVAL_SECONDS: float = 0.25
+    PIPE_NATIVE_WAIT_TIMEOUT_MS: int = 50
+    PIPE_NATIVE_MAX_DRAIN_CHUNKS: int = 64
 
     async def describe(
         self,
@@ -1267,11 +1543,29 @@ class FrameworkShellManager:
         payload = record.to_payload()
         payload["capabilities"] = await self.get_shell_capabilities(record)
         payload["stats"] = await self._process_stats(record)
+        pipe_runtime = self._pipe_runtime_payload(record)
+        if pipe_runtime:
+            payload["pipe_runtime"] = pipe_runtime
         if include_logs:
             payload["logs"] = {
                 "stdout_tail": await self._read_log_tail(Path(record.stdout_log), tail_lines),
                 "stderr_tail": await self._read_log_tail(Path(record.stderr_log), tail_lines),
             }
+        return payload
+
+    def _pipe_runtime_payload(self, record: ShellRecord) -> JSONMap | None:
+        if self._backend_name(record) != BACKEND_PIPE:
+            return None
+        state = self._pipes.get(record.id)
+        if state is None or not state.native_engine:
+            return None
+        payload: JSONMap = {
+            "engine": str(state.native_engine),
+            "active": bool(state.native_pump is not None),
+        }
+        phase = state.native_phase or native_extension_phase()
+        if phase:
+            payload["phase"] = phase
         return payload
 
     async def _process_stats(self, record: ShellRecord) -> JSONMap:
@@ -1799,10 +2093,9 @@ class FrameworkShellManager:
         """Write data to a shell's PTY."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
-            if not state:
-                raise KeyError(f"No PTY for shell {shell_id}")
-            encoded = data.encode("utf-8")
-            await asyncio.to_thread(os.write, state.master_fd, encoded)
+        if not state:
+            raise KeyError(f"No PTY for shell {shell_id}")
+        await self._write_live_pty_state(state, data)
 
     async def write_to_pipe(self, shell_id: str, data: str) -> None:
         """Write data to a shell's live stdin pipe."""
@@ -1850,23 +2143,33 @@ class FrameworkShellManager:
         *,
         append_newline: bool = False,
     ) -> JSONMap:
-        record = await self.get_shell(shell_id)
-        if not record:
-            raise KeyError(f"Shell not found: {shell_id}")
-
-        backend = self._backend_name(record)
         payload = str(data)
         if append_newline:
             payload = payload + "\n"
         bytes_written = len(payload.encode("utf-8"))
 
         try:
-            if backend in {"pty", "dtach"}:
-                await self.write_to_pty(shell_id, payload)
-            elif backend == "pipe":
+            async with self._get_lock():
+                pty_state = self._pty.get(shell_id)
+                pipe_state = self._pipes.get(shell_id)
+
+            if pty_state is not None:
+                backend = str(pty_state.backend or BACKEND_PTY)
+                await self._write_live_pty_state(pty_state, payload)
+            elif pipe_state is not None:
+                backend = BACKEND_PIPE
                 await self.write_to_pipe(shell_id, payload)
             else:
-                raise RuntimeError(f"stdin write is not supported for backend {backend}")
+                record = await self.get_shell(shell_id)
+                if not record:
+                    raise KeyError(f"Shell not found: {shell_id}")
+                backend = self._backend_name(record)
+                if backend in {"pty", "dtach"}:
+                    await self.write_to_pty(shell_id, payload)
+                elif backend == "pipe":
+                    await self.write_to_pipe(shell_id, payload)
+                else:
+                    raise RuntimeError(f"stdin write is not supported for backend {backend}")
         except KeyError as exc:
             raise RuntimeError(f"Live input unavailable for shell {shell_id}") from exc
 

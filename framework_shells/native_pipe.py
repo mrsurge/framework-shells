@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
 from types import ModuleType
+from typing import Protocol, cast
 
 NATIVE_PIPE_TESTING_MODE = "native_pipe_testing"
 PIPE_PROFILE_LOW_LATENCY = "low_latency"
@@ -27,18 +28,21 @@ class NativePipeConfig:
     log_flush_interval_ms: int | None = None
 
 
-class NativePipePumpHandle:
-    def start(self) -> None:
-        raise NotImplementedError
-
+class NativePipePumpHandle(Protocol):
     def stop(self) -> None:
-        raise NotImplementedError
+        ...
 
-    def poll_chunks(self) -> list[bytes]:
-        raise NotImplementedError
+    def drain_chunks(self, max_items: int | None = None) -> list[bytes]:
+        ...
 
     def stats(self) -> dict[str, object]:
-        raise NotImplementedError
+        ...
+
+    def is_finished(self) -> bool:
+        ...
+
+    def wait_for_chunks(self, max_items: int | None = None, timeout_ms: int = 0) -> list[bytes]:
+        ...
 
 
 def _string_or_none(value: object) -> str | None:
@@ -97,3 +101,27 @@ def native_extension_phase() -> str | None:
         return None
     phase = getattr(module, "__phase__", None)
     return phase if isinstance(phase, str) else None
+
+
+def create_native_pipe_pump(
+    *,
+    stdout_fd: int,
+    log_path: str,
+    read_chunk_bytes: int,
+    log_flush_bytes: int,
+    log_flush_interval_ms: int,
+) -> NativePipePumpHandle | None:
+    module = _NATIVE_MODULE
+    if module is None:
+        return None
+    pump_cls = getattr(module, "NativePipePump", None)
+    if pump_cls is None:
+        return None
+    handle = pump_cls(
+        int(stdout_fd),
+        str(log_path),
+        int(read_chunk_bytes),
+        int(log_flush_bytes),
+        int(log_flush_interval_ms),
+    )
+    return cast(NativePipePumpHandle, handle)

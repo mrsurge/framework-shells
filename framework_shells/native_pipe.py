@@ -6,15 +6,22 @@ from importlib import import_module
 import os
 from pathlib import Path
 import shutil
+import sys
 from types import ModuleType
 from typing import Protocol, cast
 
 NATIVE_PIPE_TESTING_MODE = "native_pipe_testing"
 NATIVE_TERMINAL_PIPE_TESTING_MODE = "native_terminal_pipe_testing"
 NATIVE_TERMINAL_PIPE_ENGINE = "native-terminal-pipe"
+PYTHON_TERMINAL_PIPE_TESTING_MODE = "python_terminal_pipe_testing"
+PYTHON_TERMINAL_PIPE_ENGINE = "python-terminal-pipe"
 NATIVE_TERMINAL_PLACEHOLDER_COMMAND = "__fws_native_terminal_pipe__"
 NATIVE_TERMINAL_BROKER_ENV = "FRAMEWORK_SHELLS_NATIVE_TERMINAL_BROKER"
 NATIVE_TERMINAL_BROKER_BIN = "fws-terminal-stream-broker"
+PYTHON_TERMINAL_BROKER_MODULE = "framework_shells.terminal_stream_broker"
+TERMINAL_FALLBACK_PYTHON_PTY = "python_pty"
+TERMINAL_FALLBACK_COMMAND = "command"
+TERMINAL_FALLBACK_ERROR = "error"
 PIPE_PROFILE_LOW_LATENCY = "low_latency"
 PIPE_PROFILE_BALANCED = "balanced"
 PIPE_PROFILE_HIGH_THROUGHPUT = "high_throughput"
@@ -23,6 +30,13 @@ _SUPPORTED_PIPE_PROFILES = frozenset(
         PIPE_PROFILE_LOW_LATENCY,
         PIPE_PROFILE_BALANCED,
         PIPE_PROFILE_HIGH_THROUGHPUT,
+    }
+)
+_SUPPORTED_TERMINAL_FALLBACKS = frozenset(
+    {
+        TERMINAL_FALLBACK_PYTHON_PTY,
+        TERMINAL_FALLBACK_COMMAND,
+        TERMINAL_FALLBACK_ERROR,
     }
 )
 
@@ -34,6 +48,7 @@ class NativePipeConfig:
     read_chunk_bytes: int | None = None
     log_flush_bytes: int | None = None
     log_flush_interval_ms: int | None = None
+    terminal_fallback: str = TERMINAL_FALLBACK_PYTHON_PTY
 
 
 class NativePipePumpHandle(Protocol):
@@ -84,6 +99,7 @@ def normalize_pipe_config(raw: Mapping[str, object] | None) -> NativePipeConfig:
     profile = _string_or_none(raw.get("profile")) or PIPE_PROFILE_BALANCED
     if profile not in _SUPPORTED_PIPE_PROFILES:
         profile = PIPE_PROFILE_BALANCED
+    terminal_fallback = normalize_terminal_fallback(raw.get("terminal_fallback"))
 
     return NativePipeConfig(
         mode=mode,
@@ -91,7 +107,17 @@ def normalize_pipe_config(raw: Mapping[str, object] | None) -> NativePipeConfig:
         read_chunk_bytes=_int_or_none(raw.get("read_chunk_bytes")),
         log_flush_bytes=_int_or_none(raw.get("log_flush_bytes")),
         log_flush_interval_ms=_int_or_none(raw.get("log_flush_interval_ms")),
+        terminal_fallback=terminal_fallback,
     )
+
+
+def normalize_terminal_fallback(value: object) -> str:
+    text = _string_or_none(value)
+    if text in {"native_only", "none"}:
+        return TERMINAL_FALLBACK_ERROR
+    if text in _SUPPORTED_TERMINAL_FALLBACKS:
+        return text
+    return TERMINAL_FALLBACK_PYTHON_PTY
 
 
 def _load_native_module() -> ModuleType | None:
@@ -183,6 +209,25 @@ def resolve_native_terminal_broker_command(
         )
 
     return NativeTerminalBrokerResolution(command=fallback)
+
+
+def resolve_python_terminal_broker_command() -> list[str]:
+    return [sys.executable, "-m", PYTHON_TERMINAL_BROKER_MODULE]
+
+
+def resolve_terminal_broker_fallback_command(
+    fallback_mode: object,
+    shellspec_command: list[str] | tuple[str, ...],
+) -> list[str] | None:
+    normalized = normalize_terminal_fallback(fallback_mode)
+    if normalized == TERMINAL_FALLBACK_PYTHON_PTY:
+        return resolve_python_terminal_broker_command()
+    if normalized == TERMINAL_FALLBACK_COMMAND:
+        command = [str(part) for part in shellspec_command]
+        if command and not is_native_terminal_placeholder_command(command):
+            return command
+        return None
+    return None
 
 
 def is_native_terminal_placeholder_command(

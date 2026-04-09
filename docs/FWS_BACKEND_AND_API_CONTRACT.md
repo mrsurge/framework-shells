@@ -20,6 +20,10 @@ The canonical backend field is now:
 }
 ```
 
+`dtach` is now a deprecated compatibility value for new launch requests. New
+shellspecs or CLI launches that request `dtach` are routed to `pty`. Legacy
+persisted dtach records may still surface as `backend: "dtach"`.
+
 Legacy compatibility fields remain present:
 
 ```json
@@ -81,7 +85,7 @@ Baseline shell payload shape:
 
 Notes:
 
-- `pty_mode` is only meaningful for `pty` and `dtach`
+- `pty_mode` is meaningful for PTY-backed terminals; legacy dtach records may still report it
 - `capabilities` are live-state-sensitive and may change while the shell is running or after it exits
 - In this document, `reattach` means manager/runtime-level resumed communication with an adopted shell session.
 
@@ -254,16 +258,28 @@ Migration notes:
 - Experimental `pipe.mode` values now include:
   - `native_pipe_testing` for the raw native stdout pump
   - `native_terminal_pipe_testing` for the PTY-backed native terminal broker over `pipe`
+  - `python_terminal_pipe_testing` to force the Python PTY terminal-stream broker
 - `pipe.mode: native_terminal_pipe_testing` may be declared without a shellspec `command`.
-  - In that native-only shape, the shellspec parser injects an internal placeholder command.
-  - The manager replaces it with the native broker binary at launch time.
-  - If no native broker binary is available, launch fails with an explicit broker-unavailable error instead of a generic shellspec parse failure.
-  - If a shellspec still provides `command`, that command remains the fallback broker path when the native broker is unavailable.
+  - In that broker-resolved shape, the shellspec parser injects an internal placeholder command.
+  - The manager replaces it with the native broker binary at launch time when one is available.
+  - `pipe.terminal_fallback` controls the non-native path:
+    - `python_pty` (default): use `python -m framework_shells.terminal_stream_broker`
+    - `command`: use the shellspec `command` as the fallback broker path
+    - `error` / `native_only`: fail if the native broker binary is unavailable
+  - If `pipe.terminal_fallback: command` is selected, a shellspec `command` is required.
 - The native terminal broker preserves the current asymmetric wire contract:
   - stdin uses JSON-RPC notifications
   - stdout uses framed JSONL records
+- The Python PTY fallback preserves that same asymmetric wire contract so consumers do not need a separate terminal-stream protocol branch.
+- `pipe.mode: python_terminal_pipe_testing` is the explicit escape hatch for always using the Python PTY broker.
+  - It may also omit a shellspec `command`; the shellspec parser injects the same internal placeholder command.
+  - The manager always replaces that placeholder with `python -m framework_shells.terminal_stream_broker`, regardless of whether a native broker binary is installed.
 
 ### `dtach`
+
+This backend is now legacy-only in practice. New launch requests that specify
+`dtach` are routed to `pty`, but previously persisted dtach records can still
+surface and retain their legacy capability shape.
 
 Identity:
 

@@ -135,6 +135,8 @@ def _shell_backend(info: ShellInfo) -> str:
         return "pipe:native-pipe"
     if backend == "pipe" and pipe_runtime.get("engine") == "native-terminal-pipe":
         return "pipe:native-terminal-pipe"
+    if backend == "pipe" and pipe_runtime.get("engine") == "python-terminal-pipe":
+        return "pipe:python-terminal-pipe"
 
     return backend
 

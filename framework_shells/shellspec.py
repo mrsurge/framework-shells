@@ -14,7 +14,11 @@ import yaml
 from .native_pipe import (
     NATIVE_TERMINAL_PIPE_TESTING_MODE,
     NATIVE_TERMINAL_PLACEHOLDER_COMMAND,
+    PYTHON_TERMINAL_PIPE_TESTING_MODE,
+    TERMINAL_FALLBACK_COMMAND,
+    normalize_pipe_config,
 )
+from .record import normalize_launch_backend
 
 ScalarValue: TypeAlias = str | int | float | bool | None
 SpecValue: TypeAlias = ScalarValue | list["SpecValue"] | dict[str, "SpecValue"]
@@ -54,7 +58,7 @@ class ShellSpec:
     pty_mode: str = "raw"  # "raw" | "interactive"
     readiness: ReadinessProbe | None = None
     restart: RestartPolicy = field(default_factory=RestartPolicy)
-    backend: str = "proc"  # "proc" | "pty" | "pipe" | "dtach"
+    backend: str = "proc"  # "proc" | "pty" | "pipe" (legacy "dtach" aliases to "pty")
     autostart: bool = True
 
     def normalized_command(self) -> list[str]:
@@ -260,7 +264,7 @@ def render_shellspec(spec: ShellSpec, *, ctx: Mapping[str, object] | None = None
         pty_mode=str(rendered.get("pty_mode") or spec.pty_mode or "raw"),
         readiness=readiness,
         restart=restart,
-        backend=str(rendered.get("backend") or spec.backend),
+        backend=normalize_launch_backend(str(rendered.get("backend") or spec.backend)),
         autostart=bool(rendered.get("autostart") if "autostart" in rendered else spec.autostart),
     )
 
@@ -308,16 +312,26 @@ def _spec_from_dict(shell_id: str, raw: SpecMap) -> ShellSpec:
     pipe = raw.get("pipe") or {}
     if not isinstance(pipe, dict):
         pipe = {}
+    pipe_config = normalize_pipe_config(cast(dict[str, object], dict(cast(dict[object, object], pipe))))
 
-    backend = str(raw.get("backend") or "proc")
+    backend = normalize_launch_backend(str(raw.get("backend") or "proc"))
     command = raw.get("command")
     if not command:
-        native_terminal_only = (
+        terminal_stream_mode = (
             backend == "pipe"
-            and str(cast(dict[object, object], pipe).get("mode") or "")
-            == NATIVE_TERMINAL_PIPE_TESTING_MODE
+            and pipe_config.mode in {
+                NATIVE_TERMINAL_PIPE_TESTING_MODE,
+                PYTHON_TERMINAL_PIPE_TESTING_MODE,
+            }
         )
-        if native_terminal_only:
+        if terminal_stream_mode:
+            if (
+                pipe_config.mode == NATIVE_TERMINAL_PIPE_TESTING_MODE
+                and pipe_config.terminal_fallback == TERMINAL_FALLBACK_COMMAND
+            ):
+                raise ValueError(
+                    f"shellspec '{shell_id}' missing command for pipe.terminal_fallback=command"
+                )
             command = [NATIVE_TERMINAL_PLACEHOLDER_COMMAND]
         else:
             raise ValueError(f"shellspec '{shell_id}' missing command")

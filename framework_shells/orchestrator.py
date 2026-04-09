@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .manager import FrameworkShellManager
-from .record import ShellRecord
+from .record import ShellRecord, normalize_launch_backend
 from .shellspec import (
     ReadinessProbe,
     ShellSpec,
@@ -111,21 +111,6 @@ async def wait_for_readiness(record: ShellRecord, probe: ReadinessProbe) -> bool
         return await _wait_for_http_ok(url=probe.url, status_codes=list(probe.status_codes or [200]), timeout=probe.timeout)
 
     return True
-
-
-def _normalize_backend(value: str) -> str:
-    v = (value or "").strip().lower()
-    if v in ("proc", "process", "subprocess"):
-        return "proc"
-    if v in ("pty",):
-        return "pty"
-    if v in ("pipe", "pipes"):
-        return "pipe"
-    if v in ("dtach",):
-        return "dtach"
-    return "proc"
-
-
 class Orchestrator:
     def __init__(self, manager: FrameworkShellManager):
         self.manager = manager
@@ -153,22 +138,9 @@ class Orchestrator:
         subgroups = list(subgroups_overrides) if subgroups_overrides is not None else list(rendered.subgroups or [])
         ui_final = _deep_merge_dict(rendered.ui or {}, ui or {})
         label_final = label or rendered.id
-        backend = _normalize_backend(rendered.backend)
+        backend = normalize_launch_backend(rendered.backend)
 
-        if backend == "dtach":
-            record = await self.manager.spawn_shell_dtach(
-                command=rendered.command,
-                cwd=rendered.cwd,
-                env=env_final,
-                label=label_final,
-                spec_id=stored_spec_id,
-                subgroups=subgroups,
-                ui=ui_final,
-                pty_mode=rendered.pty_mode,
-                autostart=rendered.autostart,
-                parent_shell_id=parent_shell_id,
-            )
-        elif backend == "pty":
+        if backend == "pty":
             record = await self.manager.spawn_shell_pty(
                 command=rendered.command,
                 cwd=rendered.cwd,

@@ -7,6 +7,9 @@ BACKEND_PTY = "pty"
 BACKEND_PIPE = "pipe"
 BACKEND_DTACH = "dtach"
 KNOWN_BACKENDS = {BACKEND_PROC, BACKEND_PTY, BACKEND_PIPE, BACKEND_DTACH}
+DEPRECATED_BACKEND_ALIASES = {
+    BACKEND_DTACH: BACKEND_PTY,
+}
 
 
 def normalize_backend(
@@ -28,6 +31,22 @@ def normalize_backend(
     if uses_pty:
         return BACKEND_PTY
     return BACKEND_PROC
+
+
+def normalize_launch_backend(
+    backend: Optional[str],
+    *,
+    uses_pty: bool = False,
+    uses_pipes: bool = False,
+    uses_dtach: bool = False,
+) -> str:
+    normalized = normalize_backend(
+        backend,
+        uses_pty=uses_pty,
+        uses_pipes=uses_pipes,
+        uses_dtach=uses_dtach,
+    )
+    return DEPRECATED_BACKEND_ALIASES.get(normalized, normalized)
 
 
 def backend_flags(backend: str) -> Dict[str, bool]:

@@ -1,6 +1,6 @@
 # Framework Shells Module
 
-A standalone Python package for process orchestration with PTY, pipe, and dtach backends.
+A standalone Python package for process orchestration with PTY and pipe backends, plus legacy dtach compatibility.
 PTY-backed shells support `pty_mode="raw"` (legacy default) and `pty_mode="interactive"` (normal cooked/echoing terminal behavior).
 
 ## Install
@@ -14,13 +14,13 @@ pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@
 - Python 3.9+
 - `fastapi`, `uvicorn` (for API)
 - `pyyaml` (for spec files)
-- `dtach` (system binary, for persistent shells)
+- `dtach` (optional, legacy-only for old dtach sessions)
 
 ## Overview
 
 `framework_shells/` is a self-contained module that manages long-running background processes ("shells") with:
 
-- **Multiple backends**: PTY (interactive terminals), pipes (stdin/stdout), dtach (persistent sessions)
+- **Multiple backends**: PTY (interactive terminals), pipes (stdin/stdout), legacy dtach compatibility
 - **Configurable PTY discipline**: `raw` for legacy byte-oriented behavior, `interactive` for normal terminal echo/canonical input
 - **Runtime isolation**: Shells are namespaced by repo fingerprint + secret-derived runtime ID
 - **Event bus**: Real-time notifications for shell lifecycle events
@@ -79,11 +79,11 @@ class ShellRecord:
     pid: Optional[int]         # Process ID (None if not started)
     status: str                # "pending", "running", "exited"
     created_at: float          # Unix timestamp
-    backend: str               # Canonical backend: "proc" | "pty" | "pipe" | "dtach"
+    backend: str               # Canonical backend: "proc" | "pty" | "pipe" | legacy "dtach"
     uses_pty: bool             # PTY backend
     uses_pipes: bool           # Pipe backend
-    uses_dtach: bool           # Dtach backend (persistent)
-    pty_mode: str              # "raw" or "interactive" for pty/dtach-backed terminals
+    uses_dtach: bool           # Legacy dtach record flag
+    pty_mode: str              # "raw" or "interactive" for pty-backed terminals
     stdout_log: str            # Path to stdout log
     stderr_log: str            # Path to stderr log
     exit_code: Optional[int]   # Exit code (if exited)
@@ -110,6 +110,7 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 - Supports experimental native modes under `pipe.mode`, including:
   - `native_pipe_testing` for the raw high-traffic pipe pump
   - `native_terminal_pipe_testing` for the PTY-backed terminal stream broker
+  - `python_terminal_pipe_testing` to force the Python PTY terminal-stream broker
 - No current manager-adoption path for resuming live raw-pipe I/O after a manager restart
 
 ### Pipe Migration Notes
@@ -122,14 +123,17 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 - Pipe output subscriptions are raw stream chunks, not line-framed records. Downstream consumers that assume one callback per line need to reassemble lines or messages themselves.
 - In this repo, `reattach` means manager/runtime-level resumed communication with an adopted shell session.
 - Raw `pipe` currently has no supported adoption path for resuming live I/O in a successor manager process.
-- `pipe.mode: native_terminal_pipe_testing` can now be native-only: if the shellspec omits `command`, FWS resolves the native terminal broker automatically and fails with an explicit broker-unavailable error if no native broker binary is present.
+- `pipe.mode: native_terminal_pipe_testing` is now native-first with a built-in Python PTY fallback.
+- `pipe.mode: python_terminal_pipe_testing` explicitly forces the Python PTY broker even if the native broker binary is available.
+- `pipe.terminal_fallback` controls what happens if the native broker binary is unavailable:
+  - `python_pty` (default): launch `python -m framework_shells.terminal_stream_broker`
+  - `command`: use the shellspec `command` as the fallback broker path
+  - `error` / `native_only`: fail instead of falling back
 
 **Dtach** (`spawn_shell_dtach`):
-- Wraps shell in dtach for persistence
-- Keeps a dtach-backed external session
-- Can attach/detach from CLI
-- Uses the same `pty_mode` setting when the local attach proxy is created/re-attached
-- Socket-based communication
+- Deprecated compatibility alias for `pty` on new launches
+- Legacy dtach-backed records may still exist and can still be recognized
+- CLI attach remains legacy-only for those existing dtach sessions
 
 ### Runtime Isolation
 
@@ -163,7 +167,7 @@ mgr = await get_manager()
 # Spawn shells
 record = await mgr.spawn_shell_pty(["bash", "-l", "-i"], label="terminal", cwd="/home/user", pty_mode="interactive")
 record = await mgr.spawn_shell_pipe(["pyright-langserver", "--stdio"], label="lsp:python")
-record = await mgr.spawn_shell_dtach(["bash", "-l", "-i"], label="persistent-shell", pty_mode="interactive")
+record = await mgr.spawn_shell_dtach(["bash", "-l", "-i"], label="legacy-alias", pty_mode="interactive")  # launches as pty
 
 # List and find
 shells = await mgr.list_shells()
@@ -211,8 +215,8 @@ stats = await mgr.aggregate_resource_stats()
 ### SIGWINCH on resize (optional)
 
 Some interactive programs (readline, shells, TUIs) cache terminal width and rely
-on `SIGWINCH` to refresh after a PTY resize. In dtach mode, the dtach attach
-proxy can be the "front" process that needs the signal.
+on `SIGWINCH` to refresh after a PTY resize. Legacy dtach sessions may still
+need the attach proxy to receive the signal.
 
 You can enable best-effort `SIGWINCH` delivery after `resize_pty()` by either:
 
@@ -226,7 +230,7 @@ PTY-backed shells support two terminal modes:
 - `raw`: legacy default; disables canonical input, echo, and signal-generating terminal keys
 - `interactive`: leaves the PTY in a normal cooked terminal mode
 
-You can select the default mode for new PTY/dtach shells by either:
+You can select the default mode for new PTY shells by either:
 
 - Passing `default_pty_mode="interactive"` when creating the singleton manager, or
 - Setting `FRAMEWORK_SHELLS_PTY_MODE=interactive` in the environment.
@@ -249,7 +253,7 @@ GET    /api/framework_shells/logs/{id}/inspect          # Event-first log inspec
 GET    /api/framework_shells/{id}/replay     # Get stdout log
 ```
 
-Shell payloads returned by the REST API include a canonical `backend` field plus compatibility booleans (`uses_pty`, `uses_pipes`, `uses_dtach`). Payloads also include a `capabilities` block describing live input/output support for that shell in the current manager process. `pty_mode` (`raw` or `interactive`) remains relevant only for `pty` / `dtach` shells, and `POST /api/framework_shells` accepts optional `pty_mode` for those backends.
+Shell payloads returned by the REST API include a canonical `backend` field plus compatibility booleans (`uses_pty`, `uses_pipes`, `uses_dtach`). Payloads also include a `capabilities` block describing live input/output support for that shell in the current manager process. `pty_mode` (`raw` or `interactive`) remains relevant for PTY-backed terminals; legacy dtach records may still report it as well.
 
 The inspection surface is intentionally narrow in v1:
 
@@ -322,7 +326,7 @@ shells:
       LOG_LEVEL: info
 ```
 
-Dtach-backed interactive terminal (requires `dtach` installed):
+Deprecated dtach alias (new launches route to `pty`):
 
 ```yaml
 version: "1"
@@ -344,6 +348,7 @@ shells:
     backend: pipe
     pipe:
       mode: native_terminal_pipe_testing
+      terminal_fallback: python_pty
     cwd: ${ctx:PROJECT_ROOT}
     env:
       TERMINAL_STREAM_CWD: ${ctx:PROJECT_ROOT}
@@ -355,11 +360,35 @@ shells:
 Notes:
 
 - This mode runs a native PTY broker under an outer `pipe` shell.
+- If the native broker binary is unavailable, FWS falls back to the Python PTY broker by default.
 - The terminal stream contract stays asymmetric:
   - stdin uses JSON-RPC notifications
   - stdout uses framed JSONL records
-- If no `command` is provided, FWS treats the spec as native-only and resolves the broker automatically.
-- If you do provide `command`, it is treated as the fallback broker path when the native broker is unavailable.
+- If no `command` is provided, FWS injects an internal placeholder and resolves either the native broker or the configured fallback automatically.
+- Set `pipe.terminal_fallback: command` if you want the shellspec `command` to be the fallback broker path.
+- Set `pipe.terminal_fallback: error` (or `native_only`) if you want launch to fail when the native broker is unavailable.
+
+Explicit Python PTY terminal stream over `pipe`:
+
+```yaml
+version: "1"
+shells:
+  terminal-stream:
+    backend: pipe
+    pipe:
+      mode: python_terminal_pipe_testing
+    cwd: ${ctx:PROJECT_ROOT}
+    env:
+      TERMINAL_STREAM_CWD: ${ctx:PROJECT_ROOT}
+      TERMINAL_STREAM_COLS: ${ctx:COLS}
+      TERMINAL_STREAM_ROWS: ${ctx:ROWS}
+      TERMINAL_STREAM_SHELL_CMD_JSON: ${ctx:SHELL_CMD_JSON}
+```
+
+Notes:
+
+- This mode always launches `python -m framework_shells.terminal_stream_broker`.
+- It uses the same stdin/stdout terminal-stream contract as the native broker.
 
 ### UI Hints (`shellspec.ui`)
 
@@ -473,7 +502,7 @@ fws run --backend pty --pty-mode interactive --label demo --env FOO=bar --env PO
 fws down
 fws down --tree
 
-# Attach to dtach shell
+# Attach to legacy dtach shell
 fws attach <shell_id>
 
 # Show process trees (managed shells + procfs descendants)
@@ -492,7 +521,7 @@ The CLI auto-detects the repo fingerprint from cwd and loads the stored secret.
 | `FRAMEWORK_SHELLS_SECRET` | Secret for runtime ID derivation and API auth |
 | `FRAMEWORK_SHELLS_REPO_FINGERPRINT` | Override auto-computed repo fingerprint |
 | `FRAMEWORK_SHELLS_BASE_DIR` | Override storage base dir (default `~/.cache/framework_shells`) |
-| `FRAMEWORK_SHELLS_PTY_MODE` | Default PTY discipline for new PTY/dtach shells (`raw` or `interactive`) |
+| `FRAMEWORK_SHELLS_PTY_MODE` | Default PTY discipline for new PTY shells (`raw` or `interactive`) |
 
 ## Secret & Fingerprint Surface
 
@@ -501,7 +530,7 @@ The CLI auto-detects the repo fingerprint from cwd and loads the stored secret.
 - `FRAMEWORK_SHELLS_REPO_FINGERPRINT`: repo-scoped namespace (defaults to a SHA256 of `cwd` if unset)
 - `FRAMEWORK_SHELLS_SECRET`: secret used to derive the `runtime_id` (and API tokens when auth is enabled)
 - `FRAMEWORK_SHELLS_BASE_DIR`: optional override for the on-disk storage root (defaults to `~/.cache/framework_shells`)
-- `FRAMEWORK_SHELLS_PTY_MODE`: optional default PTY mode for newly created PTY/dtach shells
+- `FRAMEWORK_SHELLS_PTY_MODE`: optional default PTY mode for newly created PTY shells
 
 ### Standalone / CLI
 

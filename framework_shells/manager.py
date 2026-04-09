@@ -54,6 +54,8 @@ from .native_pipe import (
     NATIVE_TERMINAL_BROKER_BIN,
     NATIVE_TERMINAL_PIPE_ENGINE,
     NATIVE_TERMINAL_PIPE_TESTING_MODE,
+    PYTHON_TERMINAL_PIPE_ENGINE,
+    PYTHON_TERMINAL_PIPE_TESTING_MODE,
     NativePipePumpHandle,
     create_native_pipe_pump,
     is_native_terminal_placeholder_command,
@@ -61,6 +63,8 @@ from .native_pipe import (
     native_extension_available,
     normalize_pipe_config,
     resolve_native_terminal_broker_command,
+    resolve_python_terminal_broker_command,
+    resolve_terminal_broker_fallback_command,
 )
 from .shutdown import ShutdownPolicy, shutdown_snapshot
 
@@ -1231,18 +1235,35 @@ class FrameworkShellManager:
         native_terminal_mode_requested = (
             resolved_pipe_config.mode == NATIVE_TERMINAL_PIPE_TESTING_MODE
         )
+        python_terminal_mode_requested = (
+            resolved_pipe_config.mode == PYTHON_TERMINAL_PIPE_TESTING_MODE
+        )
         native_terminal_resolution = resolve_native_terminal_broker_command(launch_command)
         native_terminal_mode_active = False
-        if native_terminal_mode_requested and native_terminal_resolution.engine:
-            launch_command = list(native_terminal_resolution.command)
-            native_terminal_mode_active = True
-        elif native_terminal_mode_requested and is_native_terminal_placeholder_command(launch_command):
-            raise RuntimeError(
-                f"native terminal broker unavailable for pipe.mode={NATIVE_TERMINAL_PIPE_TESTING_MODE}; "
-                "set FRAMEWORK_SHELLS_NATIVE_TERMINAL_BROKER, "
-                f"put {NATIVE_TERMINAL_BROKER_BIN} on PATH, or provide a fallback command"
-            )
-        
+        terminal_python_mode_active = False
+        terminal_fallback_command: list[str] | None = None
+        if python_terminal_mode_requested:
+            launch_command = resolve_python_terminal_broker_command()
+            terminal_python_mode_active = True
+        elif native_terminal_mode_requested:
+            if native_terminal_resolution.engine:
+                launch_command = list(native_terminal_resolution.command)
+                native_terminal_mode_active = True
+            else:
+                terminal_fallback_command = resolve_terminal_broker_fallback_command(
+                    resolved_pipe_config.terminal_fallback,
+                    launch_command,
+                )
+                if terminal_fallback_command is not None:
+                    launch_command = list(terminal_fallback_command)
+                else:
+                    raise RuntimeError(
+                        f"native terminal broker unavailable for pipe.mode={NATIVE_TERMINAL_PIPE_TESTING_MODE} "
+                        f"with pipe.terminal_fallback={resolved_pipe_config.terminal_fallback!r}; "
+                        "set FRAMEWORK_SHELLS_NATIVE_TERMINAL_BROKER, "
+                        f"put {NATIVE_TERMINAL_BROKER_BIN} on PATH, or choose a usable fallback"
+                    )
+
         stdout_path = Path(record.stdout_log)
         stderr_path = Path(record.stderr_log)
         
@@ -1275,7 +1296,7 @@ class FrameworkShellManager:
                 label=record.label,
                 shell_id=record.id,
             )
-            if native_terminal_mode_requested:
+            if native_terminal_mode_requested or python_terminal_mode_requested:
                 if native_terminal_mode_active:
                     state.native_engine = NATIVE_TERMINAL_PIPE_ENGINE
                     state.native_phase = "prototype"
@@ -1286,12 +1307,31 @@ class FrameworkShellManager:
                             f"source={native_terminal_resolution.source or 'unknown'}"
                         ),
                     )
+                elif terminal_python_mode_active:
+                    state.native_engine = PYTHON_TERMINAL_PIPE_ENGINE
+                    state.native_phase = "fallback"
+                    _shell_debug(
+                        "native_terminal_pipe",
+                        (
+                            f"shell={record.id} activated {PYTHON_TERMINAL_PIPE_TESTING_MODE} "
+                            "source=python-module"
+                        ),
+                    )
                 else:
+                    fallback_desc = resolved_pipe_config.terminal_fallback
+                    if terminal_fallback_command is not None and terminal_fallback_command == launch_command:
+                        if is_native_terminal_placeholder_command(record.command):
+                            fallback_desc = "python_pty"
+                        elif resolved_pipe_config.terminal_fallback == "command":
+                            fallback_desc = "command"
+                    if terminal_fallback_command == resolve_python_terminal_broker_command():
+                        state.native_engine = PYTHON_TERMINAL_PIPE_ENGINE
+                        state.native_phase = "fallback"
                     _shell_debug(
                         "native_terminal_pipe",
                         (
                             f"shell={record.id} requested {NATIVE_TERMINAL_PIPE_TESTING_MODE} "
-                            "but using shellspec command fallback"
+                            f"but using terminal fallback {fallback_desc}"
                         ),
                     )
             native_mode_requested = resolved_pipe_config.mode == NATIVE_PIPE_TESTING_MODE
@@ -1439,20 +1479,19 @@ class FrameworkShellManager:
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
     ) -> ShellRecord:
-        record = self._create_record(
-            command, cwd=cwd, env=env, label=label,
-            spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
-            backend=BACKEND_DTACH,
+        # Deprecated compatibility alias: new dtach requests launch as PTY.
+        return await self.spawn_shell_pty(
+            command=command,
+            cwd=cwd,
+            env=env,
+            label=label,
+            spec_id=spec_id,
+            subgroups=subgroups,
+            ui=ui,
             pty_mode=pty_mode,
-            parent_shell_id=parent_shell_id
+            autostart=autostart,
+            parent_shell_id=parent_shell_id,
         )
-        if autostart:
-             # Logic to check if dtach is available is inside _launch_dtach
-             await self._launch_dtach(record)
-        else:
-             await self._save_record(record)
-             await self._emit(EventType.SHELL_CREATED, record)
-        return record
 
     async def list_shells(self) -> List[ShellRecord]:
         async with self._get_lock():
@@ -1602,7 +1641,7 @@ class FrameworkShellManager:
             "engine": str(state.native_engine),
             "active": bool(
                 state.native_pump is not None
-                or state.native_engine == NATIVE_TERMINAL_PIPE_ENGINE
+                or state.native_engine in {NATIVE_TERMINAL_PIPE_ENGINE, PYTHON_TERMINAL_PIPE_ENGINE}
             ),
         }
         phase = state.native_phase or native_extension_phase()

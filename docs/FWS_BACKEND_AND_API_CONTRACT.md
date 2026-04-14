@@ -274,6 +274,11 @@ Migration notes:
 - `pipe.mode: python_terminal_pipe_testing` is the explicit escape hatch for always using the Python PTY broker.
   - It may also omit a shellspec `command`; the shellspec parser injects the same internal placeholder command.
   - The manager always replaces that placeholder with `python -m framework_shells.terminal_stream_broker`, regardless of whether a native broker binary is installed.
+- Git source installs now attempt to bundle the native terminal broker during wheel build by default.
+  - `FRAMEWORK_SHELLS_INSTALL_MODE=auto` is the default behavior: try to build the broker, then fall back to a pure-Python wheel if the build is unavailable.
+  - `FRAMEWORK_SHELLS_INSTALL_MODE=build` requires that broker build to succeed.
+  - `FRAMEWORK_SHELLS_INSTALL_MODE=python-only` disables native broker build and forces a pure-Python wheel.
+  - The broker-first release scripts set this mode explicitly so pure-wheel and native-wheel builds stay deterministic.
 
 ### `dtach`
 

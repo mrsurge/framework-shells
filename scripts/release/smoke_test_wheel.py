@@ -119,24 +119,39 @@ async def main() -> None:
         store = RuntimeStore(tmp_path / "runtime")
         mgr = FrameworkShellManager(store=store)
         orch = Orchestrator(mgr)
-        try:
-            await orch.start_from_ref(
-                "terminal.yaml#terminal",
-                base_dir=tmp_path,
-                ctx={
-                    "CWD": str(tmp_path),
-                    "COLS": "80",
-                    "ROWS": "24",
-                    "SHELL_CMD_JSON": json.dumps(["sh", "-lc", "printf hello; exit 0"]),
-                },
-                label="wheel-smoke-terminal",
-                wait_ready=False,
-            )
-        except RuntimeError as exc:
-            message = str(exc)
-            assert "native terminal broker unavailable" in message, message
-        else:
-            raise AssertionError("native-only terminal shell unexpectedly launched without a bundled broker")
+        record = await orch.start_from_ref(
+            "terminal.yaml#terminal",
+            base_dir=tmp_path,
+            ctx={
+                "CWD": str(tmp_path),
+                "COLS": "80",
+                "ROWS": "24",
+                "SHELL_CMD_JSON": json.dumps(["sh", "-lc", "printf hello; exit 0"]),
+            },
+            label="wheel-smoke-terminal",
+            wait_ready=False,
+        )
+        described = await mgr.describe(record)
+        runtime = described.get("pipe_runtime") or {}
+        assert runtime.get("engine") == "python-terminal-pipe", runtime
+        queue = await mgr.subscribe_output_bytes(record.id)
+        await mgr.write_to_pipe(
+            record.id,
+            json.dumps({"jsonrpc": "2.0", "method": "terminal.connect", "params": {}}) + "\n",
+        )
+        parts: list[str] = []
+        for _ in range(12):
+            chunk = await asyncio.wait_for(queue.get(), timeout=5)
+            if chunk is None:
+                break
+            text = chunk.decode("utf-8", errors="replace")
+            parts.append(text)
+            if '"type":"closed"' in text.replace(" ", ""):
+                break
+        blob = "".join(parts)
+        assert '"type":"ready"' in blob, blob
+        assert '"type":"data"' in blob, blob
+        assert '"type":"closed"' in blob, blob
 
 asyncio.run(main())
 """

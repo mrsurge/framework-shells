@@ -46,6 +46,7 @@ def build_wheel(
 
         resolved_target = target or rust_host_target()
         packaged_broker = native_broker or broker_path is not None
+        build_env: dict[str, str] = {}
         if packaged_broker:
             resolved_broker_path = broker_path
             if resolved_broker_path is None:
@@ -54,6 +55,9 @@ def build_wheel(
                     profile=profile,
                 )
             stage_broker_binary(stage_root, resolved_broker_path)
+            build_env["FRAMEWORK_SHELLS_INSTALL_MODE"] = "build"
+        else:
+            build_env["FRAMEWORK_SHELLS_INSTALL_MODE"] = "python-only"
 
         wheel_args = [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(dist_dir)]
         if packaged_broker:
@@ -65,7 +69,7 @@ def build_wheel(
                 )
             wheel_args.extend(["--plat-name", normalize_plat_name(resolved_plat_name)])
 
-        run(wheel_args, cwd=stage_root)
+        run(wheel_args, cwd=stage_root, env=build_env)
         after = snapshot_paths(dist_dir, "*.whl")
         return newest_added_path(before, after)
     finally:

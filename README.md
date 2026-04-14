@@ -9,6 +9,23 @@ PTY-backed shells support `pty_mode="raw"` (legacy default) and `pty_mode="inter
 pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
 ```
 
+Git source installs now default to `auto` native packaging:
+
+- if `cargo` is available, the install build attempts to compile and bundle the native terminal broker
+- if that build fails, install falls back to the pure-Python package by default
+
+You can override that behavior with `FRAMEWORK_SHELLS_INSTALL_MODE`:
+
+```bash
+# Force native broker build; fail install if it cannot be built
+FRAMEWORK_SHELLS_INSTALL_MODE=build \
+  pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
+
+# Force a pure-Python install with no native broker build attempt
+FRAMEWORK_SHELLS_INSTALL_MODE=python-only \
+  pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
+```
+
 ## Dependencies
 
 - Python 3.9+

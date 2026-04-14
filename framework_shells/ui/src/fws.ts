@@ -4,8 +4,12 @@ import {
   frameJsonRpcLine,
   type ClientRequestMap,
   type ClientRequestMethod,
+  type DashboardProcessPayload,
+  type DashboardShellPayload,
+  type DashboardStatePayload,
   type IncomingJsonRpcMessage,
   type LogStreamName,
+  type RequestResultMap,
   type ServerNotification,
   parseIncomingJsonRpcMessage,
   stringifyClientRequest,
@@ -15,6 +19,7 @@ const LOG_STREAMS: LogStreamName[] = ['stdout', 'stderr'];
 const EXITED_EXPANDED_KEY = 'fws.exited.expanded';
 const GROUP_EXPANDED_KEY = 'fws.group.expanded';
 const EXITED_PAGE_SIZE = 50;
+const CSS_COLOR_RE = /^[#()0-9a-zA-Z.,%\s-]+$/;
 
 type FilterMode = 'regex' | 'exact';
 
@@ -33,12 +38,6 @@ interface LogState {
   streams: Record<LogStreamName, StreamState>;
 }
 
-interface ExitedCache {
-  html: string;
-  token: string;
-  loading: Promise<void> | null;
-}
-
 interface DrawerOptions {
   fromPopState?: boolean;
 }
@@ -50,12 +49,20 @@ interface FilterConfig {
   excludeMode: FilterMode;
 }
 
-interface PendingRpcRequest<Result> {
-  resolve: (value: Result) => void;
+interface PendingRpcRequest {
+  resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
 }
 
+interface SubgroupStyle {
+  bg?: string;
+  border?: string;
+  color?: string;
+}
+
 type Matcher = (line: string) => boolean;
+type SubgroupStyleMap = Record<string, SubgroupStyle>;
+type DashboardStateResult = RequestResultMap['fws.dashboard.open'] | RequestResultMap['fws.dashboard.refresh'];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -110,6 +117,535 @@ function getWebSocketUrl(path: string): string {
   return `${scheme}://${window.location.host}${path}`;
 }
 
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .split('&').join('&amp;')
+    .split('<').join('&lt;')
+    .split('>').join('&gt;')
+    .split('"').join('&quot;')
+    .split("'").join('&#39;');
+}
+
+function fmtBytes(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return '0';
+  }
+  const mib = value / (1024 * 1024);
+  if (mib >= 1024) {
+    return `${(mib / 1024).toFixed(1)} GiB`;
+  }
+  return `${Math.round(mib)} MiB`;
+}
+
+function fmtCpu(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return '-';
+  }
+  return `${value.toFixed(1)}%`;
+}
+
+function shellBackend(info: DashboardShellPayload): string {
+  let backend = '';
+  if (typeof info.backend === 'string' && info.backend) {
+    backend = info.backend;
+  } else if (info.uses_dtach) {
+    backend = 'dtach';
+  } else if (info.uses_pipes) {
+    backend = 'pipe';
+  } else if (info.uses_pty) {
+    backend = 'pty';
+  } else {
+    backend = 'proc';
+  }
+
+  const engine = info.pipe_runtime?.engine;
+  if (backend === 'pipe' && engine === 'native-pipe') {
+    return 'pipe:native-pipe';
+  }
+  if (backend === 'pipe' && engine === 'native-terminal-pipe') {
+    return 'pipe:native-terminal-pipe';
+  }
+  if (backend === 'pipe' && engine === 'python-terminal-pipe') {
+    return 'pipe:python-terminal-pipe';
+  }
+  return backend;
+}
+
+function isShellLive(info: DashboardShellPayload): boolean {
+  if (info.status !== 'running') {
+    return false;
+  }
+  if (typeof info.pid !== 'number' || info.pid <= 0) {
+    return false;
+  }
+  if (info.stats?.alive === false) {
+    return false;
+  }
+  return true;
+}
+
+function safeCssValue(value: unknown): string {
+  const text = String(value ?? '').trim();
+  if (!text || !CSS_COLOR_RE.test(text)) {
+    return '';
+  }
+  return text;
+}
+
+function globMatches(pattern: string, value: string): boolean {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const normalized = escaped.split('*').join('.*').split('?').join('.');
+  try {
+    return new RegExp(`^${normalized}$`).test(value);
+  } catch {
+    return false;
+  }
+}
+
+function collectSubgroupStyles(shells: DashboardShellPayload[]): SubgroupStyleMap {
+  const merged: SubgroupStyleMap = {};
+  for (const shell of shells) {
+    if (!isRecord(shell.ui)) {
+      continue;
+    }
+    const raw = shell.ui.subgroup_styles ?? shell.ui.subgroupStyles;
+    if (!isRecord(raw)) {
+      continue;
+    }
+    for (const [key, styleValue] of Object.entries(raw)) {
+      if (!isRecord(styleValue)) {
+        continue;
+      }
+      const normalized: SubgroupStyle = {};
+      const bg = safeCssValue(styleValue.bg ?? styleValue.background);
+      const border = safeCssValue(styleValue.border ?? styleValue.border_color ?? styleValue.borderColor);
+      const color = safeCssValue(styleValue.color ?? styleValue.fg ?? styleValue.foreground);
+      if (bg) {
+        normalized.bg = bg;
+      }
+      if (border) {
+        normalized.border = border;
+      }
+      if (color) {
+        normalized.color = color;
+      }
+      if (Object.keys(normalized).length > 0) {
+        merged[key] = normalized;
+      }
+    }
+  }
+  return merged;
+}
+
+function subgroupStyleFor(name: string, styles: SubgroupStyleMap): SubgroupStyle {
+  if (!name) {
+    return {};
+  }
+  if (styles[name]) {
+    return styles[name];
+  }
+  let bestKey: string | null = null;
+  for (const pattern of Object.keys(styles)) {
+    if (pattern === name) {
+      bestKey = pattern;
+      break;
+    }
+    if ((pattern.includes('*') || pattern.includes('?')) && globMatches(pattern, name)) {
+      if (bestKey === null || pattern.length > bestKey.length) {
+        bestKey = pattern;
+      }
+    }
+  }
+  return bestKey ? (styles[bestKey] ?? {}) : {};
+}
+
+function cardStyleForSubgroups(subgroups: string[], styles: SubgroupStyleMap): SubgroupStyle {
+  if (subgroups.length === 0) {
+    return {};
+  }
+  const preferred = subgroups.slice(1).concat(subgroups.slice(0, 1));
+  for (const subgroup of preferred) {
+    const style = subgroupStyleFor(subgroup, styles);
+    if (Object.keys(style).length > 0) {
+      return style;
+    }
+  }
+  return {};
+}
+
+function renderSubgroupPills(subgroups: string[], styles: SubgroupStyleMap): string {
+  const pills: string[] = [];
+  for (const subgroup of subgroups) {
+    const name = subgroup.trim();
+    if (!name) {
+      continue;
+    }
+    const style = subgroupStyleFor(name, styles);
+    const cssBits: string[] = [];
+    if (style.bg) {
+      cssBits.push(`background: ${style.bg};`);
+    }
+    if (style.border) {
+      cssBits.push(`border-color: ${style.border};`);
+    }
+    if (style.color) {
+      cssBits.push(`color: ${style.color};`);
+    }
+    const styleAttr = cssBits.length > 0 ? ` style="${cssBits.join(' ')}"` : '';
+    pills.push(`<span class="pill"${styleAttr}>${escapeHtml(name)}</span>`);
+  }
+  if (pills.length === 0) {
+    return '';
+  }
+  return `<div class="row">${pills.join('')}</div>`;
+}
+
+function renderCopyField(label: string, value: unknown, extraClasses = ''): string {
+  const raw = String(value ?? '');
+  const classes = extraClasses ? `copy-field ${extraClasses}` : 'copy-field';
+  return (
+    `<div class="${classes}" data-copy="${escapeHtml(raw)}" role="button" tabindex="0">` +
+    `<div class="copy-field-label">${escapeHtml(label)}</div>` +
+    `<div class="copy-field-value">${escapeHtml(raw)}</div>` +
+    '<button class="copy-overlay" type="button" aria-label="Copy field value">Copy</button>' +
+    '</div>'
+  );
+}
+
+function exitedTimestamp(shell: DashboardShellPayload): number {
+  if (typeof shell.updated_at === 'number') {
+    return shell.updated_at;
+  }
+  if (typeof shell.created_at === 'number') {
+    return shell.created_at;
+  }
+  return 0;
+}
+
+function fmtExitedTimestamp(timestamp: number): string {
+  if (!(timestamp > 0)) {
+    return 'Unknown time';
+  }
+  const dt = new Date(timestamp * 1000);
+  const now = new Date();
+  const sameDay =
+    dt.getFullYear() === now.getFullYear() &&
+    dt.getMonth() === now.getMonth() &&
+    dt.getDate() === now.getDate();
+  if (sameDay) {
+    return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+  return dt.toLocaleString([], {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function hasLogPaths(shell: DashboardShellPayload): boolean {
+  return Boolean((shell.stdout_log ?? '').trim() || (shell.stderr_log ?? '').trim());
+}
+
+function renderExitedContent(exited: DashboardShellPayload[], subgroupStyles: SubgroupStyleMap): string {
+  if (exited.length === 0) {
+    return '<div class="shell-card"><div class="shell-meta">No exited shells.</div></div>';
+  }
+
+  const parts: string[] = [];
+  const sortedExited = exited.slice().sort((left, right) => exitedTimestamp(right) - exitedTimestamp(left));
+  for (const shell of sortedExited) {
+    const shellId = shell.id ?? '';
+    const label = shell.label ?? shellId;
+    const status = shell.status ?? 'exited';
+    const exitCode = shell.exit_code;
+    const timestamp = exitedTimestamp(shell);
+    const timeLabel = fmtExitedTimestamp(timestamp);
+    const subgroups = shell.subgroups ?? [];
+    const style = cardStyleForSubgroups(subgroups, subgroupStyles);
+    const styleBits: string[] = [];
+    if (style.bg) {
+      styleBits.push(`background: ${style.bg};`);
+    }
+    if (style.border) {
+      styleBits.push(`border-color: ${style.border}; border-left: 4px solid ${style.border};`);
+    }
+    const styleAttr = styleBits.length > 0 ? ` style="${styleBits.join(' ')}"` : '';
+    const statusMeta = exitCode === null || exitCode === undefined ? status : `${status} · exit: ${exitCode}`;
+    const commandText = (shell.command ?? []).join(' ');
+
+    parts.push(`<div class="exited-item" data-exited-item="1" data-exited-ts="${escapeHtml(timestamp)}">`);
+    parts.push(`<div class="exited-ts">${escapeHtml(timeLabel)}</div>`);
+    parts.push(`<div class="shell-card shell-entry is-collapsed"${styleAttr} data-shell-id="${escapeHtml(shellId)}">`);
+    parts.push('<div class="shell-header">');
+    parts.push(`<div class="shell-title">${escapeHtml(label)}</div>`);
+    parts.push('<div class="shell-actions">');
+    parts.push(`<button class="btn btn-small" type="button" data-collapse-toggle="${escapeHtml(shellId)}" aria-expanded="false">Expand</button>`);
+    if (hasLogPaths(shell)) {
+      parts.push(
+        `<button class="btn btn-small" type="button" data-log-open="${escapeHtml(shellId)}" data-log-label="${escapeHtml(label)}">Logs</button>`,
+      );
+    } else {
+      parts.push('<button class="btn btn-small" type="button" disabled>Logs Purged</button>');
+    }
+    parts.push(
+      `<form method="post" action="/fws/action/shell/${encodeURIComponent(shellId)}/purge" data-fws-ajax="1"><button class="btn btn-small" type="submit">Purge</button></form>`,
+    );
+    parts.push('</div>');
+    parts.push('</div>');
+    parts.push(`<div class="shell-details" data-collapse-content="${escapeHtml(shellId)}">`);
+    parts.push(renderCopyField('Status', statusMeta));
+    parts.push(renderCopyField('ID', shellId));
+    parts.push(renderCopyField('Command', commandText, 'copy-field--multiline'));
+    parts.push(renderCopyField('stdout log', shell.stdout_log ?? '', 'copy-field--path'));
+    parts.push(renderCopyField('stderr log', shell.stderr_log ?? '', 'copy-field--path'));
+    const pills = renderSubgroupPills(subgroups, subgroupStyles);
+    if (pills) {
+      parts.push(pills);
+    }
+    parts.push('</div>');
+    parts.push('</div>');
+    parts.push('</div>');
+  }
+  if (exited.length > EXITED_PAGE_SIZE) {
+    parts.push('<div class="row exited-more-row">');
+    parts.push('<button class="btn btn-small" type="button" id="fws-exited-more">More</button>');
+    parts.push('</div>');
+  }
+  return parts.join('\n');
+}
+
+function renderDashboardContent(state: DashboardStatePayload): string {
+  const shellPidSet = new Set<number>();
+  for (const shell of state.shells) {
+    if (typeof shell.pid === 'number') {
+      shellPidSet.add(shell.pid);
+    }
+  }
+
+  const childrenByParent = new Map<number, DashboardProcessPayload[]>();
+  for (const process of state.processes) {
+    if (typeof process.parent_pid !== 'number') {
+      continue;
+    }
+    const siblings = childrenByParent.get(process.parent_pid) ?? [];
+    siblings.push(process);
+    childrenByParent.set(process.parent_pid, siblings);
+  }
+
+  const running = state.shells.filter((shell) => isShellLive(shell));
+  const exited = state.shells.filter((shell) => !isShellLive(shell));
+  const subgroupStyles = collectSubgroupStyles(state.shells);
+  const parts: string[] = [];
+
+  parts.push('<div class="section">');
+  parts.push(`<div class="section-title">Running <span class="muted">(${running.length})</span></div>`);
+
+  if (running.length === 0) {
+    parts.push('<div class="shell-card"><div class="shell-meta">No running shells.</div></div>');
+  } else {
+    const groups = new Map<string, Map<string, DashboardShellPayload[]>>();
+    for (const shell of running) {
+      const normalized = (shell.subgroups ?? []).map((value) => value.trim()).filter((value) => value.length > 0);
+      const umbrella = normalized[0] ?? '(ungrouped)';
+      const subgroup = normalized[1] ?? '(root)';
+      const subgroupMap = groups.get(umbrella) ?? new Map<string, DashboardShellPayload[]>();
+      const shells = subgroupMap.get(subgroup) ?? [];
+      shells.push(shell);
+      subgroupMap.set(subgroup, shells);
+      groups.set(umbrella, subgroupMap);
+    }
+
+    const umbrellas = Array.from(groups.keys()).sort((left, right) => {
+      if (left === '(ungrouped)') {
+        return 1;
+      }
+      if (right === '(ungrouped)') {
+        return -1;
+      }
+      return left.localeCompare(right);
+    });
+
+    for (const umbrella of umbrellas) {
+      const subgroupMap = groups.get(umbrella) ?? new Map<string, DashboardShellPayload[]>();
+      const totalShells = Array.from(subgroupMap.values()).reduce((sum, shells) => sum + shells.length, 0);
+
+      parts.push(`<div class="group-card is-collapsed" data-group-id="${escapeHtml(umbrella)}">`);
+      parts.push('<div class="group-header">');
+      parts.push(`<div class="group-title">${escapeHtml(umbrella)}</div>`);
+      parts.push('<div class="shell-actions">');
+      parts.push(
+        `<button class="btn btn-small" type="button" data-group-toggle="${escapeHtml(umbrella)}" aria-expanded="false">Expand</button>`,
+      );
+      if (umbrella !== '(ungrouped)') {
+        parts.push(
+          `<form method="post" action="/fws/action/app/${encodeURIComponent(umbrella)}/shutdown" data-fws-ajax="1"><button class="btn btn-small btn-danger" type="submit">Shutdown Group</button></form>`,
+        );
+      }
+      parts.push('</div>');
+      parts.push('</div>');
+      parts.push(`<div class="group-meta">Shells: ${escapeHtml(totalShells)} · Subgroups: ${escapeHtml(subgroupMap.size)}</div>`);
+      parts.push(`<div class="group-content" data-group-content="${escapeHtml(umbrella)}">`);
+
+      const subgroups = Array.from(subgroupMap.keys()).sort((left, right) => {
+        if (left === 'app-worker') {
+          return -1;
+        }
+        if (right === 'app-worker') {
+          return 1;
+        }
+        return left.localeCompare(right);
+      });
+
+      for (const subgroup of subgroups) {
+        const style = subgroupStyleFor(subgroup, subgroupStyles);
+        const styleBits: string[] = [];
+        if (style.bg) {
+          styleBits.push(`background: ${style.bg};`);
+        }
+        if (style.border) {
+          styleBits.push(`border-color: ${style.border}; border-left: 4px solid ${style.border};`);
+        }
+        const styleAttr = styleBits.length > 0 ? ` style="${styleBits.join(' ')}"` : '';
+        const shellsInGroup = (subgroupMap.get(subgroup) ?? []).slice().sort((left, right) => {
+          const leftLabel = left.label ?? '';
+          const rightLabel = right.label ?? '';
+          const leftRank = leftLabel.startsWith('app-worker:') ? 0 : 1;
+          const rightRank = rightLabel.startsWith('app-worker:') ? 0 : 1;
+          if (leftRank !== rightRank) {
+            return leftRank - rightRank;
+          }
+          const labelCompare = leftLabel.localeCompare(rightLabel);
+          if (labelCompare !== 0) {
+            return labelCompare;
+          }
+          return (left.id ?? '').localeCompare(right.id ?? '');
+        });
+
+        parts.push(`<div class="subgroup-card"${styleAttr}>`);
+        parts.push('<div class="subgroup-header">');
+        parts.push(`<div class="subgroup-title">${escapeHtml(subgroup)}</div>`);
+        parts.push(`<div class="subgroup-count muted">(${shellsInGroup.length})</div>`);
+        parts.push('</div>');
+
+        for (const shell of shellsInGroup) {
+          const shellId = shell.id ?? '';
+          const label = shell.label ?? shellId;
+          const pid = shell.pid;
+          const subgroupsForShell = shell.subgroups ?? [];
+          const rowStyle = cardStyleForSubgroups(subgroupsForShell, subgroupStyles);
+          const rowStyleBits: string[] = [];
+          if (rowStyle.bg) {
+            rowStyleBits.push(`background: ${rowStyle.bg};`);
+          }
+          if (rowStyle.border) {
+            rowStyleBits.push(`border-left: 3px solid ${rowStyle.border};`);
+          }
+          const rowStyleAttr = rowStyleBits.length > 0 ? ` style="${rowStyleBits.join(' ')}"` : '';
+          const commandText = (shell.command ?? []).join(' ');
+          const cpu = fmtCpu(shell.stats?.cpu_percent);
+          const rss = fmtBytes(shell.stats?.memory_rss);
+          const status = shell.status ?? 'running';
+
+          parts.push(`<div class="shell-card shell-entry is-collapsed"${rowStyleAttr} data-shell-id="${escapeHtml(shellId)}">`);
+          parts.push('<div class="shell-header">');
+          parts.push(`<div class="shell-title">${escapeHtml(label)}</div>`);
+          parts.push('<div class="shell-actions">');
+          parts.push(`<button class="btn btn-small" type="button" data-collapse-toggle="${escapeHtml(shellId)}" aria-expanded="false">Expand</button>`);
+          parts.push(
+            `<button class="btn btn-small" type="button" data-log-open="${escapeHtml(shellId)}" data-log-label="${escapeHtml(label)}">Logs</button>`,
+          );
+          parts.push(
+            `<form method="post" action="/fws/action/shell/${encodeURIComponent(shellId)}/terminate" data-fws-ajax="1"><button class="btn btn-small btn-danger" type="submit">Stop</button></form>`,
+          );
+          parts.push('</div>');
+          parts.push('</div>');
+          parts.push(`<div class="shell-details" data-collapse-content="${escapeHtml(shellId)}">`);
+          parts.push(renderCopyField('Status', status));
+          parts.push(renderCopyField('PID', pid ?? ''));
+          parts.push(renderCopyField('ID', shellId));
+          parts.push(renderCopyField('Backend', shellBackend(shell)));
+          parts.push(renderCopyField('CPU', cpu));
+          parts.push(renderCopyField('RSS', rss));
+          parts.push(renderCopyField('Command', commandText, 'copy-field--multiline'));
+          parts.push(renderCopyField('stdout log', shell.stdout_log ?? '', 'copy-field--path'));
+          parts.push(renderCopyField('stderr log', shell.stderr_log ?? '', 'copy-field--path'));
+          const pills = renderSubgroupPills(subgroupsForShell, subgroupStyles);
+          if (pills) {
+            parts.push(pills);
+          }
+
+          if (typeof pid === 'number' && childrenByParent.has(pid)) {
+            const children = (childrenByParent.get(pid) ?? []).filter((child) => {
+              return typeof child.pid !== 'number' || !shellPidSet.has(child.pid);
+            });
+            if (children.length > 0) {
+              const sortedChildren = children.slice().sort((left, right) => {
+                const typeCompare = (left.type ?? '').localeCompare(right.type ?? '');
+                if (typeCompare !== 0) {
+                  return typeCompare;
+                }
+                return (left.pid ?? 0) - (right.pid ?? 0);
+              });
+              parts.push('<div class="children">');
+              parts.push(`<div class="children-title">Child Processes (${sortedChildren.length})</div>`);
+              for (const child of sortedChildren) {
+                const childPid = child.pid ?? '';
+                const childType = child.type ?? 'proc';
+                const childLabel = child.label ?? childPid;
+                parts.push('<div class="child-row child-row--proc">');
+                parts.push('<div class="child-main">');
+                parts.push(`<div class="child-label">${escapeHtml(childLabel)}</div>`);
+                parts.push('<div class="child-meta-line">');
+                parts.push(`<div class="child-meta">PID: ${escapeHtml(childPid)} · ${escapeHtml(childType)}</div>`);
+                parts.push('<div class="row child-actions-inline">');
+                parts.push(
+                  `<form method="post" action="/fws/action/pid/${encodeURIComponent(String(childPid))}/terminate" data-fws-ajax="1"><button class="btn btn-small btn-danger" type="submit">Kill</button></form>`,
+                );
+                parts.push('</div>');
+                parts.push('</div>');
+                parts.push('</div>');
+                parts.push('</div>');
+              }
+              parts.push('</div>');
+            }
+          }
+
+          parts.push('</div>');
+          parts.push('</div>');
+        }
+
+        parts.push('</div>');
+      }
+
+      parts.push('</div>');
+      parts.push('</div>');
+    }
+  }
+
+  parts.push('</div>');
+  parts.push('<div class="section section-exited" id="fws-exited">');
+  parts.push('<div class="section-title">');
+  parts.push(`Exited <span class="muted">(${exited.length})</span>`);
+  parts.push('<div class="shell-actions">');
+  parts.push('<button class="btn btn-small" type="button" id="fws-exited-toggle" aria-expanded="false">Expand Exited</button>');
+  if (exited.length > 0) {
+    parts.push(
+      '<form method="post" action="/fws/action/exited/purge" data-fws-ajax="1" data-confirm="Purge ALL exited shells (delete their logs + metadata)?"><button class="btn btn-small btn-danger" type="submit">Purge Exited</button></form>',
+    );
+  }
+  parts.push('</div>');
+  parts.push('</div>');
+  parts.push(`<div class="exited-content is-collapsed" id="fws-exited-content" data-count="${escapeHtml(exited.length)}">`);
+  parts.push(renderExitedContent(exited, subgroupStyles));
+  parts.push('</div>');
+  parts.push('</div>');
+
+  return parts.join('\n');
+}
+
 (() => {
   const content = getElementById<HTMLElement>('fws-content');
   const statusEl = getElementById<HTMLElement>('fws-status');
@@ -122,13 +658,13 @@ function getWebSocketUrl(path: string): string {
   const logPauseInput = getElementById<HTMLInputElement>('fws-log-pause');
 
   const collapseState = new Map<string, boolean>();
-  const exitedCache: ExitedCache = { html: '', token: '', loading: null };
   let defaultCollapsed = true;
   let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
   let exitedVisibleCount = EXITED_PAGE_SIZE;
   let dashboardMessageBuffer = '';
   let dashboardRequestCounter = 0;
-  const dashboardPendingRequests = new Map<string, PendingRpcRequest<unknown>>();
+  let dashboardState: DashboardStatePayload = { shells: [], processes: [] };
+  const dashboardPendingRequests = new Map<string, PendingRpcRequest>();
 
   const logState: LogState = {
     shellId: '',
@@ -146,10 +682,7 @@ function getWebSocketUrl(path: string): string {
     return `fws_req_${dashboardRequestCounter}`;
   }
 
-  function rejectPendingRequests(
-    pending: Map<string, PendingRpcRequest<unknown>>,
-    message: string,
-  ): void {
+  function rejectPendingRequests(pending: Map<string, PendingRpcRequest>, message: string): void {
     const error = new Error(message);
     for (const [, request] of pending) {
       request.reject(error);
@@ -157,7 +690,9 @@ function getWebSocketUrl(path: string): string {
     pending.clear();
   }
 
-  function isJsonRpcErrorMessage(message: IncomingJsonRpcMessage): message is Extract<IncomingJsonRpcMessage, { error: unknown }> {
+  function isJsonRpcErrorMessage(
+    message: IncomingJsonRpcMessage,
+  ): message is Extract<IncomingJsonRpcMessage, { error: unknown }> {
     return 'error' in message;
   }
 
@@ -169,6 +704,124 @@ function getWebSocketUrl(path: string): string {
 
   function isServerNotificationMessage(message: IncomingJsonRpcMessage): message is ServerNotification {
     return 'method' in message && 'params' in message;
+  }
+
+  function hasDashboardStateResult(result: unknown): result is DashboardStateResult {
+    return (
+      isRecord(result) &&
+      isRecord(result.state) &&
+      Array.isArray(result.state.shells) &&
+      Array.isArray(result.state.processes)
+    );
+  }
+
+  function findShellLabel(shellId: string): string {
+    const match = dashboardState.shells.find((shell) => shell.id === shellId);
+    return match?.label ?? shellId;
+  }
+
+  function compareShells(left: DashboardShellPayload, right: DashboardShellPayload): number {
+    const leftCreated = typeof left.created_at === 'number' ? left.created_at : 0;
+    const rightCreated = typeof right.created_at === 'number' ? right.created_at : 0;
+    if (leftCreated !== rightCreated) {
+      return leftCreated - rightCreated;
+    }
+    return (left.id ?? '').localeCompare(right.id ?? '');
+  }
+
+  function pruneProcessesForShell(
+    processes: DashboardProcessPayload[],
+    shellId: string,
+    rootPid?: number | null,
+  ): DashboardProcessPayload[] {
+    const blockedPids = new Set<number>();
+    for (const process of processes) {
+      if (process.shell_id === shellId && typeof process.pid === 'number') {
+        blockedPids.add(process.pid);
+      }
+    }
+    if (typeof rootPid === 'number') {
+      blockedPids.add(rootPid);
+    }
+    if (blockedPids.size > 0) {
+      const queue = Array.from(blockedPids);
+      while (queue.length > 0) {
+        const parentPid = queue.shift();
+        if (parentPid === undefined) {
+          continue;
+        }
+        for (const process of processes) {
+          if (process.parent_pid !== parentPid || typeof process.pid !== 'number' || blockedPids.has(process.pid)) {
+            continue;
+          }
+          blockedPids.add(process.pid);
+          queue.push(process.pid);
+        }
+      }
+    }
+    return processes.filter((process) => {
+      if (process.shell_id === shellId) {
+        return false;
+      }
+      return typeof process.pid !== 'number' || !blockedPids.has(process.pid);
+    });
+  }
+
+  function applyShellDelta(nextShell: DashboardShellPayload): void {
+    const shellId = String(nextShell.id || '').trim();
+    if (!shellId) {
+      return;
+    }
+    const previousShell = dashboardState.shells.find((shell) => shell.id === shellId);
+    const nextShells = dashboardState.shells.filter((shell) => shell.id !== shellId);
+    nextShells.push(nextShell);
+
+    let nextProcesses = dashboardState.processes.slice();
+    const previousPid = typeof previousShell?.pid === 'number' ? previousShell.pid : undefined;
+    const nextPid = typeof nextShell.pid === 'number' ? nextShell.pid : undefined;
+    if (previousPid !== nextPid || !isShellLive(nextShell)) {
+      nextProcesses = pruneProcessesForShell(nextProcesses, shellId, previousPid ?? nextPid);
+    }
+
+    applyDashboardState({
+      shells: nextShells.sort(compareShells),
+      processes: nextProcesses,
+    });
+    setStatus('Live', true);
+  }
+
+  function removeShellDelta(shellId: string): void {
+    const normalizedShellId = String(shellId || '').trim();
+    if (!normalizedShellId) {
+      return;
+    }
+    const previousShell = dashboardState.shells.find((shell) => shell.id === normalizedShellId);
+    if (!previousShell) {
+      return;
+    }
+    const previousPid = typeof previousShell.pid === 'number' ? previousShell.pid : undefined;
+    applyDashboardState({
+      shells: dashboardState.shells.filter((shell) => shell.id !== normalizedShellId),
+      processes: pruneProcessesForShell(dashboardState.processes, normalizedShellId, previousPid),
+    });
+    setStatus('Live', true);
+  }
+
+  function applyDashboardState(nextState: DashboardStatePayload): void {
+    dashboardState = nextState;
+    if (content) {
+      content.innerHTML = renderDashboardContent(nextState);
+      applyCollapseState(content);
+      applyGroupState(content);
+      applyExitedSectionState();
+    }
+    if (logState.shellId) {
+      const label = findShellLabel(logState.shellId);
+      logState.shellLabel = label;
+      if (logTitleEl) {
+        logTitleEl.textContent = label || 'Shell Logs';
+      }
+    }
   }
 
   function routeDashboardRpcMessage(message: IncomingJsonRpcMessage): void {
@@ -190,14 +843,21 @@ function getWebSocketUrl(path: string): string {
       return;
     }
 
-    if (message.method !== 'fws.dashboard.snapshot') {
-      return;
-    }
-    if (content) {
-      content.innerHTML = message.params.html;
-      applyCollapseState(content);
-      applyGroupState(content);
-      applyExitedSectionState();
+    switch (message.method) {
+      case 'fws.shell.created':
+      case 'fws.shell.spawned':
+      case 'fws.shell.updated':
+      case 'fws.shell.exited':
+        applyShellDelta(message.params.shell);
+        return;
+      case 'fws.shell.removed':
+        removeShellDelta(message.params.shell_id);
+        return;
+      case 'fws.error':
+        setStatus(message.params.message, false);
+        return;
+      default:
+        return;
     }
   }
 
@@ -215,10 +875,13 @@ function getWebSocketUrl(path: string): string {
   async function sendDashboardRequest<M extends ClientRequestMethod>(
     method: M,
     params: ClientRequestMap[M],
-  ): Promise<unknown> {
+  ): Promise<RequestResultMap[M]> {
     const requestId = nextDashboardRequestId();
-    return await new Promise<unknown>((resolve, reject) => {
-      dashboardPendingRequests.set(requestId, { resolve, reject });
+    return await new Promise<RequestResultMap[M]>((resolve, reject) => {
+      dashboardPendingRequests.set(requestId, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+      });
       ws.send(frameJsonRpcLine(stringifyClientRequest(method, requestId, params)));
     });
   }
@@ -230,7 +893,10 @@ function getWebSocketUrl(path: string): string {
     const formData = new FormData(form);
 
     if (path === '/fws/action/refresh') {
-      await sendDashboardRequest('fws.dashboard.refresh', {});
+      const result = await sendDashboardRequest('fws.dashboard.refresh', {});
+      if (hasDashboardStateResult(result)) {
+        applyDashboardState(result.state);
+      }
       return;
     }
     if (path === '/fws/action/logs/purge') {
@@ -457,57 +1123,6 @@ function getWebSocketUrl(path: string): string {
     }
   }
 
-  async function ensureExitedLoaded(forceReload: boolean): Promise<void> {
-    if (!content) {
-      return;
-    }
-    const exitedContent = content.querySelector<HTMLElement>('#fws-exited-content');
-    if (!exitedContent) {
-      return;
-    }
-    const token = exitedContent.getAttribute('data-token') || '';
-    if (!forceReload && exitedContent.getAttribute('data-loaded') === '1') {
-      return;
-    }
-    if (!forceReload && exitedCache.html && exitedCache.token === token) {
-      exitedContent.innerHTML = exitedCache.html;
-      exitedContent.setAttribute('data-loaded', '1');
-      applyCollapseState(exitedContent);
-      applyExitedPagination();
-      return;
-    }
-    if (exitedCache.loading && !forceReload) {
-      return exitedCache.loading;
-    }
-    exitedContent.innerHTML = '<div class="loading">Loading exited shells...</div>';
-    exitedCache.loading = (async () => {
-      try {
-        const res = await fetch('/fws/exited', { credentials: 'same-origin', cache: 'no-store' });
-        const html = await res.text();
-        exitedContent.innerHTML = html;
-        exitedContent.setAttribute('data-loaded', '1');
-        exitedCache.html = html;
-        exitedCache.token = token;
-        applyCollapseState(exitedContent);
-        applyExitedPagination();
-      } catch {
-        exitedContent.innerHTML = '<div class="shell-card"><div class="shell-meta">Failed to load exited shells.</div></div>';
-        exitedContent.setAttribute('data-loaded', '0');
-      } finally {
-        exitedCache.loading = null;
-      }
-    })();
-    return exitedCache.loading;
-  }
-
-  function applyExitedSectionState(): void {
-    const expanded = getExitedExpandedDefault();
-    setExitedExpanded(expanded);
-    if (expanded) {
-      void ensureExitedLoaded(false);
-    }
-  }
-
   function applyExitedPagination(): void {
     if (!content) {
       return;
@@ -536,6 +1151,12 @@ function getWebSocketUrl(path: string): string {
     }
     moreBtn.style.display = '';
     moreBtn.textContent = `More (${items.length - exitedVisibleCount})`;
+  }
+
+  function applyExitedSectionState(): void {
+    const expanded = getExitedExpandedDefault();
+    setExitedExpanded(expanded);
+    applyExitedPagination();
   }
 
   function hasActiveFilters(stream: LogStreamName): boolean {
@@ -753,7 +1374,7 @@ function getWebSocketUrl(path: string): string {
     logDrawer.classList.add('is-open');
     logDrawer.setAttribute('aria-hidden', 'false');
     logState.shellId = nextShellId;
-    logState.shellLabel = shellLabel || nextShellId;
+    logState.shellLabel = shellLabel || findShellLabel(nextShellId);
     if (logTitleEl) {
       logTitleEl.textContent = logState.shellLabel || 'Shell Logs';
     }
@@ -807,7 +1428,7 @@ function getWebSocketUrl(path: string): string {
               for (const stream of LOG_STREAMS) {
                 const state = logState.streams[stream];
                 if (state.container) {
-                  state.container.innerHTML = `<div class="loading">${message.error.message}</div>`;
+                  state.container.innerHTML = `<div class="loading">${escapeHtml(message.error.message)}</div>`;
                 }
               }
               setLogStatus('Error', false);
@@ -849,7 +1470,7 @@ function getWebSocketUrl(path: string): string {
             for (const stream of LOG_STREAMS) {
               const state = logState.streams[stream];
               if (state.container) {
-                state.container.innerHTML = `<div class="loading">${message.params.message}</div>`;
+                state.container.innerHTML = `<div class="loading">${escapeHtml(message.params.message)}</div>`;
               }
             }
             if (message.params.shell_id === nextShellId || message.params.shell_id === undefined) {
@@ -942,7 +1563,7 @@ function getWebSocketUrl(path: string): string {
     const url = new URL(window.location.href);
     const shellId = url.searchParams.get('log');
     if (shellId) {
-      openLogDrawer(shellId, shellId, { fromPopState: true });
+      openLogDrawer(shellId, findShellLabel(shellId), { fromPopState: true });
       return;
     }
     closeLogDrawer({ fromPopState: true });
@@ -1024,7 +1645,7 @@ function getWebSocketUrl(path: string): string {
       const expanded = toggleBtn.getAttribute('aria-expanded') === 'true';
       setExitedExpanded(!expanded);
       if (!expanded) {
-        void ensureExitedLoaded(false);
+        applyExitedPagination();
       }
       return;
     }
@@ -1082,7 +1703,14 @@ function getWebSocketUrl(path: string): string {
     dashboardMessageBuffer = '';
     setStatus('Connecting...', false);
     void sendDashboardRequest('fws.dashboard.open', { view: 'html' })
-      .then(() => setStatus('Live', true))
+      .then((result) => {
+        if (hasDashboardStateResult(result)) {
+          applyDashboardState(result.state);
+          setStatus('Live', true);
+        } else {
+          setStatus('Error', false);
+        }
+      })
       .catch(() => setStatus('Error', false));
   };
 
@@ -1100,9 +1728,6 @@ function getWebSocketUrl(path: string): string {
 
   ws.onclose = () => {
     rejectPendingRequests(dashboardPendingRequests, 'FWS dashboard socket closed');
-  };
-
-  ws.onclose = () => {
     setStatus('Disconnected', false);
   };
 

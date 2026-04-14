@@ -328,7 +328,10 @@ When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboa
   - the websocket text stream is JSONL-framed; each line is one JSON-RPC request, response, or notification envelope
   - dashboard open request: `fws.dashboard.open`
   - logs open request: `fws.logs.open`
-  - server notifications: `fws.dashboard.snapshot`, `fws.logs.initial`, `fws.logs.chunk`, `fws.logs.reset`, `fws.error`
+  - server notifications:
+    - dashboard lifecycle: `fws.shell.created`, `fws.shell.spawned`, `fws.shell.updated`, `fws.shell.exited`, `fws.shell.removed`
+    - log streaming: `fws.logs.initial`, `fws.logs.chunk`, `fws.logs.reset`
+    - errors: `fws.error`
 - the typed protocol contract for those websocket request/response and notification lanes now lives in:
   - `framework_shells.protocols.fws_ui` on the Python/backend side
   - `framework_shells/ui/src/protocol.ts` on the TypeScript/frontend side

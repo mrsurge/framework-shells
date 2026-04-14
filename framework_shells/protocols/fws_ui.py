@@ -7,11 +7,18 @@ from .jsonrpc import (
     JsonRpcErrorResponseEnvelope,
     build_jsonrpc_error_response,
     build_jsonrpc_notification,
+    build_jsonrpc_success_response,
     parse_jsonrpc_request,
 )
 
 LogStreamName = Literal["stdout", "stderr"]
 ShutdownScope = Literal["tree", "shells"]
+FwsShellEventMethod = Literal[
+    "fws.shell.created",
+    "fws.shell.spawned",
+    "fws.shell.updated",
+    "fws.shell.exited",
+]
 
 DASHBOARD_OPEN_METHOD = "fws.dashboard.open"
 LOGS_OPEN_METHOD = "fws.logs.open"
@@ -24,7 +31,11 @@ PID_TERMINATE_METHOD = "fws.pid.terminate"
 APP_SHUTDOWN_METHOD = "fws.app.shutdown"
 SHUTDOWN_METHOD = "fws.shutdown"
 
-DASHBOARD_SNAPSHOT_METHOD = "fws.dashboard.snapshot"
+SHELL_CREATED_NOTIFICATION_METHOD: Literal["fws.shell.created"] = "fws.shell.created"
+SHELL_SPAWNED_NOTIFICATION_METHOD: Literal["fws.shell.spawned"] = "fws.shell.spawned"
+SHELL_UPDATED_NOTIFICATION_METHOD: Literal["fws.shell.updated"] = "fws.shell.updated"
+SHELL_EXITED_NOTIFICATION_METHOD: Literal["fws.shell.exited"] = "fws.shell.exited"
+SHELL_REMOVED_NOTIFICATION_METHOD: Literal["fws.shell.removed"] = "fws.shell.removed"
 LOGS_INITIAL_METHOD = "fws.logs.initial"
 LOGS_CHUNK_METHOD = "fws.logs.chunk"
 LOGS_RESET_METHOD = "fws.logs.reset"
@@ -59,8 +70,76 @@ class ShutdownParams(TypedDict):
     scope: ShutdownScope
 
 
-class DashboardSnapshotParams(TypedDict):
-    html: str
+class DashboardShellStats(TypedDict, total=False):
+    alive: bool
+    uptime: float | None
+    cpu_percent: float
+    memory_rss: int
+
+
+class DashboardShellCapabilities(TypedDict, total=False):
+    backend: str
+    stdin_write: bool
+    stdin_eof: bool
+    stdout_subscribe: bool
+    stdout_subscribe_bytes: bool
+    stderr_subscribe: bool
+    resize: bool
+    reattach: bool
+
+
+class DashboardPipeRuntime(TypedDict, total=False):
+    engine: str
+    active: bool
+    phase: str
+
+
+class DashboardShellPayload(TypedDict, total=False):
+    id: str
+    spec_id: str | None
+    command: list[str]
+    label: str | None
+    subgroups: list[str]
+    ui: dict[str, object]
+    cwd: str
+    pid: int | None
+    status: str
+    created_at: float
+    updated_at: float
+    autostart: bool
+    stdout_log: str
+    stderr_log: str
+    exit_code: int | None
+    env_keys: list[str]
+    run_id: str | None
+    launcher_pid: int | None
+    adopted: bool
+    backend: str
+    uses_pty: bool
+    uses_pipes: bool
+    uses_dtach: bool
+    pty_mode: str
+    runtime_id: str | None
+    app_id: str | None
+    parent_shell_id: str | None
+    is_app_worker: bool
+    stats: DashboardShellStats
+    capabilities: DashboardShellCapabilities
+    pipe_runtime: DashboardPipeRuntime
+
+
+class DashboardProcessPayload(TypedDict, total=False):
+    pid: int
+    parent_pid: int | None
+    type: str
+    label: str | None
+    shell_id: str | None
+    metadata: dict[str, object]
+
+
+class DashboardStatePayload(TypedDict):
+    shells: list[DashboardShellPayload]
+    processes: list[DashboardProcessPayload]
 
 
 class LogsInitialParams(TypedDict):
@@ -80,17 +159,32 @@ class LogsResetParams(TypedDict):
     stream: LogStreamName
 
 
+class ShellEventParams(TypedDict):
+    shell: DashboardShellPayload
+
+
+class ShellRemovedParams(TypedDict):
+    shell_id: str
+
+
 class ErrorNotificationParams(TypedDict, total=False):
     message: str
     code: str
     shell_id: str
 
 
-class OpenResult(TypedDict):
+class DashboardOpenResult(TypedDict):
     accepted: Literal[True]
+    state: DashboardStatePayload
 
 
-class LogsOpenResult(OpenResult):
+class DashboardRefreshResult(TypedDict):
+    ok: Literal[True]
+    state: DashboardStatePayload
+
+
+class LogsOpenResult(TypedDict):
+    accepted: Literal[True]
     shell_id: str
 
 
@@ -182,10 +276,34 @@ FwsRequest: TypeAlias = (
 )
 
 
-class DashboardSnapshotNotification(TypedDict):
+class ShellCreatedNotification(TypedDict):
     jsonrpc: Literal["2.0"]
-    method: Literal["fws.dashboard.snapshot"]
-    params: DashboardSnapshotParams
+    method: Literal["fws.shell.created"]
+    params: ShellEventParams
+
+
+class ShellSpawnedNotification(TypedDict):
+    jsonrpc: Literal["2.0"]
+    method: Literal["fws.shell.spawned"]
+    params: ShellEventParams
+
+
+class ShellUpdatedNotification(TypedDict):
+    jsonrpc: Literal["2.0"]
+    method: Literal["fws.shell.updated"]
+    params: ShellEventParams
+
+
+class ShellExitedNotification(TypedDict):
+    jsonrpc: Literal["2.0"]
+    method: Literal["fws.shell.exited"]
+    params: ShellEventParams
+
+
+class ShellRemovedNotification(TypedDict):
+    jsonrpc: Literal["2.0"]
+    method: Literal["fws.shell.removed"]
+    params: ShellRemovedParams
 
 
 class LogsInitialNotification(TypedDict):
@@ -213,7 +331,11 @@ class ErrorNotification(TypedDict):
 
 
 FwsNotification: TypeAlias = (
-    DashboardSnapshotNotification
+    ShellCreatedNotification
+    | ShellSpawnedNotification
+    | ShellUpdatedNotification
+    | ShellExitedNotification
+    | ShellRemovedNotification
     | LogsInitialNotification
     | LogsChunkNotification
     | LogsResetNotification
@@ -224,7 +346,13 @@ FwsNotification: TypeAlias = (
 class DashboardOpenResponse(TypedDict):
     jsonrpc: Literal["2.0"]
     id: str
-    result: OpenResult
+    result: DashboardOpenResult
+
+
+class DashboardRefreshResponse(TypedDict):
+    jsonrpc: Literal["2.0"]
+    id: str
+    result: DashboardRefreshResult
 
 
 class LogsOpenResponse(TypedDict):
@@ -239,7 +367,7 @@ class ActionResponse(TypedDict):
     result: ActionResult
 
 
-FwsSuccessResponse: TypeAlias = DashboardOpenResponse | LogsOpenResponse | ActionResponse
+FwsSuccessResponse: TypeAlias = DashboardOpenResponse | DashboardRefreshResponse | LogsOpenResponse | ActionResponse
 FwsErrorResponse: TypeAlias = JsonRpcErrorResponseEnvelope
 
 
@@ -351,27 +479,67 @@ def parse_fws_request(raw: str) -> FwsRequest | None:
     return None
 
 
-def build_dashboard_open_response(request_id: str) -> DashboardOpenResponse:
+def build_dashboard_state_payload(
+    shells: list[DashboardShellPayload],
+    processes: list[DashboardProcessPayload],
+) -> DashboardStatePayload:
     return {
-        "jsonrpc": JSONRPC_VERSION,
+        "shells": list(shells),
+        "processes": list(processes),
+    }
+
+
+def build_dashboard_open_response(
+    request_id: str,
+    shells: list[DashboardShellPayload],
+    processes: list[DashboardProcessPayload],
+) -> DashboardOpenResponse:
+    result: DashboardOpenResult = {
+        "accepted": True,
+        "state": build_dashboard_state_payload(shells, processes),
+    }
+    response = build_jsonrpc_success_response(request_id, result)
+    return {
+        "jsonrpc": response["jsonrpc"],
         "id": request_id,
-        "result": {"accepted": True},
+        "result": result,
+    }
+
+
+def build_dashboard_refresh_response(
+    request_id: str,
+    shells: list[DashboardShellPayload],
+    processes: list[DashboardProcessPayload],
+) -> DashboardRefreshResponse:
+    result: DashboardRefreshResult = {
+        "ok": True,
+        "state": build_dashboard_state_payload(shells, processes),
+    }
+    response = build_jsonrpc_success_response(request_id, result)
+    return {
+        "jsonrpc": response["jsonrpc"],
+        "id": request_id,
+        "result": result,
     }
 
 
 def build_logs_open_response(request_id: str, shell_id: str) -> LogsOpenResponse:
+    result: LogsOpenResult = {"accepted": True, "shell_id": shell_id}
+    response = build_jsonrpc_success_response(request_id, result)
     return {
-        "jsonrpc": JSONRPC_VERSION,
+        "jsonrpc": response["jsonrpc"],
         "id": request_id,
-        "result": {"accepted": True, "shell_id": shell_id},
+        "result": result,
     }
 
 
 def build_action_response(request_id: str) -> ActionResponse:
+    result: ActionResult = {"ok": True}
+    response = build_jsonrpc_success_response(request_id, result)
     return {
-        "jsonrpc": JSONRPC_VERSION,
+        "jsonrpc": response["jsonrpc"],
         "id": request_id,
-        "result": {"ok": True},
+        "result": result,
     }
 
 
@@ -396,12 +564,28 @@ def build_request_error_response(
     )
 
 
-def build_dashboard_snapshot_notification(html: str) -> DashboardSnapshotNotification:
-    notification = build_jsonrpc_notification(DASHBOARD_SNAPSHOT_METHOD, {"html": html})
+def build_shell_event_notification(method: FwsShellEventMethod, shell: DashboardShellPayload) -> FwsNotification:
+    params: ShellEventParams = {"shell": shell}
+    notification = build_jsonrpc_notification(method, params)
+    return cast(
+        FwsNotification,
+        cast(
+            object,
+            {
+                "jsonrpc": notification["jsonrpc"],
+                "method": method,
+                "params": params,
+            },
+        ),
+    )
+
+
+def build_shell_removed_notification(shell_id: str) -> ShellRemovedNotification:
+    notification = build_jsonrpc_notification(SHELL_REMOVED_NOTIFICATION_METHOD, {"shell_id": shell_id})
     return {
         "jsonrpc": notification["jsonrpc"],
-        "method": DASHBOARD_SNAPSHOT_METHOD,
-        "params": {"html": html},
+        "method": SHELL_REMOVED_NOTIFICATION_METHOD,
+        "params": {"shell_id": shell_id},
     }
 
 

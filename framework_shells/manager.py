@@ -329,6 +329,18 @@ class FrameworkShellManager:
         )
         await self._event_bus.publish(event)
 
+    async def emit_log_reset(self, shell_id: str, stream_name: str) -> None:
+        record = await self._load_record(shell_id)
+        event = ShellEvent(
+            type=EventType.LOG_RESET,
+            shell_id=shell_id,
+            data={"stream": stream_name},
+            app_id=(record.app_id or record.derive_app_id()) if record is not None else None,
+            parent_shell_id=record.parent_shell_id if record is not None else None,
+            is_app_worker=record.is_app_worker if record is not None else False,
+        )
+        await self._event_bus.publish(event)
+
     # ------------------------------------------------------------------
     # Adoption and helpers
 
@@ -634,34 +646,41 @@ class FrameworkShellManager:
     async def _launch(self, record: ShellRecord) -> ShellRecord:
         record.set_backend(BACKEND_PROC)
         env = self._prepare_env(record)
-        stdout_path = Path(record.stdout_log)
-        stderr_path = Path(record.stderr_log)
-        
-        stdout_fh = await asyncio.to_thread(open, stdout_path, "ab")
-        stderr_fh = await asyncio.to_thread(open, stderr_path, "ab")
-        
+
         await self._emit(EventType.SHELL_CREATED, record)
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *record.command,
-                cwd=record.cwd,
-                env=env,
-                stdout=stdout_fh,
-                stderr=stderr_fh,
-                start_new_session=True,
-            )
-            record.pid = proc.pid
-            record.status = "running"
-            record.updated_at = time.time()
-            await self._save_record(record)
-            
-            await self._emit(EventType.SHELL_SPAWNED, record)
-            self._run_hook_running(record)
-            return record
-        finally:
-            await asyncio.to_thread(stdout_fh.close)
-            await asyncio.to_thread(stderr_fh.close)
+        proc = await asyncio.create_subprocess_exec(
+            *record.command,
+            cwd=record.cwd,
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        record.pid = proc.pid
+        record.status = "running"
+        record.updated_at = time.time()
+        await self._save_record(record)
+
+        await self._emit(EventType.SHELL_SPAWNED, record)
+        self._run_hook_running(record)
+
+        state = PipeState(
+            process=proc,
+            label=record.label,
+            shell_id=record.id,
+            stdin_supported=False,
+        )
+        state.stdout_reader = asyncio.create_task(
+            self._live_stream_reader(record, state, stream_name="stdout", stream=proc.stdout, log_path=Path(record.stdout_log))
+        )
+        state.stderr_reader = asyncio.create_task(
+            self._live_stream_reader(record, state, stream_name="stderr", stream=proc.stderr, log_path=Path(record.stderr_log))
+        )
+        state.waiter = asyncio.create_task(self._pipe_waiter(record, state))
+        self._pipes[record.id] = state
+        return record
 
     async def _launch_dtach(self, record: ShellRecord) -> ShellRecord:
         if not self._dtach_bin:
@@ -1013,13 +1032,18 @@ class FrameworkShellManager:
             uses_dtach=bool(getattr(record, "uses_dtach", False)),
         )
 
-    async def _pipe_stdout_reader(self, record: ShellRecord, state: PipeState) -> None:
-        proc = state.process
-        stream = proc.stdout
+    async def _live_stream_reader(
+        self,
+        record: ShellRecord,
+        state: PipeState,
+        *,
+        stream_name: str,
+        stream: asyncio.StreamReader | None,
+        log_path: Path,
+    ) -> None:
         if stream is None:
             return
 
-        log_path = Path(record.stdout_log)
         async with aiofiles.open(log_path, "ab") as log_fh:
             pending_flush_bytes = 0
             while not state.stop.is_set():
@@ -1037,7 +1061,7 @@ class FrameworkShellManager:
                         await log_fh.flush()
                         pending_flush_bytes = 0
 
-                    await self._dispatch_pipe_chunk(record, state, data)
+                    await self._dispatch_live_chunk(record, state, stream_name, data)
 
                 except asyncio.TimeoutError:
                     if pending_flush_bytes > 0:
@@ -1050,9 +1074,19 @@ class FrameworkShellManager:
             if pending_flush_bytes > 0:
                 await log_fh.flush()
 
-    async def _dispatch_pipe_chunk(self, record: ShellRecord, state: PipeState, data: bytes) -> None:
-        text_subscribers = list(state.stdout_subscribers)
-        bytes_subscribers = list(state.stdout_subscribers_bytes)
+    async def _dispatch_live_chunk(
+        self,
+        record: ShellRecord,
+        state: PipeState,
+        stream_name: str,
+        data: bytes,
+    ) -> None:
+        if stream_name == "stderr":
+            text_subscribers = list(state.stderr_subscribers)
+            bytes_subscribers = list(state.stderr_subscribers_bytes)
+        else:
+            text_subscribers = list(state.stdout_subscribers)
+            bytes_subscribers = list(state.stdout_subscribers_bytes)
         should_publish_log_chunk = self._event_bus.has_subscribers()
         text: str | None = None
 
@@ -1063,7 +1097,7 @@ class FrameworkShellManager:
             event = ShellEvent(
                 type=EventType.LOG_CHUNK,
                 shell_id=record.id,
-                data={"stream": "stdout", "chunk": text},
+                data={"stream": stream_name, "chunk": text},
                 app_id=record.app_id or record.derive_app_id(),
                 parent_shell_id=record.parent_shell_id,
                 is_app_worker=record.is_app_worker,
@@ -1178,7 +1212,7 @@ class FrameworkShellManager:
                 initial_chunks = list(state.native_initial_chunks)
                 state.native_initial_chunks.clear()
                 for chunk in initial_chunks:
-                    await self._dispatch_pipe_chunk(record, state, chunk)
+                    await self._dispatch_live_chunk(record, state, "stdout", chunk)
 
             while not state.stop.is_set():
                 chunks = await asyncio.to_thread(
@@ -1187,7 +1221,7 @@ class FrameworkShellManager:
                     self.PIPE_NATIVE_WAIT_TIMEOUT_MS,
                 )
                 for chunk in chunks:
-                    await self._dispatch_pipe_chunk(record, state, chunk)
+                    await self._dispatch_live_chunk(record, state, "stdout", chunk)
                 if not chunks and native_pump.is_finished():
                     break
         except asyncio.CancelledError:
@@ -1264,106 +1298,112 @@ class FrameworkShellManager:
                         f"put {NATIVE_TERMINAL_BROKER_BIN} on PATH, or choose a usable fallback"
                     )
 
-        stdout_path = Path(record.stdout_log)
-        stderr_path = Path(record.stderr_log)
-        
-        # open stderr for logging
-        stderr_fh = await asyncio.to_thread(open, stderr_path, "ab")
-        
         await self._emit(EventType.SHELL_CREATED, record)
 
-        try:
-            # We use pipes for stdin/stdout, but file for stderr
-            proc = await asyncio.create_subprocess_exec(
-                *launch_command,
-                cwd=record.cwd,
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=stderr_fh,
-                start_new_session=True,
-            )
-            
-            record.pid = proc.pid
-            record.status = "running"
-            record.updated_at = time.time()
-            await self._save_record(record)
-            await self._emit(EventType.SHELL_SPAWNED, record)
-            self._run_hook_running(record)
-            
-            state = PipeState(
-                process=proc,
-                label=record.label,
-                shell_id=record.id,
-            )
-            if native_terminal_mode_requested or python_terminal_mode_requested:
-                if native_terminal_mode_active:
-                    state.native_engine = NATIVE_TERMINAL_PIPE_ENGINE
-                    state.native_phase = "prototype"
-                    _shell_debug(
-                        "native_terminal_pipe",
-                        (
-                            f"shell={record.id} activated {NATIVE_TERMINAL_PIPE_TESTING_MODE} "
-                            f"source={native_terminal_resolution.source or 'unknown'}"
-                        ),
-                    )
-                elif terminal_python_mode_active:
+        proc = await asyncio.create_subprocess_exec(
+            *launch_command,
+            cwd=record.cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        record.pid = proc.pid
+        record.status = "running"
+        record.updated_at = time.time()
+        await self._save_record(record)
+        await self._emit(EventType.SHELL_SPAWNED, record)
+        self._run_hook_running(record)
+
+        state = PipeState(
+            process=proc,
+            label=record.label,
+            shell_id=record.id,
+        )
+        if native_terminal_mode_requested or python_terminal_mode_requested:
+            if native_terminal_mode_active:
+                state.native_engine = NATIVE_TERMINAL_PIPE_ENGINE
+                state.native_phase = "prototype"
+                _shell_debug(
+                    "native_terminal_pipe",
+                    (
+                        f"shell={record.id} activated {NATIVE_TERMINAL_PIPE_TESTING_MODE} "
+                        f"source={native_terminal_resolution.source or 'unknown'}"
+                    ),
+                )
+            elif terminal_python_mode_active:
+                state.native_engine = PYTHON_TERMINAL_PIPE_ENGINE
+                state.native_phase = "fallback"
+                _shell_debug(
+                    "native_terminal_pipe",
+                    (
+                        f"shell={record.id} activated {PYTHON_TERMINAL_PIPE_TESTING_MODE} "
+                        "source=python-module"
+                    ),
+                )
+            else:
+                fallback_desc = resolved_pipe_config.terminal_fallback
+                if terminal_fallback_command is not None and terminal_fallback_command == launch_command:
+                    if is_native_terminal_placeholder_command(record.command):
+                        fallback_desc = "python_pty"
+                    elif resolved_pipe_config.terminal_fallback == "command":
+                        fallback_desc = "command"
+                if terminal_fallback_command == resolve_python_terminal_broker_command():
                     state.native_engine = PYTHON_TERMINAL_PIPE_ENGINE
                     state.native_phase = "fallback"
-                    _shell_debug(
-                        "native_terminal_pipe",
-                        (
-                            f"shell={record.id} activated {PYTHON_TERMINAL_PIPE_TESTING_MODE} "
-                            "source=python-module"
-                        ),
-                    )
-                else:
-                    fallback_desc = resolved_pipe_config.terminal_fallback
-                    if terminal_fallback_command is not None and terminal_fallback_command == launch_command:
-                        if is_native_terminal_placeholder_command(record.command):
-                            fallback_desc = "python_pty"
-                        elif resolved_pipe_config.terminal_fallback == "command":
-                            fallback_desc = "command"
-                    if terminal_fallback_command == resolve_python_terminal_broker_command():
-                        state.native_engine = PYTHON_TERMINAL_PIPE_ENGINE
-                        state.native_phase = "fallback"
-                    _shell_debug(
-                        "native_terminal_pipe",
-                        (
-                            f"shell={record.id} requested {NATIVE_TERMINAL_PIPE_TESTING_MODE} "
-                            f"but using terminal fallback {fallback_desc}"
-                        ),
-                    )
-            native_mode_requested = resolved_pipe_config.mode == NATIVE_PIPE_TESTING_MODE
-            native_mode_active = False
-            if native_mode_requested:
-                if native_extension_available():
-                    native_mode_active = await self._activate_native_pipe_stdout(
-                        record,
-                        state,
-                        read_chunk_bytes=resolved_pipe_config.read_chunk_bytes or self.PIPE_READ_CHUNK_BYTES,
-                        log_flush_bytes=resolved_pipe_config.log_flush_bytes or self.PIPE_LOG_FLUSH_BYTES,
-                        log_flush_interval_ms=resolved_pipe_config.log_flush_interval_ms or int(self.PIPE_LOG_FLUSH_INTERVAL_SECONDS * 1000),
-                    )
-                    if native_mode_active:
-                        _shell_debug(
-                            "native_pipe",
-                            f"shell={record.id} activated native_pipe_testing phase={native_extension_phase() or 'unknown'}",
-                        )
-                if not native_mode_active:
+                _shell_debug(
+                    "native_terminal_pipe",
+                    (
+                        f"shell={record.id} requested {NATIVE_TERMINAL_PIPE_TESTING_MODE} "
+                        f"but using terminal fallback {fallback_desc}"
+                    ),
+                )
+        native_mode_requested = resolved_pipe_config.mode == NATIVE_PIPE_TESTING_MODE
+        native_mode_active = False
+        if native_mode_requested:
+            if native_extension_available():
+                native_mode_active = await self._activate_native_pipe_stdout(
+                    record,
+                    state,
+                    read_chunk_bytes=resolved_pipe_config.read_chunk_bytes or self.PIPE_READ_CHUNK_BYTES,
+                    log_flush_bytes=resolved_pipe_config.log_flush_bytes or self.PIPE_LOG_FLUSH_BYTES,
+                    log_flush_interval_ms=resolved_pipe_config.log_flush_interval_ms or int(self.PIPE_LOG_FLUSH_INTERVAL_SECONDS * 1000),
+                )
+                if native_mode_active:
                     _shell_debug(
                         "native_pipe",
-                        f"shell={record.id} requested native_pipe_testing but using Python pipe pump",
+                        f"shell={record.id} activated native_pipe_testing phase={native_extension_phase() or 'unknown'}",
                     )
-
             if not native_mode_active:
-                state.stdout_reader = asyncio.create_task(self._pipe_stdout_reader(record, state))
-            state.waiter = asyncio.create_task(self._pipe_waiter(record, state))
-            self._pipes[record.id] = state
-            return record
-            
-        finally:
-            await asyncio.to_thread(stderr_fh.close)
+                _shell_debug(
+                    "native_pipe",
+                    f"shell={record.id} requested native_pipe_testing but using Python pipe pump",
+                )
+
+        if not native_mode_active:
+            state.stdout_reader = asyncio.create_task(
+                self._live_stream_reader(
+                    record,
+                    state,
+                    stream_name="stdout",
+                    stream=proc.stdout,
+                    log_path=Path(record.stdout_log),
+                )
+            )
+        state.stderr_reader = asyncio.create_task(
+            self._live_stream_reader(
+                record,
+                state,
+                stream_name="stderr",
+                stream=proc.stderr,
+                log_path=Path(record.stderr_log),
+            )
+        )
+        state.waiter = asyncio.create_task(self._pipe_waiter(record, state))
+        self._pipes[record.id] = state
+        return record
 
     async def _stop_pipe(self, shell_id: str) -> None:
         state = self._pipes.pop(shell_id, None)
@@ -1371,6 +1411,8 @@ class FrameworkShellManager:
         state.stop.set()
         if state.stdout_reader:
             state.stdout_reader.cancel()
+        if state.stderr_reader:
+            state.stderr_reader.cancel()
         native_pump = cast(Optional[NativePipePumpHandle], state.native_pump)
         if native_pump is not None:
             try:
@@ -1505,6 +1547,10 @@ class FrameworkShellManager:
         async with self._get_lock():
             await self._adopt_orphaned_shells()
             return await self._load_record(shell_id)
+
+    async def load_shell_record(self, shell_id: str) -> Optional[ShellRecord]:
+        """Load a shell record from disk without adoption or runtime refresh."""
+        return await self._load_record(shell_id)
 
     async def find_shell_by_label(self, label: str, status: Optional[str] = "running") -> Optional[ShellRecord]:
         if not label: return None
@@ -2085,11 +2131,22 @@ class FrameworkShellManager:
         if backend == "pipe":
             return {
                 "backend": backend,
-                "stdin_write": has_pipe,
-                "stdin_eof": has_pipe,
+                "stdin_write": has_pipe and pipe_state.stdin_supported if pipe_state is not None else False,
+                "stdin_eof": has_pipe and pipe_state.stdin_supported if pipe_state is not None else False,
                 "stdout_subscribe": has_pipe,
                 "stdout_subscribe_bytes": has_pipe,
-                "stderr_subscribe": False,
+                "stderr_subscribe": has_pipe,
+                "resize": False,
+                "reattach": False,
+            }
+        if backend == "proc":
+            return {
+                "backend": backend,
+                "stdin_write": False,
+                "stdin_eof": False,
+                "stdout_subscribe": has_pipe,
+                "stdout_subscribe_bytes": has_pipe,
+                "stderr_subscribe": has_pipe,
                 "resize": False,
                 "reattach": False,
             }
@@ -2105,41 +2162,61 @@ class FrameworkShellManager:
         }
 
 
-    async def subscribe_output(self, shell_id: str) -> AsyncQueue[str]:
-        """Subscribe to live shell output text for a shell."""
+    async def subscribe_output_stream(self, shell_id: str, stream_name: str = "stdout") -> AsyncQueue[str]:
+        """Subscribe to live shell output text for a specific stream."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
             if state:
+                if stream_name != "stdout":
+                    raise KeyError(f"No live {stream_name} stream for shell {shell_id}")
                 q: AsyncQueue[str] = AsyncQueue()
                 state.subscribers.append(q)
                 return q
             pipe_state = self._pipes.get(shell_id)
             if pipe_state:
                 q = AsyncQueue()
-                pipe_state.stdout_subscribers.append(q)
+                if stream_name == "stderr":
+                    pipe_state.stderr_subscribers.append(q)
+                else:
+                    pipe_state.stdout_subscribers.append(q)
                 return q
-            raise KeyError(f"No live output stream for shell {shell_id}")
+            raise KeyError(f"No live {stream_name} stream for shell {shell_id}")
 
-    async def subscribe_output_bytes(self, shell_id: str) -> AsyncQueue[bytes]:
-        """Subscribe to raw live output bytes for a shell."""
+    async def subscribe_output(self, shell_id: str) -> AsyncQueue[str]:
+        """Subscribe to live shell output text for a shell."""
+        return await self.subscribe_output_stream(shell_id, "stdout")
+
+    async def subscribe_output_bytes_stream(self, shell_id: str, stream_name: str = "stdout") -> AsyncQueue[bytes]:
+        """Subscribe to raw live shell output bytes for a specific stream."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
             if state:
+                if stream_name != "stdout":
+                    raise KeyError(f"No live {stream_name} stream for shell {shell_id}")
                 q: AsyncQueue[bytes] = AsyncQueue()
                 state.subscribers_bytes.append(q)
                 return q
             pipe_state = self._pipes.get(shell_id)
             if pipe_state:
                 q = AsyncQueue()
-                pipe_state.stdout_subscribers_bytes.append(q)
+                if stream_name == "stderr":
+                    pipe_state.stderr_subscribers_bytes.append(q)
+                else:
+                    pipe_state.stdout_subscribers_bytes.append(q)
                 return q
-            raise KeyError(f"No live output stream for shell {shell_id}")
+            raise KeyError(f"No live {stream_name} stream for shell {shell_id}")
 
-    async def unsubscribe_output(self, shell_id: str, q: AsyncQueue[str]) -> None:
-        """Unsubscribe from live shell output."""
+    async def subscribe_output_bytes(self, shell_id: str) -> AsyncQueue[bytes]:
+        """Subscribe to raw live output bytes for a shell."""
+        return await self.subscribe_output_bytes_stream(shell_id, "stdout")
+
+    async def unsubscribe_output_stream(self, shell_id: str, q: AsyncQueue[str], stream_name: str = "stdout") -> None:
+        """Unsubscribe from live shell output for a specific stream."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
             if state:
+                if stream_name != "stdout":
+                    return
                 try:
                     state.subscribers.remove(q)
                 except ValueError:
@@ -2149,15 +2226,29 @@ class FrameworkShellManager:
             if not pipe_state:
                 return
             try:
-                pipe_state.stdout_subscribers.remove(q)
+                if stream_name == "stderr":
+                    pipe_state.stderr_subscribers.remove(q)
+                else:
+                    pipe_state.stdout_subscribers.remove(q)
             except ValueError:
                 pass
 
-    async def unsubscribe_output_bytes(self, shell_id: str, q: AsyncQueue[bytes]) -> None:
-        """Unsubscribe from raw live shell output."""
+    async def unsubscribe_output(self, shell_id: str, q: AsyncQueue[str]) -> None:
+        """Unsubscribe from live shell output."""
+        await self.unsubscribe_output_stream(shell_id, q, "stdout")
+
+    async def unsubscribe_output_bytes_stream(
+        self,
+        shell_id: str,
+        q: AsyncQueue[bytes],
+        stream_name: str = "stdout",
+    ) -> None:
+        """Unsubscribe from raw live shell output for a specific stream."""
         async with self._get_lock():
             state = self._pty.get(shell_id)
             if state:
+                if stream_name != "stdout":
+                    return
                 try:
                     state.subscribers_bytes.remove(q)
                 except ValueError:
@@ -2167,9 +2258,16 @@ class FrameworkShellManager:
             if not pipe_state:
                 return
             try:
-                pipe_state.stdout_subscribers_bytes.remove(q)
+                if stream_name == "stderr":
+                    pipe_state.stderr_subscribers_bytes.remove(q)
+                else:
+                    pipe_state.stdout_subscribers_bytes.remove(q)
             except ValueError:
                 pass
+
+    async def unsubscribe_output_bytes(self, shell_id: str, q: AsyncQueue[bytes]) -> None:
+        """Unsubscribe from raw live output."""
+        await self.unsubscribe_output_bytes_stream(shell_id, q, "stdout")
 
     async def write_to_pty(self, shell_id: str, data: str) -> None:
         """Write data to a shell's PTY."""
@@ -2185,6 +2283,8 @@ class FrameworkShellManager:
             state = self._pipes.get(shell_id)
             if not state:
                 raise KeyError(f"No live pipe for shell {shell_id}")
+            if not state.stdin_supported:
+                raise RuntimeError(f"Pipe stdin unavailable for shell {shell_id}")
             stdin = state.process.stdin
 
         if stdin is None:
@@ -2205,6 +2305,8 @@ class FrameworkShellManager:
             state = self._pipes.get(shell_id)
             if not state:
                 raise KeyError(f"No live pipe for shell {shell_id}")
+            if not state.stdin_supported:
+                raise RuntimeError(f"Pipe stdin unavailable for shell {shell_id}")
             stdin = state.process.stdin
 
         if stdin is None:
@@ -2239,7 +2341,10 @@ class FrameworkShellManager:
                 backend = str(pty_state.backend or BACKEND_PTY)
                 await self._write_live_pty_state(pty_state, payload)
             elif pipe_state is not None:
-                backend = BACKEND_PIPE
+                record = await self.get_shell(shell_id)
+                if not record:
+                    raise KeyError(f"Shell not found: {shell_id}")
+                backend = self._backend_name(record)
                 await self.write_to_pipe(shell_id, payload)
             else:
                 record = await self.get_shell(shell_id)

@@ -17,13 +17,20 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from .. import get_manager
-from ..events import get_event_bus
+from ..events import EventType, ShellEvent, get_event_bus
 from ..process_snapshot import ProcessRecord
 from ..protocols.jsonrpc import dump_json_line
 from ..protocols.fws_ui import (
     APP_SHUTDOWN_METHOD,
     DASHBOARD_OPEN_METHOD,
     DASHBOARD_REFRESH_METHOD,
+    FwsShellEventMethod,
+    SHELL_CREATED_NOTIFICATION_METHOD,
+    SHELL_EXITED_NOTIFICATION_METHOD,
+    SHELL_SPAWNED_NOTIFICATION_METHOD,
+    SHELL_UPDATED_NOTIFICATION_METHOD,
+    DashboardProcessPayload,
+    DashboardShellPayload,
     EXITED_PURGE_METHOD,
     FwsNotification,
     FwsRequest,
@@ -32,14 +39,17 @@ from ..protocols.fws_ui import (
     ShellTerminateRequest,
     ShutdownRequest,
     AppShutdownRequest,
-    build_dashboard_snapshot_notification,
     build_dashboard_open_response,
+    build_dashboard_refresh_response,
     build_action_response,
     build_logs_chunk_notification,
     build_logs_initial_notification,
     build_logs_open_response,
     build_logs_reset_notification,
+    build_shell_event_notification,
+    build_shell_removed_notification,
     build_request_error_response,
+    build_error_notification,
     parse_fws_request,
     LOGS_OPEN_METHOD,
     LOGS_TRUNCATE_METHOD,
@@ -47,6 +57,7 @@ from ..protocols.fws_ui import (
     SHELL_PURGE_METHOD,
     SHELL_TERMINATE_METHOD,
     SHUTDOWN_METHOD,
+    LogStreamName,
 )
 from ..shutdown import ShutdownPolicy, shutdown_snapshot
 
@@ -56,6 +67,67 @@ router = APIRouter()
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 ShellInfo = dict[str, object]
 StyleMap = dict[str, dict[str, str]]
+
+
+def _dashboard_shell_payload(value: object) -> DashboardShellPayload:
+    return cast(DashboardShellPayload, value)
+
+
+def _process_payload(proc: ProcessRecord) -> DashboardProcessPayload:
+    return {
+        "pid": int(proc.pid),
+        "parent_pid": int(proc.parent_pid) if proc.parent_pid is not None else None,
+        "type": str(proc.type),
+        "label": proc.label,
+        "shell_id": proc.shell_id,
+        "metadata": dict(proc.metadata),
+    }
+
+
+async def _dashboard_state_parts() -> tuple[list[DashboardShellPayload], list[DashboardProcessPayload]]:
+    mgr = await get_manager()
+    shells = await mgr.list_shells()
+    described: list[DashboardShellPayload] = []
+    for rec in shells:
+        try:
+            described.append(_dashboard_shell_payload(await mgr.describe(rec)))
+        except Exception:
+            described.append(_dashboard_shell_payload(rec.to_payload()))
+    snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
+    processes = [_process_payload(proc) for proc in snapshot.processes.values()]
+    return described, processes
+
+
+async def _dashboard_shell_payload_from_event(event: ShellEvent) -> DashboardShellPayload | None:
+    mgr = await get_manager()
+    rec = await mgr.load_shell_record(event.shell_id)
+    if rec is not None:
+        try:
+            return _dashboard_shell_payload(await mgr.describe(rec))
+        except Exception:
+            return _dashboard_shell_payload(rec.to_payload())
+    if event.data:
+        return _dashboard_shell_payload(dict(event.data))
+    return None
+
+
+async def _dashboard_notification_for_event(event: ShellEvent) -> FwsNotification | None:
+    if event.type == EventType.SHELL_REMOVED:
+        return build_shell_removed_notification(event.shell_id)
+
+    method_by_type: dict[EventType, FwsShellEventMethod] = {
+        EventType.SHELL_CREATED: SHELL_CREATED_NOTIFICATION_METHOD,
+        EventType.SHELL_SPAWNED: SHELL_SPAWNED_NOTIFICATION_METHOD,
+        EventType.SHELL_UPDATED: SHELL_UPDATED_NOTIFICATION_METHOD,
+        EventType.SHELL_EXITED: SHELL_EXITED_NOTIFICATION_METHOD,
+    }
+    method = method_by_type.get(event.type)
+    if method is None:
+        return None
+    shell = await _dashboard_shell_payload_from_event(event)
+    if shell is None:
+        return None
+    return build_shell_event_notification(method, shell)
 
 
 async def _send_ws_payload(websocket: WebSocket, payload: Mapping[str, object]) -> None:
@@ -429,7 +501,7 @@ def _render_exited_content(exited: list[ShellInfo], subgroup_styles: StyleMap) -
     return "\n".join(parts)
 
 
-async def _render_dashboard_html() -> str:
+async def _render_dashboard_html() -> str:  # pyright: ignore[reportUnusedFunction]
     mgr = await get_manager()
     shells = await mgr.list_shells()
     described: list[ShellInfo] = []
@@ -724,6 +796,10 @@ async def _action_truncate_logs() -> None:
         seen.add(resolved)
         _ = await _truncate_log_file(resolved, logs_root=logs_root)
 
+    for rec in shells:
+        await mgr.emit_log_reset(rec.id, "stdout")
+        await mgr.emit_log_reset(rec.id, "stderr")
+
 
 async def _action_purge_exited() -> None:
     mgr = await get_manager()
@@ -853,61 +929,50 @@ async def fws_ws(websocket: WebSocket):
     bus = get_event_bus()
     q = bus.subscribe()
 
-    async def send_snapshot() -> None:
-        html = await _render_dashboard_html()
-        await _send_ws_notification(websocket, build_dashboard_snapshot_notification(html))
-
     async def handle_request(request: FwsRequest) -> None:
         method = request["method"]
         request_id = request["id"]
         try:
             if method == DASHBOARD_OPEN_METHOD:
-                await _send_ws_response(websocket, build_dashboard_open_response(request_id))
-                await send_snapshot()
+                shells, processes = await _dashboard_state_parts()
+                await _send_ws_response(websocket, build_dashboard_open_response(request_id, shells, processes))
                 return
             if method == DASHBOARD_REFRESH_METHOD:
-                await _send_ws_response(websocket, build_action_response(request_id))
-                await send_snapshot()
+                shells, processes = await _dashboard_state_parts()
+                await _send_ws_response(websocket, build_dashboard_refresh_response(request_id, shells, processes))
                 return
             if method == LOGS_TRUNCATE_METHOD:
                 await _action_truncate_logs()
                 await _send_ws_response(websocket, build_action_response(request_id))
-                await send_snapshot()
                 return
             if method == EXITED_PURGE_METHOD:
                 await _action_purge_exited()
                 await _send_ws_response(websocket, build_action_response(request_id))
-                await send_snapshot()
                 return
             if method == SHELL_TERMINATE_METHOD:
                 shell_request = cast(ShellTerminateRequest, request)
                 await _action_terminate_shell(shell_request["params"]["shell_id"])
                 await _send_ws_response(websocket, build_action_response(request_id))
-                await send_snapshot()
                 return
             if method == SHELL_PURGE_METHOD:
                 shell_request = cast(ShellPurgeRequest, request)
                 await _action_purge_shell(shell_request["params"]["shell_id"])
                 await _send_ws_response(websocket, build_action_response(request_id))
-                await send_snapshot()
                 return
             if method == PID_TERMINATE_METHOD:
                 pid_request = cast(PidTerminateRequest, request)
                 await _action_terminate_pid(pid_request["params"]["pid"])
                 await _send_ws_response(websocket, build_action_response(request_id))
-                await send_snapshot()
                 return
             if method == APP_SHUTDOWN_METHOD:
                 app_request = cast(AppShutdownRequest, request)
                 await _action_shutdown_app(app_request["params"]["app_id"])
                 await _send_ws_response(websocket, build_action_response(request_id))
-                await send_snapshot()
                 return
             if method == SHUTDOWN_METHOD:
                 shutdown_request = cast(ShutdownRequest, request)
                 await _action_shutdown(shutdown_request["params"]["scope"])
                 await _send_ws_response(websocket, build_action_response(request_id))
-                await send_snapshot()
                 return
 
             await _send_ws_error_response(
@@ -931,10 +996,7 @@ async def fws_ws(websocket: WebSocket):
         receive_task = asyncio.create_task(websocket.receive_text())
         bus_task = asyncio.create_task(q.get())
         while True:
-            done, _ = await asyncio.wait(
-                {receive_task, bus_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            done, _ = await asyncio.wait({receive_task, bus_task}, return_when=asyncio.FIRST_COMPLETED)
 
             if receive_task in done:
                 try:
@@ -959,10 +1021,12 @@ async def fws_ws(websocket: WebSocket):
 
             if bus_task in done:
                 try:
-                    _ = bus_task.result()
+                    event = bus_task.result()
                 except Exception:
                     break
-                await send_snapshot()
+                notification = await _dashboard_notification_for_event(event)
+                if notification is not None:
+                    await _send_ws_notification(websocket, notification)
                 bus_task = asyncio.create_task(q.get())
     except WebSocketDisconnect:
         pass
@@ -1024,7 +1088,7 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
 
     try:
         mgr = await get_manager()
-        rec = await mgr.get_shell(shell_id)
+        rec = await mgr.load_shell_record(shell_id)
     except Exception as exc:
         await _send_ws_error_response(
             websocket,
@@ -1052,17 +1116,8 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
     stdout_path = Path(rec.stdout_log)
     stderr_path = Path(rec.stderr_log)
 
-    if not stdout_path.exists() and not stderr_path.exists():
-        await _send_ws_error_response(
-            websocket,
-            logs_open_request["id"],
-            code=-32004,
-            message=f"No log files found for {shell_id}",
-            error_code="logs_missing",
-            shell_id=shell_id,
-        )
-        await safe_close()
-        return
+    bus = get_event_bus()
+    q = bus.subscribe()
 
     try:
         await _send_ws_response(websocket, build_logs_open_response(logs_open_request["id"], shell_id))
@@ -1085,39 +1140,67 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
             ),
         )
 
-        stdout_size = stdout_path.stat().st_size if stdout_path.exists() else 0
-        stderr_size = stderr_path.stat().st_size if stderr_path.exists() else 0
-
+        receive_task = asyncio.create_task(websocket.receive_text())
+        bus_task = asyncio.create_task(q.get())
         while True:
-            await asyncio.sleep(1)
+            done, _ = await asyncio.wait({receive_task, bus_task}, return_when=asyncio.FIRST_COMPLETED)
 
-            if stdout_path.exists():
-                current = stdout_path.stat().st_size
-                if current > stdout_size:
-                    async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
-                        _ = await f.seek(stdout_size)
-                        new = await f.read()
-                    await _send_ws_notification(websocket, build_logs_chunk_notification(shell_id, "stdout", new))
-                    stdout_size = current
-                elif current < stdout_size:
-                    stdout_size = 0
-                    await _send_ws_notification(websocket, build_logs_reset_notification(shell_id, "stdout"))
+            if receive_task in done:
+                try:
+                    _ = receive_task.result()
+                except WebSocketDisconnect:
+                    break
+                except Exception:
+                    break
+                receive_task = asyncio.create_task(websocket.receive_text())
 
-            if stderr_path.exists():
-                current = stderr_path.stat().st_size
-                if current > stderr_size:
-                    async with aiofiles.open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
-                        _ = await f.seek(stderr_size)
-                        new = await f.read()
-                    await _send_ws_notification(websocket, build_logs_chunk_notification(shell_id, "stderr", new))
-                    stderr_size = current
-                elif current < stderr_size:
-                    stderr_size = 0
-                    await _send_ws_notification(websocket, build_logs_reset_notification(shell_id, "stderr"))
+            if bus_task in done:
+                try:
+                    event = bus_task.result()
+                except Exception:
+                    break
 
+                if event.shell_id == shell_id:
+                    if event.type == EventType.LOG_CHUNK:
+                        stream = str(event.data.get("stream") or "stdout")
+                        chunk = str(event.data.get("chunk") or "")
+                        if stream in {"stdout", "stderr"} and chunk:
+                            chunk_stream_name: LogStreamName = "stdout" if stream == "stdout" else "stderr"
+                            await _send_ws_notification(
+                                websocket,
+                                build_logs_chunk_notification(shell_id, chunk_stream_name, chunk),
+                            )
+                    elif event.type == EventType.PTY_CHUNK:
+                        chunk = str(event.data.get("chunk") or "")
+                        if chunk:
+                            await _send_ws_notification(websocket, build_logs_chunk_notification(shell_id, "stdout", chunk))
+                    elif event.type == EventType.LOG_RESET:
+                        stream = str(event.data.get("stream") or "stdout")
+                        if stream in {"stdout", "stderr"}:
+                            reset_stream_name: LogStreamName = "stdout" if stream == "stdout" else "stderr"
+                            await _send_ws_notification(
+                                websocket,
+                                build_logs_reset_notification(shell_id, reset_stream_name),
+                            )
+                    elif event.type == EventType.SHELL_REMOVED:
+                        await _send_ws_notification(
+                            websocket,
+                            build_error_notification("Shell removed", code="shell_removed", shell_id=shell_id),
+                        )
+                        break
+
+                bus_task = asyncio.create_task(q.get())
     except Exception:
         pass
     finally:
+        for task_name in ("receive_task", "bus_task"):
+            task = locals().get(task_name)
+            if isinstance(task, asyncio.Task):
+                _ = task.cancel()
+        try:
+            bus.unsubscribe(q)
+        except Exception:
+            pass
         await safe_close()
 
 

@@ -1,6 +1,11 @@
 export type JsonRpcVersion = '2.0';
 export type LogStreamName = 'stdout' | 'stderr';
 export type ShutdownScope = 'tree' | 'shells';
+export type ShellNotificationMethod =
+  | 'fws.shell.created'
+  | 'fws.shell.spawned'
+  | 'fws.shell.updated'
+  | 'fws.shell.exited';
 
 export interface JsonRpcNotification<M extends string, P> {
   jsonrpc: JsonRpcVersion;
@@ -59,8 +64,84 @@ export interface ShutdownParams {
   scope: ShutdownScope;
 }
 
-export interface DashboardSnapshotParams {
-  html: string;
+export interface DashboardShellStats {
+  alive?: boolean;
+  uptime?: number | null;
+  cpu_percent?: number;
+  memory_rss?: number;
+}
+
+export interface DashboardShellCapabilities {
+  backend?: string;
+  stdin_write?: boolean;
+  stdin_eof?: boolean;
+  stdout_subscribe?: boolean;
+  stdout_subscribe_bytes?: boolean;
+  stderr_subscribe?: boolean;
+  resize?: boolean;
+  reattach?: boolean;
+}
+
+export interface DashboardPipeRuntime {
+  engine?: string;
+  active?: boolean;
+  phase?: string;
+}
+
+export interface DashboardShellPayload {
+  id?: string;
+  spec_id?: string | null;
+  command?: string[];
+  label?: string | null;
+  subgroups?: string[];
+  ui?: Record<string, unknown>;
+  cwd?: string;
+  pid?: number | null;
+  status?: string;
+  created_at?: number;
+  updated_at?: number;
+  autostart?: boolean;
+  stdout_log?: string;
+  stderr_log?: string;
+  exit_code?: number | null;
+  env_keys?: string[];
+  run_id?: string | null;
+  launcher_pid?: number | null;
+  adopted?: boolean;
+  backend?: string;
+  uses_pty?: boolean;
+  uses_pipes?: boolean;
+  uses_dtach?: boolean;
+  pty_mode?: string;
+  runtime_id?: string | null;
+  app_id?: string | null;
+  parent_shell_id?: string | null;
+  is_app_worker?: boolean;
+  stats?: DashboardShellStats;
+  capabilities?: DashboardShellCapabilities;
+  pipe_runtime?: DashboardPipeRuntime;
+}
+
+export interface DashboardProcessPayload {
+  pid?: number;
+  parent_pid?: number | null;
+  type?: string;
+  label?: string | null;
+  shell_id?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DashboardStatePayload {
+  shells: DashboardShellPayload[];
+  processes: DashboardProcessPayload[];
+}
+
+export interface ShellEventParams {
+  shell: DashboardShellPayload;
+}
+
+export interface ShellRemovedParams {
+  shell_id: string;
 }
 
 export interface LogsInitialParams {
@@ -100,9 +181,9 @@ export interface ClientRequestMap {
 }
 
 export interface RequestResultMap {
-  'fws.dashboard.open': { accepted: true };
+  'fws.dashboard.open': { accepted: true; state: DashboardStatePayload };
   'fws.logs.open': { accepted: true; shell_id: string };
-  'fws.dashboard.refresh': { ok: true };
+  'fws.dashboard.refresh': { ok: true; state: DashboardStatePayload };
   'fws.logs.truncate': { ok: true };
   'fws.exited.purge': { ok: true };
   'fws.shell.terminate': { ok: true };
@@ -113,7 +194,11 @@ export interface RequestResultMap {
 }
 
 export interface ServerNotificationMap {
-  'fws.dashboard.snapshot': DashboardSnapshotParams;
+  'fws.shell.created': ShellEventParams;
+  'fws.shell.spawned': ShellEventParams;
+  'fws.shell.updated': ShellEventParams;
+  'fws.shell.exited': ShellEventParams;
+  'fws.shell.removed': ShellRemovedParams;
   'fws.logs.initial': LogsInitialParams;
   'fws.logs.chunk': LogsChunkParams;
   'fws.logs.reset': LogsResetParams;
@@ -151,6 +236,324 @@ function isLogStreamName(value: unknown): value is LogStreamName {
 
 function isJsonRpcVersion(value: unknown): value is JsonRpcVersion {
   return value === '2.0';
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function asNullableString(value: unknown): string | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  return typeof value === 'string' ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function asNullableNumber(value: unknown): number | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  return asNumber(value);
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item === 'string') {
+      result.push(item);
+    }
+  }
+  return result;
+}
+
+function asObjectRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
+function coerceDashboardShellStats(value: unknown): DashboardShellStats | undefined {
+  const record = asObjectRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const result: DashboardShellStats = {};
+  const alive = asBoolean(record.alive);
+  if (alive !== undefined) {
+    result.alive = alive;
+  }
+  const uptime = asNullableNumber(record.uptime);
+  if (uptime !== undefined) {
+    result.uptime = uptime;
+  }
+  const cpuPercent = asNumber(record.cpu_percent);
+  if (cpuPercent !== undefined) {
+    result.cpu_percent = cpuPercent;
+  }
+  const memoryRss = asNumber(record.memory_rss);
+  if (memoryRss !== undefined) {
+    result.memory_rss = memoryRss;
+  }
+  return result;
+}
+
+function coerceDashboardShellCapabilities(value: unknown): DashboardShellCapabilities | undefined {
+  const record = asObjectRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const result: DashboardShellCapabilities = {};
+  const backend = asString(record.backend);
+  if (backend !== undefined) {
+    result.backend = backend;
+  }
+  const stdinWrite = asBoolean(record.stdin_write);
+  if (stdinWrite !== undefined) {
+    result.stdin_write = stdinWrite;
+  }
+  const stdinEof = asBoolean(record.stdin_eof);
+  if (stdinEof !== undefined) {
+    result.stdin_eof = stdinEof;
+  }
+  const stdoutSubscribe = asBoolean(record.stdout_subscribe);
+  if (stdoutSubscribe !== undefined) {
+    result.stdout_subscribe = stdoutSubscribe;
+  }
+  const stdoutSubscribeBytes = asBoolean(record.stdout_subscribe_bytes);
+  if (stdoutSubscribeBytes !== undefined) {
+    result.stdout_subscribe_bytes = stdoutSubscribeBytes;
+  }
+  const stderrSubscribe = asBoolean(record.stderr_subscribe);
+  if (stderrSubscribe !== undefined) {
+    result.stderr_subscribe = stderrSubscribe;
+  }
+  const resize = asBoolean(record.resize);
+  if (resize !== undefined) {
+    result.resize = resize;
+  }
+  const reattach = asBoolean(record.reattach);
+  if (reattach !== undefined) {
+    result.reattach = reattach;
+  }
+  return result;
+}
+
+function coerceDashboardPipeRuntime(value: unknown): DashboardPipeRuntime | undefined {
+  const record = asObjectRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const result: DashboardPipeRuntime = {};
+  const engine = asString(record.engine);
+  if (engine !== undefined) {
+    result.engine = engine;
+  }
+  const active = asBoolean(record.active);
+  if (active !== undefined) {
+    result.active = active;
+  }
+  const phase = asString(record.phase);
+  if (phase !== undefined) {
+    result.phase = phase;
+  }
+  return result;
+}
+
+function coerceDashboardShellPayload(value: unknown): DashboardShellPayload | null {
+  const record = asObjectRecord(value);
+  if (!record) {
+    return null;
+  }
+  const result: DashboardShellPayload = {};
+  const id = asString(record.id);
+  if (id !== undefined) {
+    result.id = id;
+  }
+  const specId = asNullableString(record.spec_id);
+  if (specId !== undefined) {
+    result.spec_id = specId;
+  }
+  const command = asStringArray(record.command);
+  if (command !== undefined) {
+    result.command = command;
+  }
+  const label = asNullableString(record.label);
+  if (label !== undefined) {
+    result.label = label;
+  }
+  const subgroups = asStringArray(record.subgroups);
+  if (subgroups !== undefined) {
+    result.subgroups = subgroups;
+  }
+  const ui = asObjectRecord(record.ui);
+  if (ui !== undefined) {
+    result.ui = ui;
+  }
+  const cwd = asString(record.cwd);
+  if (cwd !== undefined) {
+    result.cwd = cwd;
+  }
+  const pid = asNullableNumber(record.pid);
+  if (pid !== undefined) {
+    result.pid = pid;
+  }
+  const status = asString(record.status);
+  if (status !== undefined) {
+    result.status = status;
+  }
+  const createdAt = asNumber(record.created_at);
+  if (createdAt !== undefined) {
+    result.created_at = createdAt;
+  }
+  const updatedAt = asNumber(record.updated_at);
+  if (updatedAt !== undefined) {
+    result.updated_at = updatedAt;
+  }
+  const autostart = asBoolean(record.autostart);
+  if (autostart !== undefined) {
+    result.autostart = autostart;
+  }
+  const stdoutLog = asString(record.stdout_log);
+  if (stdoutLog !== undefined) {
+    result.stdout_log = stdoutLog;
+  }
+  const stderrLog = asString(record.stderr_log);
+  if (stderrLog !== undefined) {
+    result.stderr_log = stderrLog;
+  }
+  const exitCode = asNullableNumber(record.exit_code);
+  if (exitCode !== undefined) {
+    result.exit_code = exitCode;
+  }
+  const envKeys = asStringArray(record.env_keys);
+  if (envKeys !== undefined) {
+    result.env_keys = envKeys;
+  }
+  const runId = asNullableString(record.run_id);
+  if (runId !== undefined) {
+    result.run_id = runId;
+  }
+  const launcherPid = asNullableNumber(record.launcher_pid);
+  if (launcherPid !== undefined) {
+    result.launcher_pid = launcherPid;
+  }
+  const adopted = asBoolean(record.adopted);
+  if (adopted !== undefined) {
+    result.adopted = adopted;
+  }
+  const backend = asString(record.backend);
+  if (backend !== undefined) {
+    result.backend = backend;
+  }
+  const usesPty = asBoolean(record.uses_pty);
+  if (usesPty !== undefined) {
+    result.uses_pty = usesPty;
+  }
+  const usesPipes = asBoolean(record.uses_pipes);
+  if (usesPipes !== undefined) {
+    result.uses_pipes = usesPipes;
+  }
+  const usesDtach = asBoolean(record.uses_dtach);
+  if (usesDtach !== undefined) {
+    result.uses_dtach = usesDtach;
+  }
+  const ptyMode = asString(record.pty_mode);
+  if (ptyMode !== undefined) {
+    result.pty_mode = ptyMode;
+  }
+  const runtimeId = asNullableString(record.runtime_id);
+  if (runtimeId !== undefined) {
+    result.runtime_id = runtimeId;
+  }
+  const appId = asNullableString(record.app_id);
+  if (appId !== undefined) {
+    result.app_id = appId;
+  }
+  const parentShellId = asNullableString(record.parent_shell_id);
+  if (parentShellId !== undefined) {
+    result.parent_shell_id = parentShellId;
+  }
+  const isAppWorker = asBoolean(record.is_app_worker);
+  if (isAppWorker !== undefined) {
+    result.is_app_worker = isAppWorker;
+  }
+  const stats = coerceDashboardShellStats(record.stats);
+  if (stats !== undefined) {
+    result.stats = stats;
+  }
+  const capabilities = coerceDashboardShellCapabilities(record.capabilities);
+  if (capabilities !== undefined) {
+    result.capabilities = capabilities;
+  }
+  const pipeRuntime = coerceDashboardPipeRuntime(record.pipe_runtime);
+  if (pipeRuntime !== undefined) {
+    result.pipe_runtime = pipeRuntime;
+  }
+  return result;
+}
+
+function coerceDashboardProcessPayload(value: unknown): DashboardProcessPayload | null {
+  const record = asObjectRecord(value);
+  if (!record) {
+    return null;
+  }
+  const result: DashboardProcessPayload = {};
+  const pid = asNumber(record.pid);
+  if (pid !== undefined) {
+    result.pid = pid;
+  }
+  const parentPid = asNullableNumber(record.parent_pid);
+  if (parentPid !== undefined) {
+    result.parent_pid = parentPid;
+  }
+  const type = asString(record.type);
+  if (type !== undefined) {
+    result.type = type;
+  }
+  const label = asNullableString(record.label);
+  if (label !== undefined) {
+    result.label = label;
+  }
+  const shellId = asNullableString(record.shell_id);
+  if (shellId !== undefined) {
+    result.shell_id = shellId;
+  }
+  const metadata = asObjectRecord(record.metadata);
+  if (metadata !== undefined) {
+    result.metadata = metadata;
+  }
+  return result;
+}
+
+function coerceDashboardStatePayload(value: unknown): DashboardStatePayload | null {
+  const record = asObjectRecord(value);
+  if (!record || !Array.isArray(record.shells) || !Array.isArray(record.processes)) {
+    return null;
+  }
+  const shells: DashboardShellPayload[] = [];
+  for (const shell of record.shells) {
+    const parsed = coerceDashboardShellPayload(shell);
+    if (parsed) {
+      shells.push(parsed);
+    }
+  }
+  const processes: DashboardProcessPayload[] = [];
+  for (const process of record.processes) {
+    const parsed = coerceDashboardProcessPayload(process);
+    if (parsed) {
+      processes.push(parsed);
+    }
+  }
+  return { shells, processes };
 }
 
 function parseJsonRpcObject(raw: string): Record<string, unknown> | null {
@@ -207,6 +610,14 @@ export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage
   if (typeof parsed.id === 'string' && isRecord(parsed.result)) {
     const result = parsed.result;
     if (result.accepted === true) {
+      const state = coerceDashboardStatePayload(result.state);
+      if (state) {
+        return {
+          jsonrpc: '2.0',
+          id: parsed.id,
+          result: { accepted: true, state },
+        };
+      }
       if (typeof result.shell_id === 'string') {
         return {
           jsonrpc: '2.0',
@@ -214,13 +625,17 @@ export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage
           result: { accepted: true, shell_id: result.shell_id },
         };
       }
-      return {
-        jsonrpc: '2.0',
-        id: parsed.id,
-        result: { accepted: true },
-      };
+      return null;
     }
     if (result.ok === true) {
+      const state = coerceDashboardStatePayload(result.state);
+      if (state) {
+        return {
+          jsonrpc: '2.0',
+          id: parsed.id,
+          result: { ok: true, state },
+        };
+      }
       return {
         jsonrpc: '2.0',
         id: parsed.id,
@@ -263,12 +678,26 @@ export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage
   }
 
   switch (parsed.method) {
-    case 'fws.dashboard.snapshot':
-      if (typeof parsed.params.html === 'string') {
+    case 'fws.shell.created':
+    case 'fws.shell.spawned':
+    case 'fws.shell.updated':
+    case 'fws.shell.exited': {
+      const shell = coerceDashboardShellPayload(parsed.params.shell);
+      if (!shell) {
+        return null;
+      }
+      return {
+        jsonrpc: '2.0',
+        method: parsed.method,
+        params: { shell },
+      };
+    }
+    case 'fws.shell.removed':
+      if (typeof parsed.params.shell_id === 'string') {
         return {
           jsonrpc: '2.0',
           method: parsed.method,
-          params: { html: parsed.params.html },
+          params: { shell_id: parsed.params.shell_id },
         };
       }
       return null;

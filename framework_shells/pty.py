@@ -30,10 +30,14 @@ class PipeState:
     shell_id: str | None = None
     stdout_subscribers: list[AsyncQueue[str]] = field(default_factory=list)
     stdout_subscribers_bytes: list[AsyncQueue[bytes]] = field(default_factory=list)
+    stderr_subscribers: list[AsyncQueue[str]] = field(default_factory=list)
+    stderr_subscribers_bytes: list[AsyncQueue[bytes]] = field(default_factory=list)
     native_initial_chunks: list[bytes] = field(default_factory=list)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     stdout_reader: asyncio.Task[None] | None = None
+    stderr_reader: asyncio.Task[None] | None = None
     waiter: asyncio.Task[None] | None = None
     native_engine: str | None = None
     native_phase: str | None = None
     native_pump: object | None = None
+    stdin_supported: bool = True

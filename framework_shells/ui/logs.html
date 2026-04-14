@@ -267,36 +267,44 @@
       ws.onopen = () => {
         status.textContent = "Connected";
         status.classList.remove("disconnected");
+        ws.send(JSON.stringify({
+          jsonrpc: "2.0",
+          method: "fws.logs.connect",
+          params: { shell_id: shellId },
+        }));
       };
 
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
+          if (!msg || msg.jsonrpc !== "2.0" || typeof msg.method !== "string" || !msg.params || typeof msg.params !== "object") {
+            return;
+          }
 
-          if (msg.type === "initial") {
-            rawLog.stdout = msg.stdout || "";
-            rawLog.stderr = msg.stderr || "";
+          if (msg.method === "fws.logs.initial") {
+            rawLog.stdout = msg.params.stdout || "";
+            rawLog.stderr = msg.params.stderr || "";
             renderStream("stdout");
             renderStream("stderr");
-          } else if (msg.type === "reset") {
-            if (msg.stream === "stdout") {
+          } else if (msg.method === "fws.logs.reset") {
+            if (msg.params.stream === "stdout") {
               rawLog.stdout = "";
               renderStream("stdout");
-            } else if (msg.stream === "stderr") {
+            } else if (msg.params.stream === "stderr") {
               rawLog.stderr = "";
               renderStream("stderr");
             }
-          } else if (msg.type === "update") {
-            if (msg.stream === "stdout") {
-              rawLog.stdout += msg.data || "";
+          } else if (msg.method === "fws.logs.chunk") {
+            if (msg.params.stream === "stdout") {
+              rawLog.stdout += msg.params.chunk || "";
               renderStream("stdout");
-            } else if (msg.stream === "stderr") {
-              rawLog.stderr += msg.data || "";
+            } else if (msg.params.stream === "stderr") {
+              rawLog.stderr += msg.params.chunk || "";
               renderStream("stderr");
             }
-          } else if (msg.type === "error") {
-            stdoutContainer.textContent = msg.message;
-            stderrContainer.textContent = msg.message;
+          } else if (msg.method === "fws.error") {
+            stdoutContainer.textContent = msg.params.message || "Error";
+            stderrContainer.textContent = msg.params.message || "Error";
           }
         } catch (err) {
           // ignore

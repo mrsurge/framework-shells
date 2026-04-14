@@ -322,6 +322,9 @@ When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboa
 - `GET /fws/` dashboard (live-updating via `WS /ws/fws`)
 - shell logs open in a full-page in-dashboard drawer backed by `WS /ws/fws/logs/{shell_id}`
 - `GET /fws/logs/{shell_id}` redirects into the dashboard drawer for compatibility
+- both websocket surfaces now use JSON-RPC notifications rather than ad-hoc `{type: ...}` payloads
+  - client connect notifications: `fws.dashboard.connect`, `fws.logs.connect`
+  - server notifications: `fws.dashboard.snapshot`, `fws.logs.initial`, `fws.logs.chunk`, `fws.logs.reset`, `fws.error`
 
 The dashboard toolbar includes **Truncate Logs**, which truncates all `.stdout.log`/`.stderr.log` files in the current runtime (it does not delete shell records). Exited shells can be fully removed via **Purge Exited** in the Exited section (deletes metadata + logs), and automatic exited-shell retention keeps only the newest 50 exited shell records.
 

@@ -1,0 +1,13 @@
+{
+  "name": "framework-shells-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:ui": "node scripts/build_ui.mjs",
+    "typecheck:ui": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.3",
+    "typescript": "^5.8.3"
+  }
+}

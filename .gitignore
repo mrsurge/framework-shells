@@ -9,5 +9,6 @@ venv/
 *.egg-info/
 dist/
 build/
+node_modules/
 native/*/target/
 ANNOUNCEMENT_DRAFT.md

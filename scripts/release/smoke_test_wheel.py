@@ -19,6 +19,14 @@ from tempfile import TemporaryDirectory
 from framework_shells.manager import FrameworkShellManager
 from framework_shells.native_pipe import native_extension_available, resolve_native_terminal_broker_command
 from framework_shells.orchestrator import Orchestrator
+from framework_shells.protocols.jsonrpc import dump_json_line
+from framework_shells.protocols.terminal_stream import (
+    TERMINAL_CLOSED_EVENT,
+    TERMINAL_DATA_EVENT,
+    TERMINAL_READY_EVENT,
+    build_terminal_connect_notification,
+    parse_terminal_server_event,
+)
 from framework_shells.store import RuntimeStore
 
 resolution = resolve_native_terminal_broker_command(["fallback"])
@@ -63,21 +71,26 @@ async def main() -> None:
         queue = await mgr.subscribe_output_bytes(record.id)
         await mgr.write_to_pipe(
             record.id,
-            json.dumps({"jsonrpc": "2.0", "method": "terminal.connect", "params": {}}) + "\n",
+            dump_json_line(build_terminal_connect_notification()),
         )
-        parts: list[str] = []
+        events: list[str] = []
         for _ in range(12):
             chunk = await asyncio.wait_for(queue.get(), timeout=5)
             if chunk is None:
                 break
             text = chunk.decode("utf-8", errors="replace")
-            parts.append(text)
-            if '"type":"closed"' in text.replace(" ", ""):
+            for line in text.splitlines():
+                event = parse_terminal_server_event(line)
+                if event is None:
+                    continue
+                events.append(event["type"])
+                if event["type"] == TERMINAL_CLOSED_EVENT:
+                    break
+            if events and events[-1] == TERMINAL_CLOSED_EVENT:
                 break
-        blob = "".join(parts)
-        assert '"type":"ready"' in blob, blob
-        assert '"type":"data"' in blob, blob
-        assert '"type":"closed"' in blob, blob
+        assert TERMINAL_READY_EVENT in events, events
+        assert TERMINAL_DATA_EVENT in events, events
+        assert TERMINAL_CLOSED_EVENT in events, events
 
 asyncio.run(main())
 """
@@ -92,6 +105,14 @@ from tempfile import TemporaryDirectory
 from framework_shells.manager import FrameworkShellManager
 from framework_shells.native_pipe import native_extension_available, resolve_native_terminal_broker_command
 from framework_shells.orchestrator import Orchestrator
+from framework_shells.protocols.jsonrpc import dump_json_line
+from framework_shells.protocols.terminal_stream import (
+    TERMINAL_CLOSED_EVENT,
+    TERMINAL_DATA_EVENT,
+    TERMINAL_READY_EVENT,
+    build_terminal_connect_notification,
+    parse_terminal_server_event,
+)
 from framework_shells.store import RuntimeStore
 
 resolution = resolve_native_terminal_broker_command(["fallback-broker"])
@@ -139,21 +160,26 @@ async def main() -> None:
         queue = await mgr.subscribe_output_bytes(record.id)
         await mgr.write_to_pipe(
             record.id,
-            json.dumps({"jsonrpc": "2.0", "method": "terminal.connect", "params": {}}) + "\n",
+            dump_json_line(build_terminal_connect_notification()),
         )
-        parts: list[str] = []
+        events: list[str] = []
         for _ in range(12):
             chunk = await asyncio.wait_for(queue.get(), timeout=5)
             if chunk is None:
                 break
             text = chunk.decode("utf-8", errors="replace")
-            parts.append(text)
-            if '"type":"closed"' in text.replace(" ", ""):
+            for line in text.splitlines():
+                event = parse_terminal_server_event(line)
+                if event is None:
+                    continue
+                events.append(event["type"])
+                if event["type"] == TERMINAL_CLOSED_EVENT:
+                    break
+            if events and events[-1] == TERMINAL_CLOSED_EVENT:
                 break
-        blob = "".join(parts)
-        assert '"type":"ready"' in blob, blob
-        assert '"type":"data"' in blob, blob
-        assert '"type":"closed"' in blob, blob
+        assert TERMINAL_READY_EVENT in events, events
+        assert TERMINAL_DATA_EVENT in events, events
+        assert TERMINAL_CLOSED_EVENT in events, events
 
 asyncio.run(main())
 """

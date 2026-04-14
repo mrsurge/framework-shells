@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import mimetypes
 import os
 import re
 import signal
-from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal, TypeGuard, TypedDict, cast
+from typing import Annotated, cast
 
 import aiofiles
 import fnmatch
@@ -20,6 +18,18 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from .. import get_manager
 from ..events import get_event_bus
 from ..process_snapshot import ProcessRecord
+from ..protocols.fws_ui import (
+    DASHBOARD_CONNECT_METHOD,
+    FwsServerNotification,
+    LOGS_CONNECT_METHOD,
+    build_dashboard_snapshot_notification,
+    build_error_notification,
+    build_logs_chunk_notification,
+    build_logs_initial_notification,
+    build_logs_reset_notification,
+    parse_dashboard_connect_notification,
+    parse_logs_connect_notification,
+)
 from ..shutdown import ShutdownPolicy, shutdown_snapshot
 
 
@@ -28,37 +38,10 @@ router = APIRouter()
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 ShellInfo = dict[str, object]
 StyleMap = dict[str, dict[str, str]]
-LogStreamName = Literal["stdout", "stderr"]
 
 
-class DashboardConnectParams(TypedDict):
-    view: Literal["html"]
-
-
-class LogsConnectParams(TypedDict):
-    shell_id: str
-
-
-class ErrorNotificationParams(TypedDict, total=False):
-    message: str
-    code: str
-    shell_id: str
-
-
-def _is_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
-    return isinstance(value, Mapping)
-
-
-def _jsonrpc_notification(method: str, params: Mapping[str, object]) -> dict[str, object]:
-    return {
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": dict(params),
-    }
-
-
-async def _send_ws_notification(websocket: WebSocket, method: str, params: Mapping[str, object]) -> None:
-    await websocket.send_json(_jsonrpc_notification(method, params))
+async def _send_ws_notification(websocket: WebSocket, notification: FwsServerNotification) -> None:
+    await websocket.send_json(notification)
 
 
 async def _send_ws_error(
@@ -68,61 +51,21 @@ async def _send_ws_error(
     code: str | None = None,
     shell_id: str | None = None,
 ) -> None:
-    params: ErrorNotificationParams = {"message": message}
-    if code is not None:
-        params["code"] = code
-    if shell_id is not None:
-        params["shell_id"] = shell_id
-    await _send_ws_notification(websocket, "fws.error", params)
+    await _send_ws_notification(
+        websocket,
+        build_error_notification(message, code=code, shell_id=shell_id),
+    )
 
 
-def _parse_jsonrpc_notification(raw: str) -> tuple[str, Mapping[str, object]] | None:
-    try:
-        payload_obj = cast(object, json.loads(raw))
-    except json.JSONDecodeError:
-        return None
-    if not _is_mapping(payload_obj):
-        return None
-    payload = payload_obj
-    if payload.get("jsonrpc") != "2.0":
-        return None
-    method = payload.get("method")
-    params = payload.get("params")
-    if not isinstance(method, str) or not _is_mapping(params):
-        return None
-    return method, params
-
-
-async def _receive_ws_notification(
+async def _receive_ws_text(
     websocket: WebSocket,
     *,
-    expected_method: str,
     timeout_seconds: float = 5.0,
-) -> Mapping[str, object] | None:
+) -> str | None:
     try:
-        raw = await asyncio.wait_for(websocket.receive_text(), timeout=timeout_seconds)
+        return await asyncio.wait_for(websocket.receive_text(), timeout=timeout_seconds)
     except Exception:
         return None
-    parsed = _parse_jsonrpc_notification(raw)
-    if parsed is None:
-        return None
-    method, params = parsed
-    if method != expected_method:
-        return None
-    return params
-
-
-def _parse_dashboard_connect_params(params: Mapping[str, object]) -> DashboardConnectParams | None:
-    if params.get("view") != "html":
-        return None
-    return {"view": "html"}
-
-
-def _parse_logs_connect_params(params: Mapping[str, object]) -> LogsConnectParams | None:
-    shell_id = params.get("shell_id")
-    if not isinstance(shell_id, str) or not shell_id.strip():
-        return None
-    return {"shell_id": shell_id}
 
 
 def _escape_html(value: object | None) -> str:
@@ -828,9 +771,10 @@ async def fws_shutdown(scope: Annotated[str, Form()] = "tree") -> RedirectRespon
 @router.websocket("/ws/fws")
 async def fws_ws(websocket: WebSocket):
     await websocket.accept()
-    connect_params = await _receive_ws_notification(websocket, expected_method="fws.dashboard.connect")
-    if connect_params is None or _parse_dashboard_connect_params(connect_params) is None:
-        await _send_ws_error(websocket, "Expected fws.dashboard.connect notification", code="invalid_connect")
+    connect_raw = await _receive_ws_text(websocket)
+    connect_notification = parse_dashboard_connect_notification(connect_raw) if connect_raw is not None else None
+    if connect_notification is None:
+        await _send_ws_error(websocket, f"Expected {DASHBOARD_CONNECT_METHOD} notification", code="invalid_connect")
         try:
             await websocket.close()
         except Exception:
@@ -842,7 +786,7 @@ async def fws_ws(websocket: WebSocket):
 
     async def send_snapshot() -> None:
         html = await _render_dashboard_html()
-        await _send_ws_notification(websocket, "fws.dashboard.snapshot", {"html": html})
+        await _send_ws_notification(websocket, build_dashboard_snapshot_notification(html))
 
     try:
         await send_snapshot()
@@ -875,12 +819,12 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
         except Exception:
             pass
 
-    connect_params = await _receive_ws_notification(websocket, expected_method="fws.logs.connect")
-    parsed_connect = _parse_logs_connect_params(connect_params) if connect_params is not None else None
-    if parsed_connect is None or parsed_connect["shell_id"] != shell_id:
+    connect_raw = await _receive_ws_text(websocket)
+    connect_notification = parse_logs_connect_notification(connect_raw) if connect_raw is not None else None
+    if connect_notification is None or connect_notification["params"]["shell_id"] != shell_id:
         await _send_ws_error(
             websocket,
-            f"Expected fws.logs.connect notification for {shell_id}",
+            f"Expected {LOGS_CONNECT_METHOD} notification for {shell_id}",
             code="invalid_connect",
             shell_id=shell_id,
         )
@@ -921,12 +865,11 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
 
         await _send_ws_notification(
             websocket,
-            "fws.logs.initial",
-            {
-                "shell_id": shell_id,
-                "stdout": "\n".join(stdout_lines[-2000:]),
-                "stderr": "\n".join(stderr_lines[-2000:]),
-            },
+            build_logs_initial_notification(
+                shell_id,
+                "\n".join(stdout_lines[-2000:]),
+                "\n".join(stderr_lines[-2000:]),
+            ),
         )
 
         stdout_size = stdout_path.stat().st_size if stdout_path.exists() else 0
@@ -941,26 +884,11 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
                     async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
                         _ = await f.seek(stdout_size)
                         new = await f.read()
-                    await _send_ws_notification(
-                        websocket,
-                        "fws.logs.chunk",
-                        {
-                            "shell_id": shell_id,
-                            "stream": "stdout",
-                            "chunk": new,
-                        },
-                    )
+                    await _send_ws_notification(websocket, build_logs_chunk_notification(shell_id, "stdout", new))
                     stdout_size = current
                 elif current < stdout_size:
                     stdout_size = 0
-                    await _send_ws_notification(
-                        websocket,
-                        "fws.logs.reset",
-                        {
-                            "shell_id": shell_id,
-                            "stream": "stdout",
-                        },
-                    )
+                    await _send_ws_notification(websocket, build_logs_reset_notification(shell_id, "stdout"))
 
             if stderr_path.exists():
                 current = stderr_path.stat().st_size
@@ -968,26 +896,11 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
                     async with aiofiles.open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
                         _ = await f.seek(stderr_size)
                         new = await f.read()
-                    await _send_ws_notification(
-                        websocket,
-                        "fws.logs.chunk",
-                        {
-                            "shell_id": shell_id,
-                            "stream": "stderr",
-                            "chunk": new,
-                        },
-                    )
+                    await _send_ws_notification(websocket, build_logs_chunk_notification(shell_id, "stderr", new))
                     stderr_size = current
                 elif current < stderr_size:
                     stderr_size = 0
-                    await _send_ws_notification(
-                        websocket,
-                        "fws.logs.reset",
-                        {
-                            "shell_id": shell_id,
-                            "stream": "stderr",
-                        },
-                    )
+                    await _send_ws_notification(websocket, build_logs_reset_notification(shell_id, "stderr"))
 
     except Exception:
         pass

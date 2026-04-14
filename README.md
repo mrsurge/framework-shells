@@ -325,6 +325,9 @@ When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboa
 - both websocket surfaces now use JSON-RPC notifications rather than ad-hoc `{type: ...}` payloads
   - client connect notifications: `fws.dashboard.connect`, `fws.logs.connect`
   - server notifications: `fws.dashboard.snapshot`, `fws.logs.initial`, `fws.logs.chunk`, `fws.logs.reset`, `fws.error`
+- the typed protocol contract for those websocket notifications now lives in:
+  - `framework_shells.protocols.fws_ui` on the Python/backend side
+  - `framework_shells/ui/src/protocol.ts` on the TypeScript/frontend side
 
 The dashboard toolbar includes **Truncate Logs**, which truncates all `.stdout.log`/`.stderr.log` files in the current runtime (it does not delete shell records). Exited shells can be fully removed via **Purge Exited** in the Exited section (deletes metadata + logs), and automatic exited-shell retention keeps only the newest 50 exited shell records.
 
@@ -402,6 +405,8 @@ Notes:
 - The terminal stream contract stays asymmetric:
   - stdin uses JSON-RPC notifications
   - stdout uses framed JSONL records
+- The typed Python broker contract for that stream now lives in `framework_shells.protocols.terminal_stream`.
+- The matching TypeScript terminal-stream contract now lives in `framework_shells/ui/src/terminal_protocol.ts`.
 - If no `command` is provided, FWS injects an internal placeholder and resolves either the native broker or the configured fallback automatically.
 - Set `pipe.terminal_fallback: command` if you want the shellspec `command` to be the fallback broker path.
 - Set `pipe.terminal_fallback: error` (or `native_only`) if you want launch to fail when the native broker is unavailable.

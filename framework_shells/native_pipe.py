@@ -68,6 +68,18 @@ class NativePipePumpHandle(Protocol):
         ...
 
 
+class NativePipePumpFactory(Protocol):
+    def __call__(
+        self,
+        stdout_fd: int,
+        log_path: str,
+        read_chunk_bytes: int,
+        log_flush_bytes: int,
+        log_flush_interval_ms: int,
+    ) -> NativePipePumpHandle:
+        ...
+
+
 @dataclass(frozen=True)
 class NativeTerminalBrokerResolution:
     command: list[str]
@@ -155,17 +167,16 @@ def create_native_pipe_pump(
     module = _NATIVE_MODULE
     if module is None:
         return None
-    pump_cls = getattr(module, "NativePipePump", None)
+    pump_cls = cast(NativePipePumpFactory | None, getattr(module, "NativePipePump", None))
     if pump_cls is None:
         return None
-    handle = pump_cls(
-        int(stdout_fd),
-        str(log_path),
-        int(read_chunk_bytes),
-        int(log_flush_bytes),
-        int(log_flush_interval_ms),
+    return pump_cls(
+        stdout_fd=int(stdout_fd),
+        log_path=str(log_path),
+        read_chunk_bytes=int(read_chunk_bytes),
+        log_flush_bytes=int(log_flush_bytes),
+        log_flush_interval_ms=int(log_flush_interval_ms),
     )
-    return cast(NativePipePumpHandle, handle)
 
 
 def _candidate_terminal_broker_paths() -> list[Path]:

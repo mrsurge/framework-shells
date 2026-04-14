@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import errno
 import fcntl
 import json
@@ -15,8 +14,32 @@ import sys
 import termios
 import threading
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Literal, TypeGuard, TypedDict, cast
+
+from .protocols.jsonrpc import dump_json_line
+from .protocols.terminal_stream import (
+    JsonValue,
+    TERMINAL_CONNECT_METHOD,
+    TERMINAL_DESTROY_METHOD,
+    TERMINAL_INPUT_METHOD,
+    TERMINAL_PING_METHOD,
+    TERMINAL_RESIZE_METHOD,
+    TerminalClientNotification,
+    TerminalConnectNotification,
+    TerminalDestroyNotification,
+    TerminalInputNotification,
+    TerminalPingNotification,
+    TerminalResizeNotification,
+    TerminalServerEventFrame,
+    build_terminal_closed_event,
+    build_terminal_data_event,
+    build_terminal_pong_event,
+    build_terminal_ready_event,
+    decode_terminal_input_bytes,
+    parse_terminal_client_notification,
+)
 
 DEFAULT_COLS = 80
 DEFAULT_ROWS = 24
@@ -32,6 +55,18 @@ class BrokerConfig:
     cols: int
     rows: int
     term: str
+
+
+class StdinClosedCommand(TypedDict):
+    type: Literal["stdin_closed"]
+
+
+class SignalCommand(TypedDict):
+    type: Literal["signal"]
+    signal: int
+
+
+BrokerCommand = TerminalClientNotification | StdinClosedCommand | SignalCommand
 
 
 def log_error(message: str, error: BaseException | None = None) -> None:
@@ -59,8 +94,9 @@ def resolve_shell_command() -> list[str]:
     env_json = os.environ.get("TERMINAL_STREAM_SHELL_CMD_JSON", "").strip()
     if env_json:
         try:
-            parsed = json.loads(env_json)
-            if isinstance(parsed, list):
+            parsed_obj = cast(object, json.loads(env_json))
+            if isinstance(parsed_obj, list):
+                parsed = cast(list[object], parsed_obj)
                 resolved = [str(part) for part in parsed if str(part).strip()]
                 if resolved:
                     return resolved
@@ -91,81 +127,35 @@ def load_config() -> BrokerConfig:
     )
 
 
-def write_json_line(frame: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+def write_json_line(frame: TerminalServerEventFrame) -> None:
+    _ = sys.stdout.write(dump_json_line(cast(Mapping[str, object], frame)))
+    _ = sys.stdout.flush()
 
 
 def emit_ready(child_pid: int, shell_cmd: list[str], cwd: str) -> None:
-    write_json_line(
-        {
-            "type": "ready",
-            "ts": now_ms(),
-            "pid": child_pid,
-            "shell": shell_cmd,
-            "cwd": cwd,
-        }
-    )
+    write_json_line(build_terminal_ready_event(ts=now_ms(), pid=child_pid, shell=shell_cmd, cwd=cwd))
 
 
 def emit_data(seq: int, payload: bytes) -> None:
-    write_json_line(
-        {
-            "type": "data",
-            "seq": seq,
-            "ts": now_ms(),
-            "data_b64": base64.b64encode(payload).decode("ascii"),
-        }
-    )
+    write_json_line(build_terminal_data_event(seq=seq, ts=now_ms(), payload=payload))
 
 
-def emit_pong(nonce: Any) -> None:
-    write_json_line(
-        {
-            "type": "pong",
-            "nonce": nonce,
-        }
-    )
+def emit_pong(nonce: JsonValue | None) -> None:
+    write_json_line(build_terminal_pong_event(nonce))
 
 
 def emit_closed(seq: int, exit_code: int | None, reason: str) -> None:
-    write_json_line(
-        {
-            "type": "closed",
-            "seq": seq,
-            "ts": now_ms(),
-            "exit_code": exit_code,
-            "reason": reason,
-        }
-    )
+    write_json_line(build_terminal_closed_event(seq=seq, ts=now_ms(), exit_code=exit_code, reason=reason))
 
 
-def parse_notification(line: str) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(line)
-    except Exception as error:
-        log_error("bad JSON command", error)
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-    if str(payload.get("jsonrpc") or "") != "2.0":
-        log_error("unexpected stdin payload without jsonrpc envelope")
-        return None
-
-    method = str(payload.get("method") or "")
-    if not method:
-        log_error("stdin payload missing method")
-        return None
-
-    params = payload.get("params")
-    return {
-        "method": method,
-        "params": params if isinstance(params, dict) else {},
-    }
+def parse_notification(line: str) -> TerminalClientNotification | None:
+    notification = parse_terminal_client_notification(line)
+    if notification is None:
+        log_error("bad JSON-RPC terminal notification")
+    return notification
 
 
-def spawn_stdin_reader(command_queue: queue.Queue[dict[str, Any]]) -> None:
+def spawn_stdin_reader(command_queue: queue.Queue[BrokerCommand]) -> None:
     def _reader() -> None:
         for line in sys.stdin:
             if not line.strip():
@@ -210,12 +200,58 @@ def write_all_fd(fd: int, payload: bytes) -> None:
         view = view[written:]
 
 
-def _spawn_preexec(slave_fd: int) -> Any:
+def _spawn_preexec(slave_fd: int) -> Callable[[], None]:
     def _preexec() -> None:
         os.setsid()
         _ = fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
 
     return _preexec
+
+
+def _is_stdin_closed_command(command: BrokerCommand) -> TypeGuard[StdinClosedCommand]:
+    return command.get("type") == "stdin_closed"
+
+
+def _is_signal_command(command: BrokerCommand) -> TypeGuard[SignalCommand]:
+    return command.get("type") == "signal"
+
+
+def _is_terminal_client_notification(command: BrokerCommand) -> TypeGuard[TerminalClientNotification]:
+    return "method" in command and "params" in command
+
+
+def _is_terminal_connect_notification(
+    notification: TerminalClientNotification,
+) -> TypeGuard[TerminalConnectNotification]:
+    return notification["method"] == TERMINAL_CONNECT_METHOD
+
+
+def _is_terminal_input_notification(
+    notification: TerminalClientNotification,
+) -> TypeGuard[TerminalInputNotification]:
+    return notification["method"] == TERMINAL_INPUT_METHOD
+
+
+def _is_terminal_resize_notification(
+    notification: TerminalClientNotification,
+) -> TypeGuard[TerminalResizeNotification]:
+    return notification["method"] == TERMINAL_RESIZE_METHOD
+
+
+def _is_terminal_destroy_notification(
+    notification: TerminalClientNotification,
+) -> TypeGuard[TerminalDestroyNotification]:
+    return notification["method"] == TERMINAL_DESTROY_METHOD
+
+
+def _is_terminal_ping_notification(
+    notification: TerminalClientNotification,
+) -> TypeGuard[TerminalPingNotification]:
+    return notification["method"] == TERMINAL_PING_METHOD
+
+
+def _enqueue_signal(command_queue: queue.Queue[BrokerCommand], signum: int) -> None:
+    command_queue.put({"type": "signal", "signal": signum})
 
 
 def spawn_pty_child(config: BrokerConfig) -> tuple[subprocess.Popen[bytes], int]:
@@ -258,7 +294,7 @@ def signal_child(child: subprocess.Popen[bytes]) -> None:
 
 
 def drain_commands(
-    command_queue: queue.Queue[dict[str, Any]],
+    command_queue: queue.Queue[BrokerCommand],
     *,
     child: subprocess.Popen[bytes],
     master_fd: int,
@@ -271,68 +307,62 @@ def drain_commands(
         except queue.Empty:
             return shutting_down, emitted_output
 
-        item_type = str(item.get("type") or "")
-        if item_type == "stdin_closed":
+        if _is_stdin_closed_command(item):
             shutting_down = True
             signal_child(child)
             continue
-        if item_type == "signal":
+        if _is_signal_command(item):
             shutting_down = True
             signal_child(child)
             continue
 
-        method = str(item.get("method") or "")
-        params = item.get("params")
-        params_map = params if isinstance(params, dict) else {}
+        if not _is_terminal_client_notification(item):
+            log_error("unexpected broker control command")
+            continue
 
-        if method == "terminal.connect":
-            cols_value = params_map.get("cols")
-            rows_value = params_map.get("rows")
+        notification = item
+
+        if _is_terminal_connect_notification(notification):
+            cols_value = notification["params"].get("cols")
+            rows_value = notification["params"].get("rows")
             if cols_value is not None and rows_value is not None:
                 try:
-                    apply_resize(
-                        master_fd,
-                        parse_positive_int(cols_value, DEFAULT_COLS),
-                        parse_positive_int(rows_value, DEFAULT_ROWS),
-                    )
+                    apply_resize(master_fd, cols_value, rows_value)
                 except Exception as error:
                     log_error("connect resize failed", error)
             continue
 
-        if method == "terminal.input":
-            data_b64 = params_map.get("data_b64")
-            if not isinstance(data_b64, str) or not data_b64:
-                continue
+        if _is_terminal_input_notification(notification):
             try:
-                payload = base64.b64decode(data_b64)
+                payload = decode_terminal_input_bytes(notification["params"]["data_b64"])
                 if payload:
                     write_all_fd(master_fd, payload)
             except Exception as error:
                 log_error("failed to decode input frame", error)
             continue
 
-        if method == "terminal.resize":
+        if _is_terminal_resize_notification(notification):
             try:
                 apply_resize(
                     master_fd,
-                    parse_positive_int(params_map.get("cols"), DEFAULT_COLS),
-                    parse_positive_int(params_map.get("rows"), DEFAULT_ROWS),
+                    notification["params"]["cols"],
+                    notification["params"]["rows"],
                 )
             except Exception as error:
                 log_error("resize failed", error)
             continue
 
-        if method == "terminal.destroy":
+        if _is_terminal_destroy_notification(notification):
             shutting_down = True
             signal_child(child)
             continue
 
-        if method == "terminal.ping":
-            emit_pong(params_map.get("nonce"))
+        if _is_terminal_ping_notification(notification):
+            emit_pong(notification["params"].get("nonce"))
             emitted_output = True
             continue
 
-        log_error(f"unsupported JSON-RPC method: {method}")
+        log_error(f"unsupported JSON-RPC method: {notification['method']}")
 
 
 def closed_reason(returncode: int, shutting_down: bool) -> tuple[int | None, str]:
@@ -349,17 +379,12 @@ def main() -> int:
         log_error("empty shell command")
         return 1
 
-    command_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+    command_queue: queue.Queue[BrokerCommand] = queue.Queue()
     spawn_stdin_reader(command_queue)
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(
+        _ = signal.signal(
             sig,
-            lambda signum, _frame, q=command_queue: q.put(
-                {
-                    "type": "signal",
-                    "signal": signum,
-                }
-            ),
+            lambda signum, _frame, q=command_queue: _enqueue_signal(q, signum),
         )
 
     try:

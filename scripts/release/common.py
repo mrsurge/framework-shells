@@ -22,6 +22,7 @@ _SUGGESTED_PLAT_NAMES: dict[str, str] = {
     "x86_64-apple-darwin": "macosx_10_9_x86_64",
     "aarch64-apple-darwin": "macosx_11_0_arm64",
 }
+DEFAULT_NATIVE_WHEEL_TARGETS: tuple[str, ...] = tuple(_SUGGESTED_PLAT_NAMES.keys())
 
 
 def log(message: str) -> None:

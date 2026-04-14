@@ -26,6 +26,22 @@ FRAMEWORK_SHELLS_INSTALL_MODE=python-only \
   pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
 ```
 
+Release build examples:
+
+```bash
+# Host artifacts only
+python scripts/release/build_all.py
+
+# Supported Unix-family native wheel matrix
+python scripts/release/build_all.py --matrix default --skip-smoke
+
+# Explicit target subset
+python scripts/release/build_all.py \
+  --native-target x86_64-unknown-linux-gnu \
+  --native-target aarch64-linux-android \
+  --skip-smoke
+```
+
 ## Dependencies
 
 - Python 3.9+

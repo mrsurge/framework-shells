@@ -121,7 +121,7 @@ def normalize_terminal_fallback(value: object) -> str:
 
 
 def _load_native_module() -> ModuleType | None:
-    for module_name in ("fws_pipe_pump",):
+    for module_name in ("framework_shells.fws_pipe_pump", "fws_pipe_pump"):
         try:
             return import_module(module_name)
         except Exception:

@@ -19,12 +19,20 @@ BROKER_SOURCE_MANIFEST = ROOT / "native" / "fws_terminal_stream_broker" / "Cargo
 BROKER_SOURCE_BINARY = ROOT / "native" / "fws_terminal_stream_broker" / "target" / "release" / "fws-terminal-stream-broker"
 INSTALL_MODE_ENV = "FRAMEWORK_SHELLS_INSTALL_MODE"
 INSTALL_MODE_ALIAS_ENV = "FWS_INSTALL_MODE"
+PIPE_PUMP_MODE_ENV = "FRAMEWORK_SHELLS_PIPE_PUMP_MODE"
+PIPE_PUMP_MODE_ALIAS_ENV = "FWS_PIPE_PUMP_MODE"
 PYTHON_ONLY_ENV = "FRAMEWORK_SHELLS_PYTHON_ONLY"
 BUILD_NATIVE_ENV = "FRAMEWORK_SHELLS_BUILD_NATIVE"
+PIPE_PUMP_MODULE_NAME = "fws_pipe_pump"
+PIPE_PUMP_PACKAGE_PATH = Path("framework_shells") / f"{PIPE_PUMP_MODULE_NAME}.so"
+PIPE_PUMP_SOURCE_MANIFEST = ROOT / "native" / "fws_pipe_pump" / "Cargo.toml"
 
 _prepared_native_broker = False
 _staged_native_broker = False
 _native_broker_preexisted = False
+_prepared_pipe_pump = False
+_staged_pipe_pump = False
+_pipe_pump_preexisted = False
 
 
 def _has_bundled_native_broker() -> bool:
@@ -75,6 +83,10 @@ def _normalize_wheel_tag(value: str) -> str:
     return value.strip().replace("-", "_").replace(".", "_")
 
 
+def _normalize_mode(raw: str) -> str:
+    return raw.replace("_", "-")
+
+
 def _build_and_stage_native_broker() -> None:
     global _staged_native_broker
     global _native_broker_preexisted
@@ -121,6 +133,77 @@ def _prepare_native_broker() -> None:
     _build_and_stage_native_broker()
 
 
+def _pipe_pump_mode() -> str:
+    raw = (os.environ.get(PIPE_PUMP_MODE_ENV) or os.environ.get(PIPE_PUMP_MODE_ALIAS_ENV) or "").strip().lower()
+    if not raw:
+        return _install_mode()
+    normalized = _normalize_mode(raw)
+    if normalized in {"auto", "build", "native", "force", "required", "python", "python-only", "no-build", "skip"}:
+        return normalized
+    raise RuntimeError(
+        f"Unsupported {PIPE_PUMP_MODE_ENV}={raw!r}. "
+        "Use one of: auto, build, python-only."
+    )
+
+
+def _pipe_pump_artifact_candidates() -> list[Path]:
+    build_dir = ROOT / "native" / "fws_pipe_pump" / "target" / "release"
+    return [
+        build_dir / f"lib{PIPE_PUMP_MODULE_NAME}.so",
+        build_dir / f"lib{PIPE_PUMP_MODULE_NAME}.dylib",
+        build_dir / f"{PIPE_PUMP_MODULE_NAME}.dll",
+        build_dir / f"{PIPE_PUMP_MODULE_NAME}.so",
+    ]
+
+
+def _build_and_stage_pipe_pump() -> None:
+    global _staged_pipe_pump
+    global _pipe_pump_preexisted
+
+    destination = ROOT / PIPE_PUMP_PACKAGE_PATH
+    if destination.is_file():
+        _pipe_pump_preexisted = True
+        return
+
+    mode = _pipe_pump_mode()
+    if _skips_native_build(mode):
+        _log(f"skipping native pipe pump build ({PIPE_PUMP_MODE_ENV}={mode})")
+        return
+    if not PIPE_PUMP_SOURCE_MANIFEST.is_file():
+        if _requires_native_build(mode):
+            raise FileNotFoundError(f"Missing pipe pump Cargo manifest: {PIPE_PUMP_SOURCE_MANIFEST}")
+        _log("native pipe pump source is unavailable; continuing with a pure-Python wheel")
+        return
+
+    try:
+        subprocess.run(
+            ["cargo", "build", "--manifest-path", str(PIPE_PUMP_SOURCE_MANIFEST), "--release"],
+            cwd=str(ROOT),
+            check=True,
+            text=True,
+        )
+        artifact = next((path for path in _pipe_pump_artifact_candidates() if path.is_file()), None)
+        if artifact is None:
+            raise FileNotFoundError("Built pipe pump artifact not found")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(artifact, destination)
+        _ensure_executable(destination)
+        _staged_pipe_pump = True
+        _log(f"bundled native pipe pump from source build: {destination}")
+    except Exception as exc:
+        if _requires_native_build(mode):
+            raise RuntimeError(f"Failed to build native pipe pump: {exc}") from exc
+        _log(f"native pipe pump build failed; continuing with a pure-Python wheel: {exc}")
+
+
+def _prepare_pipe_pump() -> None:
+    global _prepared_pipe_pump
+    if _prepared_pipe_pump:
+        return
+    _prepared_pipe_pump = True
+    _build_and_stage_pipe_pump()
+
+
 def _cleanup_staged_native_broker() -> None:
     if not _staged_native_broker or _native_broker_preexisted:
         return
@@ -134,6 +217,21 @@ def _cleanup_staged_native_broker() -> None:
         pass
 
 
+def _cleanup_staged_pipe_pump() -> None:
+    if not _staged_pipe_pump or _pipe_pump_preexisted:
+        return
+    destination = ROOT / PIPE_PUMP_PACKAGE_PATH
+    try:
+        if destination.exists():
+            destination.unlink()
+    except Exception:
+        pass
+
+
+def _has_bundled_pipe_pump() -> bool:
+    return (ROOT / PIPE_PUMP_PACKAGE_PATH).is_file()
+
+
 cmdclass: dict[str, type[object]] = {}
 
 
@@ -142,24 +240,33 @@ if _bdist_wheel is not None:
     class bdist_wheel(_bdist_wheel):
         def finalize_options(self) -> None:
             _prepare_native_broker()
+            _prepare_pipe_pump()
             super().finalize_options()
             if _has_bundled_native_broker():
+                self.root_is_pure = False
+                if self.plat_name:
+                    self.plat_name = _normalize_wheel_tag(str(self.plat_name))
+            elif _has_bundled_pipe_pump():
                 self.root_is_pure = False
                 if self.plat_name:
                     self.plat_name = _normalize_wheel_tag(str(self.plat_name))
 
         def run(self) -> None:
             _prepare_native_broker()
+            _prepare_pipe_pump()
             try:
                 super().run()
             finally:
                 _cleanup_staged_native_broker()
+                _cleanup_staged_pipe_pump()
 
         def get_tag(self) -> tuple[str, str, str]:
             python_tag, abi_tag, plat_tag = super().get_tag()
-            if not _has_bundled_native_broker():
+            if not _has_bundled_native_broker() and not _has_bundled_pipe_pump():
                 return python_tag, abi_tag, plat_tag
             resolved_plat = _normalize_wheel_tag(str(self.plat_name or plat_tag))
+            if _has_bundled_pipe_pump():
+                return ("cp39", "abi3", resolved_plat)
             return ("py3", "none", resolved_plat)
 
 

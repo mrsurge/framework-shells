@@ -17,13 +17,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from framework_shells.manager import FrameworkShellManager
-from framework_shells.native_pipe import resolve_native_terminal_broker_command
+from framework_shells.native_pipe import native_extension_available, resolve_native_terminal_broker_command
 from framework_shells.orchestrator import Orchestrator
 from framework_shells.store import RuntimeStore
 
 resolution = resolve_native_terminal_broker_command(["fallback"])
 assert resolution.engine == "native-terminal-pipe", resolution
 assert "framework_shells/bin/fws-terminal-stream-broker" in (resolution.source or ""), resolution
+assert native_extension_available() is True
 
 SPEC_TEXT = '''version: "1"
 shells:
@@ -89,13 +90,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from framework_shells.manager import FrameworkShellManager
-from framework_shells.native_pipe import resolve_native_terminal_broker_command
+from framework_shells.native_pipe import native_extension_available, resolve_native_terminal_broker_command
 from framework_shells.orchestrator import Orchestrator
 from framework_shells.store import RuntimeStore
 
 resolution = resolve_native_terminal_broker_command(["fallback-broker"])
 assert resolution.engine is None, resolution
 assert resolution.command == ["fallback-broker"], resolution
+assert native_extension_available() is False
 
 SPEC_TEXT = '''version: "1"
 shells:

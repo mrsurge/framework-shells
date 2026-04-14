@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "framework_shells"
-version = "0.0.39"
+version = "0.0.40"
 description = "Framework-agnostic process orchestration with PTY, pipe, and dtach backends."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,4 +26,4 @@ where = ["."]
 include = ["framework_shells*"]
 
 [tool.setuptools.package-data]
-framework_shells = ["ui/*", "bin/*"]
+framework_shells = ["ui/*", "bin/*", "fws_pipe_pump*.so", "fws_pipe_pump*.pyd", "fws_pipe_pump*.dylib", "fws_pipe_pump*.dll"]

@@ -55,9 +55,13 @@ def build_wheel(
                     profile=profile,
                 )
             stage_broker_binary(stage_root, resolved_broker_path)
-            build_env["FRAMEWORK_SHELLS_INSTALL_MODE"] = "build"
+            build_env["FRAMEWORK_SHELLS_INSTALL_MODE"] = "python-only"
+            build_env["FRAMEWORK_SHELLS_PIPE_PUMP_MODE"] = (
+                "build" if resolved_target == rust_host_target() else "python-only"
+            )
         else:
             build_env["FRAMEWORK_SHELLS_INSTALL_MODE"] = "python-only"
+            build_env["FRAMEWORK_SHELLS_PIPE_PUMP_MODE"] = "python-only"
 
         wheel_args = [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(dist_dir)]
         if packaged_broker:

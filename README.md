@@ -11,7 +11,9 @@ pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@
 
 Git source installs now default to `auto` native packaging:
 
-- if `cargo` is available, the install build attempts to compile and bundle the native terminal broker
+- if `cargo` is available, the install build attempts to compile and bundle:
+  - the native terminal broker
+  - the native pipe pump extension
 - if that build fails, install falls back to the pure-Python package by default
 
 You can override that behavior with `FRAMEWORK_SHELLS_INSTALL_MODE`:

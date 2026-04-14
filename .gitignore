@@ -11,4 +11,5 @@ dist/
 build/
 node_modules/
 native/*/target/
+notes/
 ANNOUNCEMENT_DRAFT.md

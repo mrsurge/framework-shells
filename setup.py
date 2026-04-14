@@ -71,6 +71,10 @@ def _ensure_executable(path: Path) -> None:
     path.chmod(mode | 0o111)
 
 
+def _normalize_wheel_tag(value: str) -> str:
+    return value.strip().replace("-", "_").replace(".", "_")
+
+
 def _build_and_stage_native_broker() -> None:
     global _staged_native_broker
     global _native_broker_preexisted
@@ -141,6 +145,8 @@ if _bdist_wheel is not None:
             super().finalize_options()
             if _has_bundled_native_broker():
                 self.root_is_pure = False
+                if self.plat_name:
+                    self.plat_name = _normalize_wheel_tag(str(self.plat_name))
 
         def run(self) -> None:
             _prepare_native_broker()
@@ -153,7 +159,7 @@ if _bdist_wheel is not None:
             python_tag, abi_tag, plat_tag = super().get_tag()
             if not _has_bundled_native_broker():
                 return python_tag, abi_tag, plat_tag
-            resolved_plat = self.plat_name or plat_tag
+            resolved_plat = _normalize_wheel_tag(str(self.plat_name or plat_tag))
             return ("py3", "none", resolved_plat)
 
 

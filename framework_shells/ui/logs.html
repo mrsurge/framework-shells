@@ -195,6 +195,24 @@
       const stderrContainer = document.getElementById("stderr-container");
       const status = document.getElementById("status");
       const rawLog = { stdout: "", stderr: "" };
+      let messageBuffer = "";
+      let requestCounter = 0;
+      let openRequestId = "";
+
+      function nextRequestId() {
+        requestCounter += 1;
+        return `fws_logs_${requestCounter}`;
+      }
+
+      function consumeChunk(chunk) {
+        if (typeof chunk !== "string" || chunk.length === 0) {
+          return [];
+        }
+        const combined = messageBuffer + chunk;
+        const parts = combined.split("\n");
+        messageBuffer = parts.pop() || "";
+        return parts.map((line) => line.trim()).filter((line) => line.length > 0);
+      }
 
       function compileMatcher(stream, kind, query, mode) {
         const input = document.getElementById(`${stream}-${kind}-input`);
@@ -265,49 +283,68 @@
       wireFilters("stderr");
 
       ws.onopen = () => {
-        status.textContent = "Connected";
-        status.classList.remove("disconnected");
+        status.textContent = "Connecting...";
+        status.classList.add("disconnected");
+        openRequestId = nextRequestId();
         ws.send(JSON.stringify({
           jsonrpc: "2.0",
-          method: "fws.logs.connect",
+          id: openRequestId,
+          method: "fws.logs.open",
           params: { shell_id: shellId },
-        }));
+        }) + "\n");
       };
 
       ws.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data);
-          if (!msg || msg.jsonrpc !== "2.0" || typeof msg.method !== "string" || !msg.params || typeof msg.params !== "object") {
-            return;
-          }
+        for (const line of consumeChunk(e.data)) {
+          try {
+            const msg = JSON.parse(line);
+            if (!msg || msg.jsonrpc !== "2.0" || typeof msg !== "object") {
+              continue;
+            }
+            if (typeof msg.id === "string") {
+              if (msg.id === openRequestId && msg.result && msg.result.accepted === true) {
+                status.textContent = "Connected";
+                status.classList.remove("disconnected");
+              } else if (msg.id === openRequestId && msg.error && typeof msg.error.message === "string") {
+                stdoutContainer.textContent = msg.error.message;
+                stderrContainer.textContent = msg.error.message;
+                status.textContent = "Error";
+                status.classList.add("disconnected");
+              }
+              continue;
+            }
+            if (typeof msg.method !== "string" || !msg.params || typeof msg.params !== "object") {
+              continue;
+            }
 
-          if (msg.method === "fws.logs.initial") {
-            rawLog.stdout = msg.params.stdout || "";
-            rawLog.stderr = msg.params.stderr || "";
-            renderStream("stdout");
-            renderStream("stderr");
-          } else if (msg.method === "fws.logs.reset") {
-            if (msg.params.stream === "stdout") {
-              rawLog.stdout = "";
+            if (msg.method === "fws.logs.initial") {
+              rawLog.stdout = msg.params.stdout || "";
+              rawLog.stderr = msg.params.stderr || "";
               renderStream("stdout");
-            } else if (msg.params.stream === "stderr") {
-              rawLog.stderr = "";
               renderStream("stderr");
+            } else if (msg.method === "fws.logs.reset") {
+              if (msg.params.stream === "stdout") {
+                rawLog.stdout = "";
+                renderStream("stdout");
+              } else if (msg.params.stream === "stderr") {
+                rawLog.stderr = "";
+                renderStream("stderr");
+              }
+            } else if (msg.method === "fws.logs.chunk") {
+              if (msg.params.stream === "stdout") {
+                rawLog.stdout += msg.params.chunk || "";
+                renderStream("stdout");
+              } else if (msg.params.stream === "stderr") {
+                rawLog.stderr += msg.params.chunk || "";
+                renderStream("stderr");
+              }
+            } else if (msg.method === "fws.error") {
+              stdoutContainer.textContent = msg.params.message || "Error";
+              stderrContainer.textContent = msg.params.message || "Error";
             }
-          } else if (msg.method === "fws.logs.chunk") {
-            if (msg.params.stream === "stdout") {
-              rawLog.stdout += msg.params.chunk || "";
-              renderStream("stdout");
-            } else if (msg.params.stream === "stderr") {
-              rawLog.stderr += msg.params.chunk || "";
-              renderStream("stderr");
-            }
-          } else if (msg.method === "fws.error") {
-            stdoutContainer.textContent = msg.params.message || "Error";
-            stderrContainer.textContent = msg.params.message || "Error";
+          } catch (err) {
+            // ignore
           }
-        } catch (err) {
-          // ignore
         }
       };
 

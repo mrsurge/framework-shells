@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import signal
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, cast
@@ -18,17 +19,34 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from .. import get_manager
 from ..events import get_event_bus
 from ..process_snapshot import ProcessRecord
+from ..protocols.jsonrpc import dump_json_line
 from ..protocols.fws_ui import (
-    DASHBOARD_CONNECT_METHOD,
-    FwsServerNotification,
-    LOGS_CONNECT_METHOD,
+    APP_SHUTDOWN_METHOD,
+    DASHBOARD_OPEN_METHOD,
+    DASHBOARD_REFRESH_METHOD,
+    EXITED_PURGE_METHOD,
+    FwsNotification,
+    FwsRequest,
+    PidTerminateRequest,
+    ShellPurgeRequest,
+    ShellTerminateRequest,
+    ShutdownRequest,
+    AppShutdownRequest,
     build_dashboard_snapshot_notification,
-    build_error_notification,
+    build_dashboard_open_response,
+    build_action_response,
     build_logs_chunk_notification,
     build_logs_initial_notification,
+    build_logs_open_response,
     build_logs_reset_notification,
-    parse_dashboard_connect_notification,
-    parse_logs_connect_notification,
+    build_request_error_response,
+    parse_fws_request,
+    LOGS_OPEN_METHOD,
+    LOGS_TRUNCATE_METHOD,
+    PID_TERMINATE_METHOD,
+    SHELL_PURGE_METHOD,
+    SHELL_TERMINATE_METHOD,
+    SHUTDOWN_METHOD,
 )
 from ..shutdown import ShutdownPolicy, shutdown_snapshot
 
@@ -40,20 +58,36 @@ ShellInfo = dict[str, object]
 StyleMap = dict[str, dict[str, str]]
 
 
-async def _send_ws_notification(websocket: WebSocket, notification: FwsServerNotification) -> None:
-    await websocket.send_json(notification)
+async def _send_ws_payload(websocket: WebSocket, payload: Mapping[str, object]) -> None:
+    await websocket.send_text(dump_json_line(payload))
 
 
-async def _send_ws_error(
+async def _send_ws_notification(websocket: WebSocket, notification: FwsNotification) -> None:
+    await _send_ws_payload(websocket, notification)
+
+
+async def _send_ws_response(websocket: WebSocket, response: Mapping[str, object]) -> None:
+    await _send_ws_payload(websocket, response)
+
+
+async def _send_ws_error_response(
     websocket: WebSocket,
-    message: str,
+    request_id: str | None,
     *,
-    code: str | None = None,
+    code: int,
+    message: str,
+    error_code: str | None = None,
     shell_id: str | None = None,
 ) -> None:
-    await _send_ws_notification(
+    await _send_ws_response(
         websocket,
-        build_error_notification(message, code=code, shell_id=shell_id),
+        build_request_error_response(
+            request_id,
+            code=code,
+            message=message,
+            error_code=error_code,
+            shell_id=shell_id,
+        ),
     )
 
 
@@ -647,6 +681,7 @@ async def fws_static(path: str) -> FileResponse:
 async def fws_refresh() -> RedirectResponse:
     return RedirectResponse(url="/fws/", status_code=303)
 
+
 def _is_ajax(request: Request) -> bool:
     return (request.headers.get("x-fws-ajax") or "").strip() == "1"
 
@@ -666,8 +701,7 @@ async def _truncate_log_file(path: Path, *, logs_root: Path) -> bool:
         return False
 
 
-@router.post("/fws/action/logs/purge")
-async def fws_purge_logs(request: Request) -> Response:
+async def _action_truncate_logs() -> None:
     mgr = await get_manager()
     shells = await mgr.list_shells()
 
@@ -690,13 +724,8 @@ async def fws_purge_logs(request: Request) -> Response:
         seen.add(resolved)
         _ = await _truncate_log_file(resolved, logs_root=logs_root)
 
-    if _is_ajax(request):
-        return Response(status_code=204)
-    return RedirectResponse(url="/fws/", status_code=303)
 
-
-@router.post("/fws/action/exited/purge")
-async def fws_purge_exited(request: Request) -> Response:
+async def _action_purge_exited() -> None:
     mgr = await get_manager()
     shells = await mgr.list_shells()
     exited = [s for s in shells if (getattr(s, "status", None) or "") == "exited"]
@@ -705,55 +734,35 @@ async def fws_purge_exited(request: Request) -> Response:
             _ = await mgr.remove_shell(rec.id, force=True)
         except Exception:
             pass
-    if _is_ajax(request):
-        return Response(status_code=204)
-    return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/shell/{shell_id}/terminate")
-async def fws_terminate_shell(shell_id: str, request: Request) -> Response:
+async def _action_terminate_shell(shell_id: str) -> None:
     mgr = await get_manager()
     await mgr.terminate_shell(shell_id, force=True)
-    if _is_ajax(request):
-        return Response(status_code=204)
-    return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/shell/{shell_id}/purge")
-async def fws_purge_shell(shell_id: str, request: Request) -> Response:
+async def _action_purge_shell(shell_id: str) -> None:
     mgr = await get_manager()
     _ = await mgr.remove_shell(shell_id, force=True)
-    if _is_ajax(request):
-        return Response(status_code=204)
-    return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/pid/{pid}/terminate")
-async def fws_terminate_pid(pid: int, request: Request) -> Response:
+async def _action_terminate_pid(pid: int) -> None:
     try:
         os.kill(int(pid), signal.SIGKILL)
     except Exception:
         pass
-    if _is_ajax(request):
-        return Response(status_code=204)
-    return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/app/{app_id}/shutdown")
-async def fws_shutdown_app(app_id: str, request: Request) -> Response:
+async def _action_shutdown_app(app_id: str) -> None:
     mgr = await get_manager()
     shells = await mgr.list_shells()
     targets = [s for s in shells if (s.derive_app_id() or "") == app_id and s.pid and s.status == "running"]
     snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
     root_pids = [s.pid for s in targets if s.pid]
     _ = await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]), root_pids=root_pids)
-    if _is_ajax(request):
-        return Response(status_code=204)
-    return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/shutdown")
-async def fws_shutdown(scope: Annotated[str, Form()] = "tree") -> RedirectResponse:
+async def _action_shutdown(scope: str) -> None:
     mgr = await get_manager()
     shells = await mgr.list_shells()
 
@@ -761,20 +770,80 @@ async def fws_shutdown(scope: Annotated[str, Form()] = "tree") -> RedirectRespon
         for s in shells:
             if s.pid and s.status == "running":
                 await mgr.terminate_shell(s.id, force=True)
-        return RedirectResponse(url="/fws/", status_code=303)
+        return
 
     snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
     _ = await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]))
+
+
+@router.post("/fws/action/logs/purge")
+async def fws_purge_logs(request: Request) -> Response:
+    await _action_truncate_logs()
+
+    if _is_ajax(request):
+        return Response(status_code=204)
+    return RedirectResponse(url="/fws/", status_code=303)
+
+
+@router.post("/fws/action/exited/purge")
+async def fws_purge_exited(request: Request) -> Response:
+    await _action_purge_exited()
+    if _is_ajax(request):
+        return Response(status_code=204)
+    return RedirectResponse(url="/fws/", status_code=303)
+
+
+@router.post("/fws/action/shell/{shell_id}/terminate")
+async def fws_terminate_shell(shell_id: str, request: Request) -> Response:
+    await _action_terminate_shell(shell_id)
+    if _is_ajax(request):
+        return Response(status_code=204)
+    return RedirectResponse(url="/fws/", status_code=303)
+
+
+@router.post("/fws/action/shell/{shell_id}/purge")
+async def fws_purge_shell(shell_id: str, request: Request) -> Response:
+    await _action_purge_shell(shell_id)
+    if _is_ajax(request):
+        return Response(status_code=204)
+    return RedirectResponse(url="/fws/", status_code=303)
+
+
+@router.post("/fws/action/pid/{pid}/terminate")
+async def fws_terminate_pid(pid: int, request: Request) -> Response:
+    await _action_terminate_pid(pid)
+    if _is_ajax(request):
+        return Response(status_code=204)
+    return RedirectResponse(url="/fws/", status_code=303)
+
+
+@router.post("/fws/action/app/{app_id}/shutdown")
+async def fws_shutdown_app(app_id: str, request: Request) -> Response:
+    await _action_shutdown_app(app_id)
+    if _is_ajax(request):
+        return Response(status_code=204)
+    return RedirectResponse(url="/fws/", status_code=303)
+
+
+@router.post("/fws/action/shutdown")
+async def fws_shutdown(scope: Annotated[str, Form()] = "tree") -> RedirectResponse:
+    await _action_shutdown(scope)
     return RedirectResponse(url="/fws/", status_code=303)
 
 
 @router.websocket("/ws/fws")
 async def fws_ws(websocket: WebSocket):
     await websocket.accept()
-    connect_raw = await _receive_ws_text(websocket)
-    connect_notification = parse_dashboard_connect_notification(connect_raw) if connect_raw is not None else None
-    if connect_notification is None:
-        await _send_ws_error(websocket, f"Expected {DASHBOARD_CONNECT_METHOD} notification", code="invalid_connect")
+    open_raw = await _receive_ws_text(websocket)
+    open_request = parse_fws_request(open_raw) if open_raw is not None else None
+    if open_request is None or open_request["method"] != DASHBOARD_OPEN_METHOD:
+        await _send_ws_error_response(
+            websocket,
+            open_request["id"] if open_request is not None else None,
+            code=-32600,
+            message=f"Expected {DASHBOARD_OPEN_METHOD} request",
+            error_code="invalid_open",
+        )
         try:
             await websocket.close()
         except Exception:
@@ -788,16 +857,122 @@ async def fws_ws(websocket: WebSocket):
         html = await _render_dashboard_html()
         await _send_ws_notification(websocket, build_dashboard_snapshot_notification(html))
 
+    async def handle_request(request: FwsRequest) -> None:
+        method = request["method"]
+        request_id = request["id"]
+        try:
+            if method == DASHBOARD_OPEN_METHOD:
+                await _send_ws_response(websocket, build_dashboard_open_response(request_id))
+                await send_snapshot()
+                return
+            if method == DASHBOARD_REFRESH_METHOD:
+                await _send_ws_response(websocket, build_action_response(request_id))
+                await send_snapshot()
+                return
+            if method == LOGS_TRUNCATE_METHOD:
+                await _action_truncate_logs()
+                await _send_ws_response(websocket, build_action_response(request_id))
+                await send_snapshot()
+                return
+            if method == EXITED_PURGE_METHOD:
+                await _action_purge_exited()
+                await _send_ws_response(websocket, build_action_response(request_id))
+                await send_snapshot()
+                return
+            if method == SHELL_TERMINATE_METHOD:
+                shell_request = cast(ShellTerminateRequest, request)
+                await _action_terminate_shell(shell_request["params"]["shell_id"])
+                await _send_ws_response(websocket, build_action_response(request_id))
+                await send_snapshot()
+                return
+            if method == SHELL_PURGE_METHOD:
+                shell_request = cast(ShellPurgeRequest, request)
+                await _action_purge_shell(shell_request["params"]["shell_id"])
+                await _send_ws_response(websocket, build_action_response(request_id))
+                await send_snapshot()
+                return
+            if method == PID_TERMINATE_METHOD:
+                pid_request = cast(PidTerminateRequest, request)
+                await _action_terminate_pid(pid_request["params"]["pid"])
+                await _send_ws_response(websocket, build_action_response(request_id))
+                await send_snapshot()
+                return
+            if method == APP_SHUTDOWN_METHOD:
+                app_request = cast(AppShutdownRequest, request)
+                await _action_shutdown_app(app_request["params"]["app_id"])
+                await _send_ws_response(websocket, build_action_response(request_id))
+                await send_snapshot()
+                return
+            if method == SHUTDOWN_METHOD:
+                shutdown_request = cast(ShutdownRequest, request)
+                await _action_shutdown(shutdown_request["params"]["scope"])
+                await _send_ws_response(websocket, build_action_response(request_id))
+                await send_snapshot()
+                return
+
+            await _send_ws_error_response(
+                websocket,
+                request_id,
+                code=-32601,
+                message=f"Method not found: {method}",
+                error_code="method_not_found",
+            )
+        except Exception as exc:
+            await _send_ws_error_response(
+                websocket,
+                request_id,
+                code=-32000,
+                message=str(exc),
+                error_code="action_failed",
+            )
+
     try:
-        await send_snapshot()
+        await handle_request(open_request)
+        receive_task = asyncio.create_task(websocket.receive_text())
+        bus_task = asyncio.create_task(q.get())
         while True:
-            _ = await q.get()
-            await send_snapshot()
+            done, _ = await asyncio.wait(
+                {receive_task, bus_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if receive_task in done:
+                try:
+                    raw = receive_task.result()
+                except WebSocketDisconnect:
+                    break
+                except Exception:
+                    break
+
+                request = parse_fws_request(raw)
+                if request is None:
+                    await _send_ws_error_response(
+                        websocket,
+                        None,
+                        code=-32600,
+                        message="Invalid request",
+                        error_code="invalid_request",
+                    )
+                else:
+                    await handle_request(request)
+                receive_task = asyncio.create_task(websocket.receive_text())
+
+            if bus_task in done:
+                try:
+                    _ = bus_task.result()
+                except Exception:
+                    break
+                await send_snapshot()
+                bus_task = asyncio.create_task(q.get())
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
+        for task_name in ("receive_task", "bus_task"):
+            task = locals().get(task_name)
+            if isinstance(task, asyncio.Task):
+                _ = task.cancel()
         try:
             bus.unsubscribe(q)
         except Exception:
@@ -819,13 +994,29 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
         except Exception:
             pass
 
-    connect_raw = await _receive_ws_text(websocket)
-    connect_notification = parse_logs_connect_notification(connect_raw) if connect_raw is not None else None
-    if connect_notification is None or connect_notification["params"]["shell_id"] != shell_id:
-        await _send_ws_error(
+    open_raw = await _receive_ws_text(websocket)
+    open_request = parse_fws_request(open_raw) if open_raw is not None else None
+    if open_request is None or open_request["method"] != LOGS_OPEN_METHOD:
+        await _send_ws_error_response(
             websocket,
-            f"Expected {LOGS_CONNECT_METHOD} notification for {shell_id}",
-            code="invalid_connect",
+            open_request["id"] if open_request is not None else None,
+            code=-32600,
+            message=f"Expected {LOGS_OPEN_METHOD} request for {shell_id}",
+            error_code="invalid_open",
+            shell_id=shell_id,
+        )
+        await safe_close()
+        return
+
+    logs_open_request = open_request
+
+    if logs_open_request["params"]["shell_id"] != shell_id:
+        await _send_ws_error_response(
+            websocket,
+            logs_open_request["id"],
+            code=-32602,
+            message=f"shell_id mismatch for {shell_id}",
+            error_code="shell_id_mismatch",
             shell_id=shell_id,
         )
         await safe_close()
@@ -835,12 +1026,26 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
         mgr = await get_manager()
         rec = await mgr.get_shell(shell_id)
     except Exception as exc:
-        await _send_ws_error(websocket, f"Failed to load shell record: {exc}", code="shell_lookup_failed", shell_id=shell_id)
+        await _send_ws_error_response(
+            websocket,
+            logs_open_request["id"],
+            code=-32000,
+            message=f"Failed to load shell record: {exc}",
+            error_code="shell_lookup_failed",
+            shell_id=shell_id,
+        )
         await safe_close()
         return
 
     if not rec:
-        await _send_ws_error(websocket, f"Shell not found: {shell_id}", code="shell_not_found", shell_id=shell_id)
+        await _send_ws_error_response(
+            websocket,
+            logs_open_request["id"],
+            code=-32004,
+            message=f"Shell not found: {shell_id}",
+            error_code="shell_not_found",
+            shell_id=shell_id,
+        )
         await safe_close()
         return
 
@@ -848,11 +1053,19 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
     stderr_path = Path(rec.stderr_log)
 
     if not stdout_path.exists() and not stderr_path.exists():
-        await _send_ws_error(websocket, f"No log files found for {shell_id}", code="logs_missing", shell_id=shell_id)
+        await _send_ws_error_response(
+            websocket,
+            logs_open_request["id"],
+            code=-32004,
+            message=f"No log files found for {shell_id}",
+            error_code="logs_missing",
+            shell_id=shell_id,
+        )
         await safe_close()
         return
 
     try:
+        await _send_ws_response(websocket, build_logs_open_response(logs_open_request["id"], shell_id))
         stdout_lines: list[str] = []
         if stdout_path.exists():
             async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors="replace") as f:

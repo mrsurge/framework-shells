@@ -1,5 +1,6 @@
 export type JsonRpcVersion = '2.0';
 export type LogStreamName = 'stdout' | 'stderr';
+export type ShutdownScope = 'tree' | 'shells';
 
 export interface JsonRpcNotification<M extends string, P> {
   jsonrpc: JsonRpcVersion;
@@ -7,12 +8,55 @@ export interface JsonRpcNotification<M extends string, P> {
   params: P;
 }
 
-export interface DashboardConnectParams {
+export interface JsonRpcRequest<M extends string, P> extends JsonRpcNotification<M, P> {
+  id: string;
+}
+
+export interface JsonRpcSuccessResponse<I extends string, R> {
+  jsonrpc: JsonRpcVersion;
+  id: I;
+  result: R;
+}
+
+export interface JsonRpcErrorData {
+  code?: string;
+  shell_id?: string;
+}
+
+export interface JsonRpcErrorResponse<I extends string | null = string | null> {
+  jsonrpc: JsonRpcVersion;
+  id: I;
+  error: {
+    code: number;
+    message: string;
+    data?: JsonRpcErrorData;
+  };
+}
+
+export interface DashboardOpenParams {
   view: 'html';
 }
 
-export interface LogsConnectParams {
+export interface LogsOpenParams {
   shell_id: string;
+}
+
+export interface EmptyParams {}
+
+export interface ShellActionParams {
+  shell_id: string;
+}
+
+export interface PidActionParams {
+  pid: number;
+}
+
+export interface AppActionParams {
+  app_id: string;
+}
+
+export interface ShutdownParams {
+  scope: ShutdownScope;
 }
 
 export interface DashboardSnapshotParams {
@@ -42,9 +86,30 @@ export interface ErrorParams {
   shell_id?: string;
 }
 
-export interface ClientNotificationMap {
-  'fws.dashboard.connect': DashboardConnectParams;
-  'fws.logs.connect': LogsConnectParams;
+export interface ClientRequestMap {
+  'fws.dashboard.open': DashboardOpenParams;
+  'fws.logs.open': LogsOpenParams;
+  'fws.dashboard.refresh': EmptyParams;
+  'fws.logs.truncate': EmptyParams;
+  'fws.exited.purge': EmptyParams;
+  'fws.shell.terminate': ShellActionParams;
+  'fws.shell.purge': ShellActionParams;
+  'fws.pid.terminate': PidActionParams;
+  'fws.app.shutdown': AppActionParams;
+  'fws.shutdown': ShutdownParams;
+}
+
+export interface RequestResultMap {
+  'fws.dashboard.open': { accepted: true };
+  'fws.logs.open': { accepted: true; shell_id: string };
+  'fws.dashboard.refresh': { ok: true };
+  'fws.logs.truncate': { ok: true };
+  'fws.exited.purge': { ok: true };
+  'fws.shell.terminate': { ok: true };
+  'fws.shell.purge': { ok: true };
+  'fws.pid.terminate': { ok: true };
+  'fws.app.shutdown': { ok: true };
+  'fws.shutdown': { ok: true };
 }
 
 export interface ServerNotificationMap {
@@ -55,19 +120,26 @@ export interface ServerNotificationMap {
   'fws.error': ErrorParams;
 }
 
-export type ClientMethod = keyof ClientNotificationMap;
-export type ServerMethod = keyof ServerNotificationMap;
+export type ClientRequestMethod = keyof ClientRequestMap;
+export type ServerNotificationMethod = keyof ServerNotificationMap;
 
-export type ClientNotificationFor<M extends ClientMethod> = JsonRpcNotification<M, ClientNotificationMap[M]>;
-export type ServerNotificationFor<M extends ServerMethod> = JsonRpcNotification<M, ServerNotificationMap[M]>;
+export type ClientRequestFor<M extends ClientRequestMethod> = JsonRpcRequest<M, ClientRequestMap[M]>;
+export type ServerSuccessResponseFor<M extends ClientRequestMethod> = JsonRpcSuccessResponse<string, RequestResultMap[M]>;
+export type ServerNotificationFor<M extends ServerNotificationMethod> = JsonRpcNotification<M, ServerNotificationMap[M]>;
 
-export type ClientNotification = {
-  [M in ClientMethod]: ClientNotificationFor<M>;
-}[ClientMethod];
+export type ClientRequest = {
+  [M in ClientRequestMethod]: ClientRequestFor<M>;
+}[ClientRequestMethod];
+
+export type ServerSuccessResponse = {
+  [M in ClientRequestMethod]: ServerSuccessResponseFor<M>;
+}[ClientRequestMethod];
 
 export type ServerNotification = {
-  [M in ServerMethod]: ServerNotificationFor<M>;
-}[ServerMethod];
+  [M in ServerNotificationMethod]: ServerNotificationFor<M>;
+}[ServerNotificationMethod];
+
+export type IncomingJsonRpcMessage = ServerSuccessResponse | ServerNotification | JsonRpcErrorResponse;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -77,34 +149,116 @@ function isLogStreamName(value: unknown): value is LogStreamName {
   return value === 'stdout' || value === 'stderr';
 }
 
-function parseJsonRpcNotification(raw: string): { method: string; params: Record<string, unknown> } | null {
+function isJsonRpcVersion(value: unknown): value is JsonRpcVersion {
+  return value === '2.0';
+}
+
+function parseJsonRpcObject(raw: string): Record<string, unknown> | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-  if (!isRecord(parsed) || parsed.jsonrpc !== '2.0' || typeof parsed.method !== 'string' || !isRecord(parsed.params)) {
+  if (!isRecord(parsed) || !isJsonRpcVersion(parsed.jsonrpc)) {
     return null;
   }
-  return {
-    method: parsed.method,
-    params: parsed.params,
-  };
+  return parsed;
 }
 
-export function stringifyClientNotification<M extends ClientMethod>(method: M, params: ClientNotificationMap[M]): string {
-  const payload: ClientNotificationFor<M> = {
+export function stringifyClientRequest<M extends ClientRequestMethod>(
+  method: M,
+  id: string,
+  params: ClientRequestMap[M],
+): string {
+  const payload: ClientRequestFor<M> = {
     jsonrpc: '2.0',
+    id,
     method,
     params,
   };
   return JSON.stringify(payload);
 }
 
-export function parseServerNotification(raw: string): ServerNotification | null {
-  const parsed = parseJsonRpcNotification(raw);
+export function frameJsonRpcLine(payload: string): string {
+  return payload.endsWith('\n') ? payload : `${payload}\n`;
+}
+
+export function consumeJsonlChunk(
+  buffer: string,
+  chunk: unknown,
+): { lines: string[]; buffer: string } {
+  if (typeof chunk !== 'string' || chunk.length === 0) {
+    return { lines: [], buffer };
+  }
+  const combined = buffer + chunk;
+  const parts = combined.split('\n');
+  const nextBuffer = parts.pop() ?? '';
+  const lines = parts.map((line) => line.trim()).filter((line) => line.length > 0);
+  return { lines, buffer: nextBuffer };
+}
+
+export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage | null {
+  const parsed = parseJsonRpcObject(raw);
   if (!parsed) {
+    return null;
+  }
+
+  if (typeof parsed.id === 'string' && isRecord(parsed.result)) {
+    const result = parsed.result;
+    if (result.accepted === true) {
+      if (typeof result.shell_id === 'string') {
+        return {
+          jsonrpc: '2.0',
+          id: parsed.id,
+          result: { accepted: true, shell_id: result.shell_id },
+        };
+      }
+      return {
+        jsonrpc: '2.0',
+        id: parsed.id,
+        result: { accepted: true },
+      };
+    }
+    if (result.ok === true) {
+      return {
+        jsonrpc: '2.0',
+        id: parsed.id,
+        result: { ok: true },
+      };
+    }
+    return null;
+  }
+
+  if ((typeof parsed.id === 'string' || parsed.id === null) && isRecord(parsed.error)) {
+    const error = parsed.error;
+    if (typeof error.code !== 'number' || typeof error.message !== 'string') {
+      return null;
+    }
+    const response: JsonRpcErrorResponse = {
+      jsonrpc: '2.0',
+      id: typeof parsed.id === 'string' ? parsed.id : null,
+      error: {
+        code: error.code,
+        message: error.message,
+      },
+    };
+    if (isRecord(error.data)) {
+      const data: JsonRpcErrorData = {};
+      if (typeof error.data.code === 'string') {
+        data.code = error.data.code;
+      }
+      if (typeof error.data.shell_id === 'string') {
+        data.shell_id = error.data.shell_id;
+      }
+      if (Object.keys(data).length > 0) {
+        response.error.data = data;
+      }
+    }
+    return response;
+  }
+
+  if (typeof parsed.method !== 'string' || !isRecord(parsed.params)) {
     return null;
   }
 
@@ -183,11 +337,4 @@ export function parseServerNotification(raw: string): ServerNotification | null 
     default:
       return null;
   }
-}
-
-export function parseServerNotificationData(raw: unknown): ServerNotification | null {
-  if (typeof raw !== 'string') {
-    return null;
-  }
-  return parseServerNotification(raw);
 }

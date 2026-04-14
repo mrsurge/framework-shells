@@ -272,7 +272,7 @@ Migration notes:
   - stdout uses framed JSONL records
 - The Python PTY fallback preserves that same asymmetric wire contract so consumers do not need a separate terminal-stream protocol branch.
 - The maintained typed contract helpers for these surfaces now live in:
-  - `framework_shells.protocols.fws_ui` for the self-hosted dashboard/log websocket JSON-RPC notifications
+  - `framework_shells.protocols.fws_ui` for the self-hosted dashboard/log websocket JSON-RPC request/response lanes plus JSONL-framed JSON-RPC notifications
   - `framework_shells.protocols.terminal_stream` for the PTY terminal broker JSON-RPC stdin and JSONL stdout frames
 - `pipe.mode: python_terminal_pipe_testing` is the explicit escape hatch for always using the Python PTY broker.
   - It may also omit a shellspec `command`; the shellspec parser injects the same internal placeholder command.

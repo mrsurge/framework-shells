@@ -158,32 +158,102 @@
   function isLogStreamName(value) {
     return value === "stdout" || value === "stderr";
   }
-  function parseJsonRpcNotification(raw) {
+  function isJsonRpcVersion(value) {
+    return value === "2.0";
+  }
+  function parseJsonRpcObject(raw) {
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch {
       return null;
     }
-    if (!isRecord(parsed) || parsed.jsonrpc !== "2.0" || typeof parsed.method !== "string" || !isRecord(parsed.params)) {
+    if (!isRecord(parsed) || !isJsonRpcVersion(parsed.jsonrpc)) {
       return null;
     }
-    return {
-      method: parsed.method,
-      params: parsed.params
-    };
+    return parsed;
   }
-  function stringifyClientNotification(method, params) {
+  function stringifyClientRequest(method, id, params) {
     const payload = {
       jsonrpc: "2.0",
+      id,
       method,
       params
     };
     return JSON.stringify(payload);
   }
-  function parseServerNotification(raw) {
-    const parsed = parseJsonRpcNotification(raw);
+  function frameJsonRpcLine(payload) {
+    return payload.endsWith("\n") ? payload : `${payload}
+`;
+  }
+  function consumeJsonlChunk(buffer, chunk) {
+    if (typeof chunk !== "string" || chunk.length === 0) {
+      return { lines: [], buffer };
+    }
+    const combined = buffer + chunk;
+    const parts = combined.split("\n");
+    const nextBuffer = parts.pop() ?? "";
+    const lines = parts.map((line) => line.trim()).filter((line) => line.length > 0);
+    return { lines, buffer: nextBuffer };
+  }
+  function parseIncomingJsonRpcMessage(raw) {
+    const parsed = parseJsonRpcObject(raw);
     if (!parsed) {
+      return null;
+    }
+    if (typeof parsed.id === "string" && isRecord(parsed.result)) {
+      const result = parsed.result;
+      if (result.accepted === true) {
+        if (typeof result.shell_id === "string") {
+          return {
+            jsonrpc: "2.0",
+            id: parsed.id,
+            result: { accepted: true, shell_id: result.shell_id }
+          };
+        }
+        return {
+          jsonrpc: "2.0",
+          id: parsed.id,
+          result: { accepted: true }
+        };
+      }
+      if (result.ok === true) {
+        return {
+          jsonrpc: "2.0",
+          id: parsed.id,
+          result: { ok: true }
+        };
+      }
+      return null;
+    }
+    if ((typeof parsed.id === "string" || parsed.id === null) && isRecord(parsed.error)) {
+      const error = parsed.error;
+      if (typeof error.code !== "number" || typeof error.message !== "string") {
+        return null;
+      }
+      const response = {
+        jsonrpc: "2.0",
+        id: typeof parsed.id === "string" ? parsed.id : null,
+        error: {
+          code: error.code,
+          message: error.message
+        }
+      };
+      if (isRecord(error.data)) {
+        const data = {};
+        if (typeof error.data.code === "string") {
+          data.code = error.data.code;
+        }
+        if (typeof error.data.shell_id === "string") {
+          data.shell_id = error.data.shell_id;
+        }
+        if (Object.keys(data).length > 0) {
+          response.error.data = data;
+        }
+      }
+      return response;
+    }
+    if (typeof parsed.method !== "string" || !isRecord(parsed.params)) {
       return null;
     }
     switch (parsed.method) {
@@ -254,12 +324,6 @@
         return null;
     }
   }
-  function parseServerNotificationData(raw) {
-    if (typeof raw !== "string") {
-      return null;
-    }
-    return parseServerNotification(raw);
-  }
 
   // framework_shells/ui/src/fws.ts
   var LOG_STREAMS = ["stdout", "stderr"];
@@ -327,6 +391,9 @@
     let defaultCollapsed = true;
     let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
     let exitedVisibleCount = EXITED_PAGE_SIZE;
+    let dashboardMessageBuffer = "";
+    let dashboardRequestCounter = 0;
+    const dashboardPendingRequests = /* @__PURE__ */ new Map();
     const logState = {
       shellId: "",
       shellLabel: "",
@@ -337,18 +404,114 @@
         stderr: makeStreamState("stderr-container")
       }
     };
-    async function postForm(form) {
-      const method = (form.getAttribute("method") || "post").toUpperCase();
+    function nextDashboardRequestId() {
+      dashboardRequestCounter += 1;
+      return `fws_req_${dashboardRequestCounter}`;
+    }
+    function rejectPendingRequests(pending, message) {
+      const error = new Error(message);
+      for (const [, request] of pending) {
+        request.reject(error);
+      }
+      pending.clear();
+    }
+    function isJsonRpcErrorMessage(message) {
+      return "error" in message;
+    }
+    function isJsonRpcResponseMessage(message) {
+      return "id" in message && typeof message.id === "string";
+    }
+    function isServerNotificationMessage(message) {
+      return "method" in message && "params" in message;
+    }
+    function routeDashboardRpcMessage(message) {
+      if (isJsonRpcResponseMessage(message)) {
+        const pending = dashboardPendingRequests.get(message.id);
+        if (!pending) {
+          return;
+        }
+        dashboardPendingRequests.delete(message.id);
+        if (isJsonRpcErrorMessage(message)) {
+          pending.reject(new Error(message.error.message));
+          return;
+        }
+        pending.resolve(message.result);
+        return;
+      }
+      if (!isServerNotificationMessage(message)) {
+        return;
+      }
+      if (message.method !== "fws.dashboard.snapshot") {
+        return;
+      }
+      if (content) {
+        content.innerHTML = message.params.html;
+        applyCollapseState(content);
+        applyGroupState(content);
+        applyExitedSectionState();
+      }
+    }
+    function processDashboardChunk(raw) {
+      const consumed = consumeJsonlChunk(dashboardMessageBuffer, raw);
+      dashboardMessageBuffer = consumed.buffer;
+      for (const line of consumed.lines) {
+        const message = parseIncomingJsonRpcMessage(line);
+        if (message) {
+          routeDashboardRpcMessage(message);
+        }
+      }
+    }
+    async function sendDashboardRequest(method, params) {
+      const requestId = nextDashboardRequestId();
+      return await new Promise((resolve, reject) => {
+        dashboardPendingRequests.set(requestId, { resolve, reject });
+        ws.send(frameJsonRpcLine(stringifyClientRequest(method, requestId, params)));
+      });
+    }
+    async function submitActionForm(form) {
       const action = form.getAttribute("action") || window.location.href;
-      const body = new FormData(form);
-      try {
-        await fetch(action, {
-          method,
-          body,
-          credentials: "same-origin",
-          headers: { "X-FWS-AJAX": "1" }
-        });
-      } catch {
+      const url = new URL(action, window.location.href);
+      const path = url.pathname;
+      const formData = new FormData(form);
+      if (path === "/fws/action/refresh") {
+        await sendDashboardRequest("fws.dashboard.refresh", {});
+        return;
+      }
+      if (path === "/fws/action/logs/purge") {
+        await sendDashboardRequest("fws.logs.truncate", {});
+        return;
+      }
+      if (path === "/fws/action/exited/purge") {
+        await sendDashboardRequest("fws.exited.purge", {});
+        return;
+      }
+      const shellTerminateMatch = path.match(/^\/fws\/action\/shell\/([^/]+)\/terminate$/);
+      if (shellTerminateMatch) {
+        await sendDashboardRequest("fws.shell.terminate", { shell_id: decodeURIComponent(shellTerminateMatch[1] ?? "") });
+        return;
+      }
+      const shellPurgeMatch = path.match(/^\/fws\/action\/shell\/([^/]+)\/purge$/);
+      if (shellPurgeMatch) {
+        await sendDashboardRequest("fws.shell.purge", { shell_id: decodeURIComponent(shellPurgeMatch[1] ?? "") });
+        return;
+      }
+      const pidTerminateMatch = path.match(/^\/fws\/action\/pid\/([^/]+)\/terminate$/);
+      if (pidTerminateMatch) {
+        const pid = Number.parseInt(decodeURIComponent(pidTerminateMatch[1] ?? ""), 10);
+        if (Number.isFinite(pid)) {
+          await sendDashboardRequest("fws.pid.terminate", { pid });
+        }
+        return;
+      }
+      const appShutdownMatch = path.match(/^\/fws\/action\/app\/([^/]+)\/shutdown$/);
+      if (appShutdownMatch) {
+        await sendDashboardRequest("fws.app.shutdown", { app_id: decodeURIComponent(appShutdownMatch[1] ?? "") });
+        return;
+      }
+      if (path === "/fws/action/shutdown") {
+        const scopeValue = String(formData.get("scope") ?? "tree");
+        const scope = scopeValue === "shells" ? "shells" : "tree";
+        await sendDashboardRequest("fws.shutdown", { scope });
       }
     }
     async function copyText(value) {
@@ -809,59 +972,85 @@
         reconnectDecay: 1.5
       });
       logState.socket = socket;
+      let logMessageBuffer = "";
+      let logOpenRequestId = "";
       socket.onopen = () => {
         if (logState.socket !== socket) {
           return;
         }
-        setLogStatus("Connected", true);
-        socket.send(stringifyClientNotification("fws.logs.connect", { shell_id: nextShellId }));
+        setLogStatus("Connecting...", false);
+        logOpenRequestId = `fws_log_${Date.now()}`;
+        socket.send(frameJsonRpcLine(stringifyClientRequest("fws.logs.open", logOpenRequestId, { shell_id: nextShellId })));
       };
       socket.onmessage = (event) => {
         if (logState.socket !== socket) {
           return;
         }
-        const notification = parseServerNotificationData(event.data);
-        if (!notification) {
-          return;
-        }
-        switch (notification.method) {
-          case "fws.logs.initial":
-            parseTextIntoState("stdout", notification.params.stdout);
-            parseTextIntoState("stderr", notification.params.stderr);
-            renderStream("stdout");
-            renderStream("stderr");
-            break;
-          case "fws.logs.reset":
-            resetStream(notification.params.stream);
-            break;
-          case "fws.logs.chunk": {
-            const stream = notification.params.stream;
-            const appended = appendChunkToState(stream, notification.params.chunk);
-            if (logState.paused) {
-              logState.streams[stream].pendingCount += appended.newLines.length;
-              setPendingLabel(stream);
-              break;
-            }
-            if (hasActiveFilters(stream)) {
-              renderStream(stream);
-            } else {
-              appendLines(stream, appended.newLines, appended.partialLine);
-            }
-            break;
+        const consumed = consumeJsonlChunk(logMessageBuffer, event.data);
+        logMessageBuffer = consumed.buffer;
+        for (const line of consumed.lines) {
+          const message = parseIncomingJsonRpcMessage(line);
+          if (!message) {
+            continue;
           }
-          case "fws.error":
-            for (const stream of LOG_STREAMS) {
-              const state = logState.streams[stream];
-              if (state.container) {
-                state.container.innerHTML = `<div class="loading">${notification.params.message}</div>`;
+          if ("id" in message && typeof message.id === "string") {
+            if (message.id === logOpenRequestId) {
+              if ("error" in message) {
+                for (const stream of LOG_STREAMS) {
+                  const state = logState.streams[stream];
+                  if (state.container) {
+                    state.container.innerHTML = `<div class="loading">${message.error.message}</div>`;
+                  }
+                }
+                setLogStatus("Error", false);
+              } else {
+                setLogStatus("Connected", true);
               }
             }
-            if (notification.params.shell_id === nextShellId || notification.params.shell_id === void 0) {
-              setLogStatus("Error", false);
+            continue;
+          }
+          if (!isServerNotificationMessage(message)) {
+            continue;
+          }
+          switch (message.method) {
+            case "fws.logs.initial":
+              parseTextIntoState("stdout", message.params.stdout);
+              parseTextIntoState("stderr", message.params.stderr);
+              renderStream("stdout");
+              renderStream("stderr");
+              break;
+            case "fws.logs.reset":
+              resetStream(message.params.stream);
+              break;
+            case "fws.logs.chunk": {
+              const stream = message.params.stream;
+              const appended = appendChunkToState(stream, message.params.chunk);
+              if (logState.paused) {
+                logState.streams[stream].pendingCount += appended.newLines.length;
+                setPendingLabel(stream);
+                break;
+              }
+              if (hasActiveFilters(stream)) {
+                renderStream(stream);
+              } else {
+                appendLines(stream, appended.newLines, appended.partialLine);
+              }
+              break;
             }
-            break;
-          default:
-            break;
+            case "fws.error":
+              for (const stream of LOG_STREAMS) {
+                const state = logState.streams[stream];
+                if (state.container) {
+                  state.container.innerHTML = `<div class="loading">${message.params.message}</div>`;
+                }
+              }
+              if (message.params.shell_id === nextShellId || message.params.shell_id === void 0) {
+                setLogStatus("Error", false);
+              }
+              break;
+            default:
+              break;
+          }
         }
       };
       socket.onreconnect = (_attempt, delayMs) => {
@@ -951,7 +1140,9 @@
       if (confirmText && !window.confirm(confirmText)) {
         return;
       }
-      void postForm(target);
+      void submitActionForm(target).catch(() => {
+        setStatus("Error", false);
+      });
     });
     document.addEventListener("click", (event) => {
       const target = event.target;
@@ -1054,26 +1245,21 @@
       reconnectDecay: 1.5
     });
     ws.onopen = () => {
-      setStatus("Live", true);
-      ws.send(stringifyClientNotification("fws.dashboard.connect", { view: "html" }));
+      dashboardMessageBuffer = "";
+      setStatus("Connecting...", false);
+      void sendDashboardRequest("fws.dashboard.open", { view: "html" }).then(() => setStatus("Live", true)).catch(() => setStatus("Error", false));
     };
     ws.onmessage = (event) => {
-      const notification = parseServerNotificationData(event.data);
-      if (!notification || notification.method !== "fws.dashboard.snapshot") {
-        return;
-      }
-      if (content) {
-        content.innerHTML = notification.params.html;
-        applyCollapseState(content);
-        applyGroupState(content);
-        applyExitedSectionState();
-      }
+      processDashboardChunk(event.data);
     };
     ws.onreconnect = (_attempt, delayMs) => {
       setStatus(`Reconnecting in ${Math.round(delayMs)}ms...`, false);
     };
     ws.onerror = () => {
       setStatus("Error", false);
+    };
+    ws.onclose = () => {
+      rejectPendingRequests(dashboardPendingRequests, "FWS dashboard socket closed");
     };
     ws.onclose = () => {
       setStatus("Disconnected", false);

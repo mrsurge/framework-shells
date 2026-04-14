@@ -1,8 +1,14 @@
 import ReconnectingWebSocket from './reconnecting_websocket';
 import {
+  consumeJsonlChunk,
+  frameJsonRpcLine,
+  type ClientRequestMap,
+  type ClientRequestMethod,
+  type IncomingJsonRpcMessage,
   type LogStreamName,
-  parseServerNotificationData,
-  stringifyClientNotification,
+  type ServerNotification,
+  parseIncomingJsonRpcMessage,
+  stringifyClientRequest,
 } from './protocol';
 
 const LOG_STREAMS: LogStreamName[] = ['stdout', 'stderr'];
@@ -42,6 +48,11 @@ interface FilterConfig {
   excludeQuery: string;
   includeMode: FilterMode;
   excludeMode: FilterMode;
+}
+
+interface PendingRpcRequest<Result> {
+  resolve: (value: Result) => void;
+  reject: (reason?: unknown) => void;
 }
 
 type Matcher = (line: string) => boolean;
@@ -115,6 +126,9 @@ function getWebSocketUrl(path: string): string {
   let defaultCollapsed = true;
   let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
   let exitedVisibleCount = EXITED_PAGE_SIZE;
+  let dashboardMessageBuffer = '';
+  let dashboardRequestCounter = 0;
+  const dashboardPendingRequests = new Map<string, PendingRpcRequest<unknown>>();
 
   const logState: LogState = {
     shellId: '',
@@ -127,20 +141,138 @@ function getWebSocketUrl(path: string): string {
     },
   };
 
-  async function postForm(form: HTMLFormElement): Promise<void> {
-    const method = (form.getAttribute('method') || 'post').toUpperCase();
-    const action = form.getAttribute('action') || window.location.href;
-    const body = new FormData(form);
+  function nextDashboardRequestId(): string {
+    dashboardRequestCounter += 1;
+    return `fws_req_${dashboardRequestCounter}`;
+  }
 
-    try {
-      await fetch(action, {
-        method,
-        body,
-        credentials: 'same-origin',
-        headers: { 'X-FWS-AJAX': '1' },
-      });
-    } catch {
-      // ignore; websocket snapshot loop will reconcile when possible
+  function rejectPendingRequests(
+    pending: Map<string, PendingRpcRequest<unknown>>,
+    message: string,
+  ): void {
+    const error = new Error(message);
+    for (const [, request] of pending) {
+      request.reject(error);
+    }
+    pending.clear();
+  }
+
+  function isJsonRpcErrorMessage(message: IncomingJsonRpcMessage): message is Extract<IncomingJsonRpcMessage, { error: unknown }> {
+    return 'error' in message;
+  }
+
+  function isJsonRpcResponseMessage(
+    message: IncomingJsonRpcMessage,
+  ): message is Extract<IncomingJsonRpcMessage, { id: string }> {
+    return 'id' in message && typeof message.id === 'string';
+  }
+
+  function isServerNotificationMessage(message: IncomingJsonRpcMessage): message is ServerNotification {
+    return 'method' in message && 'params' in message;
+  }
+
+  function routeDashboardRpcMessage(message: IncomingJsonRpcMessage): void {
+    if (isJsonRpcResponseMessage(message)) {
+      const pending = dashboardPendingRequests.get(message.id);
+      if (!pending) {
+        return;
+      }
+      dashboardPendingRequests.delete(message.id);
+      if (isJsonRpcErrorMessage(message)) {
+        pending.reject(new Error(message.error.message));
+        return;
+      }
+      pending.resolve(message.result);
+      return;
+    }
+
+    if (!isServerNotificationMessage(message)) {
+      return;
+    }
+
+    if (message.method !== 'fws.dashboard.snapshot') {
+      return;
+    }
+    if (content) {
+      content.innerHTML = message.params.html;
+      applyCollapseState(content);
+      applyGroupState(content);
+      applyExitedSectionState();
+    }
+  }
+
+  function processDashboardChunk(raw: unknown): void {
+    const consumed = consumeJsonlChunk(dashboardMessageBuffer, raw);
+    dashboardMessageBuffer = consumed.buffer;
+    for (const line of consumed.lines) {
+      const message = parseIncomingJsonRpcMessage(line);
+      if (message) {
+        routeDashboardRpcMessage(message);
+      }
+    }
+  }
+
+  async function sendDashboardRequest<M extends ClientRequestMethod>(
+    method: M,
+    params: ClientRequestMap[M],
+  ): Promise<unknown> {
+    const requestId = nextDashboardRequestId();
+    return await new Promise<unknown>((resolve, reject) => {
+      dashboardPendingRequests.set(requestId, { resolve, reject });
+      ws.send(frameJsonRpcLine(stringifyClientRequest(method, requestId, params)));
+    });
+  }
+
+  async function submitActionForm(form: HTMLFormElement): Promise<void> {
+    const action = form.getAttribute('action') || window.location.href;
+    const url = new URL(action, window.location.href);
+    const path = url.pathname;
+    const formData = new FormData(form);
+
+    if (path === '/fws/action/refresh') {
+      await sendDashboardRequest('fws.dashboard.refresh', {});
+      return;
+    }
+    if (path === '/fws/action/logs/purge') {
+      await sendDashboardRequest('fws.logs.truncate', {});
+      return;
+    }
+    if (path === '/fws/action/exited/purge') {
+      await sendDashboardRequest('fws.exited.purge', {});
+      return;
+    }
+
+    const shellTerminateMatch = path.match(/^\/fws\/action\/shell\/([^/]+)\/terminate$/);
+    if (shellTerminateMatch) {
+      await sendDashboardRequest('fws.shell.terminate', { shell_id: decodeURIComponent(shellTerminateMatch[1] ?? '') });
+      return;
+    }
+
+    const shellPurgeMatch = path.match(/^\/fws\/action\/shell\/([^/]+)\/purge$/);
+    if (shellPurgeMatch) {
+      await sendDashboardRequest('fws.shell.purge', { shell_id: decodeURIComponent(shellPurgeMatch[1] ?? '') });
+      return;
+    }
+
+    const pidTerminateMatch = path.match(/^\/fws\/action\/pid\/([^/]+)\/terminate$/);
+    if (pidTerminateMatch) {
+      const pid = Number.parseInt(decodeURIComponent(pidTerminateMatch[1] ?? ''), 10);
+      if (Number.isFinite(pid)) {
+        await sendDashboardRequest('fws.pid.terminate', { pid });
+      }
+      return;
+    }
+
+    const appShutdownMatch = path.match(/^\/fws\/action\/app\/([^/]+)\/shutdown$/);
+    if (appShutdownMatch) {
+      await sendDashboardRequest('fws.app.shutdown', { app_id: decodeURIComponent(appShutdownMatch[1] ?? '') });
+      return;
+    }
+
+    if (path === '/fws/action/shutdown') {
+      const scopeValue = String(formData.get('scope') ?? 'tree');
+      const scope = scopeValue === 'shells' ? 'shells' : 'tree';
+      await sendDashboardRequest('fws.shutdown', { scope });
     }
   }
 
@@ -646,61 +778,87 @@ function getWebSocketUrl(path: string): string {
       reconnectDecay: 1.5,
     });
     logState.socket = socket;
+    let logMessageBuffer = '';
+    let logOpenRequestId = '';
 
     socket.onopen = () => {
       if (logState.socket !== socket) {
         return;
       }
-      setLogStatus('Connected', true);
-      socket.send(stringifyClientNotification('fws.logs.connect', { shell_id: nextShellId }));
+      setLogStatus('Connecting...', false);
+      logOpenRequestId = `fws_log_${Date.now()}`;
+      socket.send(frameJsonRpcLine(stringifyClientRequest('fws.logs.open', logOpenRequestId, { shell_id: nextShellId })));
     };
 
     socket.onmessage = (event: MessageEvent) => {
       if (logState.socket !== socket) {
         return;
       }
-      const notification = parseServerNotificationData(event.data);
-      if (!notification) {
-        return;
-      }
-      switch (notification.method) {
-        case 'fws.logs.initial':
-          parseTextIntoState('stdout', notification.params.stdout);
-          parseTextIntoState('stderr', notification.params.stderr);
-          renderStream('stdout');
-          renderStream('stderr');
-          break;
-        case 'fws.logs.reset':
-          resetStream(notification.params.stream);
-          break;
-        case 'fws.logs.chunk': {
-          const stream = notification.params.stream;
-          const appended = appendChunkToState(stream, notification.params.chunk);
-          if (logState.paused) {
-            logState.streams[stream].pendingCount += appended.newLines.length;
-            setPendingLabel(stream);
-            break;
-          }
-          if (hasActiveFilters(stream)) {
-            renderStream(stream);
-          } else {
-            appendLines(stream, appended.newLines, appended.partialLine);
-          }
-          break;
+      const consumed = consumeJsonlChunk(logMessageBuffer, event.data);
+      logMessageBuffer = consumed.buffer;
+      for (const line of consumed.lines) {
+        const message = parseIncomingJsonRpcMessage(line);
+        if (!message) {
+          continue;
         }
-        case 'fws.error':
-          for (const stream of LOG_STREAMS) {
-            const state = logState.streams[stream];
-            if (state.container) {
-              state.container.innerHTML = `<div class="loading">${notification.params.message}</div>`;
+        if ('id' in message && typeof message.id === 'string') {
+          if (message.id === logOpenRequestId) {
+            if ('error' in message) {
+              for (const stream of LOG_STREAMS) {
+                const state = logState.streams[stream];
+                if (state.container) {
+                  state.container.innerHTML = `<div class="loading">${message.error.message}</div>`;
+                }
+              }
+              setLogStatus('Error', false);
+            } else {
+              setLogStatus('Connected', true);
             }
           }
-          if (notification.params.shell_id === nextShellId || notification.params.shell_id === undefined) {
-            setLogStatus('Error', false);
+          continue;
+        }
+        if (!isServerNotificationMessage(message)) {
+          continue;
+        }
+        switch (message.method) {
+          case 'fws.logs.initial':
+            parseTextIntoState('stdout', message.params.stdout);
+            parseTextIntoState('stderr', message.params.stderr);
+            renderStream('stdout');
+            renderStream('stderr');
+            break;
+          case 'fws.logs.reset':
+            resetStream(message.params.stream);
+            break;
+          case 'fws.logs.chunk': {
+            const stream = message.params.stream;
+            const appended = appendChunkToState(stream, message.params.chunk);
+            if (logState.paused) {
+              logState.streams[stream].pendingCount += appended.newLines.length;
+              setPendingLabel(stream);
+              break;
+            }
+            if (hasActiveFilters(stream)) {
+              renderStream(stream);
+            } else {
+              appendLines(stream, appended.newLines, appended.partialLine);
+            }
+            break;
           }
-          break;
-        default:
-          break;
+          case 'fws.error':
+            for (const stream of LOG_STREAMS) {
+              const state = logState.streams[stream];
+              if (state.container) {
+                state.container.innerHTML = `<div class="loading">${message.params.message}</div>`;
+              }
+            }
+            if (message.params.shell_id === nextShellId || message.params.shell_id === undefined) {
+              setLogStatus('Error', false);
+            }
+            break;
+          default:
+            break;
+        }
       }
     };
 
@@ -803,7 +961,9 @@ function getWebSocketUrl(path: string): string {
       return;
     }
 
-    void postForm(target);
+    void submitActionForm(target).catch(() => {
+      setStatus('Error', false);
+    });
   });
 
   document.addEventListener('click', (event: MouseEvent) => {
@@ -919,21 +1079,15 @@ function getWebSocketUrl(path: string): string {
   });
 
   ws.onopen = () => {
-    setStatus('Live', true);
-    ws.send(stringifyClientNotification('fws.dashboard.connect', { view: 'html' }));
+    dashboardMessageBuffer = '';
+    setStatus('Connecting...', false);
+    void sendDashboardRequest('fws.dashboard.open', { view: 'html' })
+      .then(() => setStatus('Live', true))
+      .catch(() => setStatus('Error', false));
   };
 
   ws.onmessage = (event: MessageEvent) => {
-    const notification = parseServerNotificationData(event.data);
-    if (!notification || notification.method !== 'fws.dashboard.snapshot') {
-      return;
-    }
-    if (content) {
-      content.innerHTML = notification.params.html;
-      applyCollapseState(content);
-      applyGroupState(content);
-      applyExitedSectionState();
-    }
+    processDashboardChunk(event.data);
   };
 
   ws.onreconnect = (_attempt: number, delayMs: number) => {
@@ -942,6 +1096,10 @@ function getWebSocketUrl(path: string): string {
 
   ws.onerror = () => {
     setStatus('Error', false);
+  };
+
+  ws.onclose = () => {
+    rejectPendingRequests(dashboardPendingRequests, 'FWS dashboard socket closed');
   };
 
   ws.onclose = () => {

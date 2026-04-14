@@ -322,10 +322,14 @@ When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboa
 - `GET /fws/` dashboard (live-updating via `WS /ws/fws`)
 - shell logs open in a full-page in-dashboard drawer backed by `WS /ws/fws/logs/{shell_id}`
 - `GET /fws/logs/{shell_id}` redirects into the dashboard drawer for compatibility
-- both websocket surfaces now use JSON-RPC notifications rather than ad-hoc `{type: ...}` payloads
-  - client connect notifications: `fws.dashboard.connect`, `fws.logs.connect`
+- both websocket surfaces now use JSON-RPC envelopes rather than ad-hoc `{type: ...}` payloads
+  - dashboard and log opening, plus UI actions like terminate/purge/shutdown, are JSON-RPC requests with JSON-RPC responses
+  - shell/dashboard/log update pushes are JSON-RPC notifications
+  - the websocket text stream is JSONL-framed; each line is one JSON-RPC request, response, or notification envelope
+  - dashboard open request: `fws.dashboard.open`
+  - logs open request: `fws.logs.open`
   - server notifications: `fws.dashboard.snapshot`, `fws.logs.initial`, `fws.logs.chunk`, `fws.logs.reset`, `fws.error`
-- the typed protocol contract for those websocket notifications now lives in:
+- the typed protocol contract for those websocket request/response and notification lanes now lives in:
   - `framework_shells.protocols.fws_ui` on the Python/backend side
   - `framework_shells/ui/src/protocol.ts` on the TypeScript/frontend side
 
@@ -406,7 +410,6 @@ Notes:
   - stdin uses JSON-RPC notifications
   - stdout uses framed JSONL records
 - The typed Python broker contract for that stream now lives in `framework_shells.protocols.terminal_stream`.
-- The matching TypeScript terminal-stream contract now lives in `framework_shells/ui/src/terminal_protocol.ts`.
 - If no `command` is provided, FWS injects an internal placeholder and resolves either the native broker or the configured fallback automatically.
 - Set `pipe.terminal_fallback: command` if you want the shellspec `command` to be the fallback broker path.
 - Set `pipe.terminal_fallback: error` (or `native_only`) if you want launch to fail when the native broker is unavailable.

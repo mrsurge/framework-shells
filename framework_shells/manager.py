@@ -182,6 +182,12 @@ class FrameworkShellManager:
         self._hooks = process_hooks
         self.external_process_provider = external_process_provider
         self._procfs_provider = ProcfsProcessProvider() if enable_procfs_process_discovery else None
+        try:
+            from .fws_socketio_peer import ensure_fws_socketio_peer_started
+
+            asyncio.get_running_loop().create_task(ensure_fws_socketio_peer_started())
+        except Exception:
+            pass
 
     async def build_process_snapshot(
         self,

@@ -46,6 +46,10 @@ export interface LogsOpenParams {
   shell_id: string;
 }
 
+export interface LogsCloseParams {
+  shell_id: string;
+}
+
 export interface EmptyParams {}
 
 export interface ShellActionParams {
@@ -170,6 +174,7 @@ export interface ErrorParams {
 export interface ClientRequestMap {
   'fws.dashboard.open': DashboardOpenParams;
   'fws.logs.open': LogsOpenParams;
+  'fws.logs.close': LogsCloseParams;
   'fws.dashboard.refresh': EmptyParams;
   'fws.logs.truncate': EmptyParams;
   'fws.exited.purge': EmptyParams;
@@ -183,6 +188,7 @@ export interface ClientRequestMap {
 export interface RequestResultMap {
   'fws.dashboard.open': { accepted: true; state: DashboardStatePayload };
   'fws.logs.open': { accepted: true; shell_id: string };
+  'fws.logs.close': { ok: true };
   'fws.dashboard.refresh': { ok: true; state: DashboardStatePayload };
   'fws.logs.truncate': { ok: true };
   'fws.exited.purge': { ok: true };
@@ -574,13 +580,20 @@ export function stringifyClientRequest<M extends ClientRequestMethod>(
   id: string,
   params: ClientRequestMap[M],
 ): string {
-  const payload: ClientRequestFor<M> = {
+  return JSON.stringify(buildClientRequest(method, id, params));
+}
+
+export function buildClientRequest<M extends ClientRequestMethod>(
+  method: M,
+  id: string,
+  params: ClientRequestMap[M],
+): ClientRequestFor<M> {
+  return {
     jsonrpc: '2.0',
     id,
     method,
     params,
   };
-  return JSON.stringify(payload);
 }
 
 export function frameJsonRpcLine(payload: string): string {
@@ -601,27 +614,36 @@ export function consumeJsonlChunk(
   return { lines, buffer: nextBuffer };
 }
 
-export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage | null {
-  const parsed = parseJsonRpcObject(raw);
-  if (!parsed) {
+function coerceIncomingJsonRpcObject(parsed: unknown): IncomingJsonRpcMessage | null {
+  if (!isRecord(parsed)) {
     return null;
   }
 
-  if (typeof parsed.id === 'string' && isRecord(parsed.result)) {
-    const result = parsed.result;
+  if (!isJsonRpcVersion(parsed.jsonrpc)) {
+    return null;
+  }
+
+  const parsedId = parsed.id;
+  const parsedMethod = parsed.method;
+  const parsedResult = parsed.result;
+  const parsedError = parsed.error;
+  const parsedParams = parsed.params;
+
+  if (typeof parsedId === 'string' && isRecord(parsedResult)) {
+    const result = parsedResult;
     if (result.accepted === true) {
       const state = coerceDashboardStatePayload(result.state);
       if (state) {
         return {
           jsonrpc: '2.0',
-          id: parsed.id,
+          id: parsedId,
           result: { accepted: true, state },
         };
       }
       if (typeof result.shell_id === 'string') {
         return {
           jsonrpc: '2.0',
-          id: parsed.id,
+          id: parsedId,
           result: { accepted: true, shell_id: result.shell_id },
         };
       }
@@ -632,27 +654,27 @@ export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage
       if (state) {
         return {
           jsonrpc: '2.0',
-          id: parsed.id,
+          id: parsedId,
           result: { ok: true, state },
         };
       }
       return {
         jsonrpc: '2.0',
-        id: parsed.id,
+        id: parsedId,
         result: { ok: true },
       };
     }
     return null;
   }
 
-  if ((typeof parsed.id === 'string' || parsed.id === null) && isRecord(parsed.error)) {
-    const error = parsed.error;
+  if ((typeof parsedId === 'string' || parsedId === null) && isRecord(parsedError)) {
+    const error = parsedError;
     if (typeof error.code !== 'number' || typeof error.message !== 'string') {
       return null;
     }
     const response: JsonRpcErrorResponse = {
       jsonrpc: '2.0',
-      id: typeof parsed.id === 'string' ? parsed.id : null,
+      id: typeof parsedId === 'string' ? parsedId : null,
       error: {
         code: error.code,
         message: error.message,
@@ -673,92 +695,92 @@ export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage
     return response;
   }
 
-  if (typeof parsed.method !== 'string' || !isRecord(parsed.params)) {
+  if (typeof parsedMethod !== 'string' || !isRecord(parsedParams)) {
     return null;
   }
 
-  switch (parsed.method) {
+  switch (parsedMethod) {
     case 'fws.shell.created':
     case 'fws.shell.spawned':
     case 'fws.shell.updated':
     case 'fws.shell.exited': {
-      const shell = coerceDashboardShellPayload(parsed.params.shell);
+      const shell = coerceDashboardShellPayload(parsedParams.shell);
       if (!shell) {
         return null;
       }
       return {
         jsonrpc: '2.0',
-        method: parsed.method,
+        method: parsedMethod,
         params: { shell },
       };
     }
     case 'fws.shell.removed':
-      if (typeof parsed.params.shell_id === 'string') {
+      if (typeof parsedParams.shell_id === 'string') {
         return {
           jsonrpc: '2.0',
-          method: parsed.method,
-          params: { shell_id: parsed.params.shell_id },
+          method: parsedMethod,
+          params: { shell_id: parsedParams.shell_id },
         };
       }
       return null;
     case 'fws.logs.initial':
       if (
-        typeof parsed.params.shell_id === 'string' &&
-        typeof parsed.params.stdout === 'string' &&
-        typeof parsed.params.stderr === 'string'
+        typeof parsedParams.shell_id === 'string' &&
+        typeof parsedParams.stdout === 'string' &&
+        typeof parsedParams.stderr === 'string'
       ) {
         return {
           jsonrpc: '2.0',
-          method: parsed.method,
+          method: parsedMethod,
           params: {
-            shell_id: parsed.params.shell_id,
-            stdout: parsed.params.stdout,
-            stderr: parsed.params.stderr,
+            shell_id: parsedParams.shell_id,
+            stdout: parsedParams.stdout,
+            stderr: parsedParams.stderr,
           },
         };
       }
       return null;
     case 'fws.logs.chunk':
       if (
-        typeof parsed.params.shell_id === 'string' &&
-        isLogStreamName(parsed.params.stream) &&
-        typeof parsed.params.chunk === 'string'
+        typeof parsedParams.shell_id === 'string' &&
+        isLogStreamName(parsedParams.stream) &&
+        typeof parsedParams.chunk === 'string'
       ) {
         return {
           jsonrpc: '2.0',
-          method: parsed.method,
+          method: parsedMethod,
           params: {
-            shell_id: parsed.params.shell_id,
-            stream: parsed.params.stream,
-            chunk: parsed.params.chunk,
+            shell_id: parsedParams.shell_id,
+            stream: parsedParams.stream,
+            chunk: parsedParams.chunk,
           },
         };
       }
       return null;
     case 'fws.logs.reset':
-      if (typeof parsed.params.shell_id === 'string' && isLogStreamName(parsed.params.stream)) {
+      if (typeof parsedParams.shell_id === 'string' && isLogStreamName(parsedParams.stream)) {
         return {
           jsonrpc: '2.0',
-          method: parsed.method,
+          method: parsedMethod,
           params: {
-            shell_id: parsed.params.shell_id,
-            stream: parsed.params.stream,
+            shell_id: parsedParams.shell_id,
+            stream: parsedParams.stream,
           },
         };
       }
       return null;
     case 'fws.error':
-      if (typeof parsed.params.message === 'string') {
-        const result: ErrorParams = { message: parsed.params.message };
-        if (typeof parsed.params.code === 'string') {
-          result.code = parsed.params.code;
+      if (typeof parsedParams.message === 'string') {
+        const result: ErrorParams = { message: parsedParams.message };
+        if (typeof parsedParams.code === 'string') {
+          result.code = parsedParams.code;
         }
-        if (typeof parsed.params.shell_id === 'string') {
-          result.shell_id = parsed.params.shell_id;
+        if (typeof parsedParams.shell_id === 'string') {
+          result.shell_id = parsedParams.shell_id;
         }
         return {
           jsonrpc: '2.0',
-          method: parsed.method,
+          method: parsedMethod,
           params: result,
         };
       }
@@ -766,4 +788,16 @@ export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage
     default:
       return null;
   }
+}
+
+export function coerceIncomingJsonRpcMessage(value: unknown): IncomingJsonRpcMessage | null {
+  return coerceIncomingJsonRpcObject(value);
+}
+
+export function parseIncomingJsonRpcMessage(raw: string): IncomingJsonRpcMessage | null {
+  const parsed = parseJsonRpcObject(raw);
+  if (!parsed) {
+    return null;
+  }
+  return coerceIncomingJsonRpcObject(parsed);
 }

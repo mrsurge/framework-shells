@@ -22,6 +22,7 @@ FwsShellEventMethod = Literal[
 
 DASHBOARD_OPEN_METHOD = "fws.dashboard.open"
 LOGS_OPEN_METHOD = "fws.logs.open"
+LOGS_CLOSE_METHOD = "fws.logs.close"
 DASHBOARD_REFRESH_METHOD = "fws.dashboard.refresh"
 LOGS_TRUNCATE_METHOD = "fws.logs.truncate"
 EXITED_PURGE_METHOD = "fws.exited.purge"
@@ -47,6 +48,10 @@ class DashboardOpenParams(TypedDict):
 
 
 class LogsOpenParams(TypedDict):
+    shell_id: str
+
+
+class LogsCloseParams(TypedDict):
     shell_id: str
 
 
@@ -206,6 +211,13 @@ class LogsOpenRequest(TypedDict):
     params: LogsOpenParams
 
 
+class LogsCloseRequest(TypedDict):
+    jsonrpc: Literal["2.0"]
+    method: Literal["fws.logs.close"]
+    id: str
+    params: LogsCloseParams
+
+
 class DashboardRefreshRequest(TypedDict):
     jsonrpc: Literal["2.0"]
     method: Literal["fws.dashboard.refresh"]
@@ -265,6 +277,7 @@ class ShutdownRequest(TypedDict):
 FwsRequest: TypeAlias = (
     DashboardOpenRequest
     | LogsOpenRequest
+    | LogsCloseRequest
     | DashboardRefreshRequest
     | LogsTruncateRequest
     | ExitedPurgeRequest
@@ -394,6 +407,17 @@ def parse_fws_request(raw: str) -> FwsRequest | None:
             "jsonrpc": JSONRPC_VERSION,
             "id": parsed.id,
             "method": LOGS_OPEN_METHOD,
+            "params": {"shell_id": shell_id},
+        }
+
+    if parsed.method == LOGS_CLOSE_METHOD:
+        shell_id = parsed.params.get("shell_id")
+        if not isinstance(shell_id, str) or not shell_id.strip():
+            return None
+        return {
+            "jsonrpc": JSONRPC_VERSION,
+            "id": parsed.id,
+            "method": LOGS_CLOSE_METHOD,
             "params": {"shell_id": shell_id},
         }
 

@@ -1,7 +1,7 @@
-import ReconnectingWebSocket from './reconnecting_websocket';
+import { connectSocketIo, type SocketIoSocket } from './socketio_client';
+import { initFwsConsoleBridge } from './te2_console_bridge';
 import {
-  consumeJsonlChunk,
-  frameJsonRpcLine,
+  buildClientRequest,
   type ClientRequestMap,
   type ClientRequestMethod,
   type DashboardProcessPayload,
@@ -11,8 +11,7 @@ import {
   type LogStreamName,
   type RequestResultMap,
   type ServerNotification,
-  parseIncomingJsonRpcMessage,
-  stringifyClientRequest,
+  coerceIncomingJsonRpcMessage,
 } from './protocol';
 
 const LOG_STREAMS: LogStreamName[] = ['stdout', 'stderr'];
@@ -33,7 +32,6 @@ interface StreamState {
 interface LogState {
   shellId: string;
   shellLabel: string;
-  socket: ReconnectingWebSocket | null;
   paused: boolean;
   streams: Record<LogStreamName, StreamState>;
 }
@@ -49,11 +47,6 @@ interface FilterConfig {
   excludeMode: FilterMode;
 }
 
-interface PendingRpcRequest {
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-}
-
 interface SubgroupStyle {
   bg?: string;
   border?: string;
@@ -63,6 +56,9 @@ interface SubgroupStyle {
 type Matcher = (line: string) => boolean;
 type SubgroupStyleMap = Record<string, SubgroupStyle>;
 type DashboardStateResult = RequestResultMap['fws.dashboard.open'] | RequestResultMap['fws.dashboard.refresh'];
+
+const FWS_SOCKETIO_NAMESPACE = '/fws';
+const FWS_SOCKETIO_PATH = '/fws_ws/socket.io';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -110,11 +106,6 @@ function makeStreamState(containerId: string): StreamState {
     partial: '',
     pendingCount: 0,
   };
-}
-
-function getWebSocketUrl(path: string): string {
-  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${scheme}://${window.location.host}${path}`;
 }
 
 function escapeHtml(value: unknown): string {
@@ -647,6 +638,8 @@ function renderDashboardContent(state: DashboardStatePayload): string {
 }
 
 (() => {
+  void initFwsConsoleBridge();
+
   const content = getElementById<HTMLElement>('fws-content');
   const statusEl = getElementById<HTMLElement>('fws-status');
   const toggleAllBtn = getElementById<HTMLButtonElement>('fws-toggle-all');
@@ -661,15 +654,17 @@ function renderDashboardContent(state: DashboardStatePayload): string {
   let defaultCollapsed = true;
   let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
   let exitedVisibleCount = EXITED_PAGE_SIZE;
-  let dashboardMessageBuffer = '';
   let dashboardRequestCounter = 0;
   let dashboardState: DashboardStatePayload = { shells: [], processes: [] };
-  const dashboardPendingRequests = new Map<string, PendingRpcRequest>();
+  let fwsSocket: SocketIoSocket | null = null;
+  const fwsSocketReady = connectSocketIo(FWS_SOCKETIO_NAMESPACE, {
+    path: FWS_SOCKETIO_PATH,
+    transports: ['websocket'],
+  });
 
   const logState: LogState = {
     shellId: '',
     shellLabel: '',
-    socket: null,
     paused: false,
     streams: {
       stdout: makeStreamState('stdout-container'),
@@ -682,12 +677,12 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     return `fws_req_${dashboardRequestCounter}`;
   }
 
-  function rejectPendingRequests(pending: Map<string, PendingRpcRequest>, message: string): void {
-    const error = new Error(message);
-    for (const [, request] of pending) {
-      request.reject(error);
+  async function getFwsSocket(): Promise<SocketIoSocket> {
+    if (fwsSocket) {
+      return fwsSocket;
     }
-    pending.clear();
+    fwsSocket = await fwsSocketReady;
+    return fwsSocket;
   }
 
   function isJsonRpcErrorMessage(
@@ -824,25 +819,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     }
   }
 
-  function routeDashboardRpcMessage(message: IncomingJsonRpcMessage): void {
-    if (isJsonRpcResponseMessage(message)) {
-      const pending = dashboardPendingRequests.get(message.id);
-      if (!pending) {
-        return;
-      }
-      dashboardPendingRequests.delete(message.id);
-      if (isJsonRpcErrorMessage(message)) {
-        pending.reject(new Error(message.error.message));
-        return;
-      }
-      pending.resolve(message.result);
-      return;
-    }
-
-    if (!isServerNotificationMessage(message)) {
-      return;
-    }
-
+  function routeDashboardNotification(message: ServerNotification): void {
     switch (message.method) {
       case 'fws.shell.created':
       case 'fws.shell.spawned':
@@ -854,21 +831,12 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         removeShellDelta(message.params.shell_id);
         return;
       case 'fws.error':
-        setStatus(message.params.message, false);
+        if (!message.params.shell_id) {
+          setStatus(message.params.message, false);
+        }
         return;
       default:
         return;
-    }
-  }
-
-  function processDashboardChunk(raw: unknown): void {
-    const consumed = consumeJsonlChunk(dashboardMessageBuffer, raw);
-    dashboardMessageBuffer = consumed.buffer;
-    for (const line of consumed.lines) {
-      const message = parseIncomingJsonRpcMessage(line);
-      if (message) {
-        routeDashboardRpcMessage(message);
-      }
     }
   }
 
@@ -877,12 +845,21 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     params: ClientRequestMap[M],
   ): Promise<RequestResultMap[M]> {
     const requestId = nextDashboardRequestId();
+    const request = buildClientRequest(method, requestId, params);
+    const socket = await getFwsSocket();
     return await new Promise<RequestResultMap[M]>((resolve, reject) => {
-      dashboardPendingRequests.set(requestId, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
+      socket.emit('fws_request', request, (payload: unknown) => {
+        const message = coerceIncomingJsonRpcMessage(payload);
+        if (!message || !isJsonRpcResponseMessage(message)) {
+          reject(new Error(`Invalid response for ${method}`));
+          return;
+        }
+        if (isJsonRpcErrorMessage(message)) {
+          reject(new Error(message.error.message));
+          return;
+        }
+        resolve(message.result as RequestResultMap[M]);
       });
-      ws.send(frameJsonRpcLine(stringifyClientRequest(method, requestId, params)));
     });
   }
 
@@ -1333,16 +1310,88 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     renderStream(stream);
   }
 
-  function closeLogSocket(): void {
-    if (!logState.socket) {
+  function renderLogError(message: string): void {
+    for (const stream of LOG_STREAMS) {
+      const state = logState.streams[stream];
+      if (state.container) {
+        state.container.innerHTML = `<div class="loading">${escapeHtml(message)}</div>`;
+      }
+    }
+  }
+
+  function routeLogNotification(message: ServerNotification): void {
+    const currentShellId = logState.shellId;
+    if (!currentShellId) {
       return;
     }
-    try {
-      logState.socket.close();
-    } catch {
-      // ignore
+
+    switch (message.method) {
+      case 'fws.logs.initial':
+        if (message.params.shell_id !== currentShellId) {
+          return;
+        }
+        parseTextIntoState('stdout', message.params.stdout);
+        parseTextIntoState('stderr', message.params.stderr);
+        renderStream('stdout');
+        renderStream('stderr');
+        return;
+      case 'fws.logs.reset':
+        if (message.params.shell_id !== currentShellId) {
+          return;
+        }
+        resetStream(message.params.stream);
+        return;
+      case 'fws.logs.chunk': {
+        if (message.params.shell_id !== currentShellId) {
+          return;
+        }
+        const stream = message.params.stream;
+        const appended = appendChunkToState(stream, message.params.chunk);
+        if (logState.paused) {
+          logState.streams[stream].pendingCount += appended.newLines.length;
+          setPendingLabel(stream);
+          return;
+        }
+        if (hasActiveFilters(stream)) {
+          renderStream(stream);
+        } else {
+          appendLines(stream, appended.newLines, appended.partialLine);
+        }
+        return;
+      }
+      case 'fws.error':
+        if (message.params.shell_id !== undefined && message.params.shell_id !== currentShellId) {
+          return;
+        }
+        renderLogError(message.params.message);
+        setLogStatus('Error', false);
+        return;
+      default:
+        return;
     }
-    logState.socket = null;
+  }
+
+  async function openLogSubscription(shellId: string): Promise<void> {
+    try {
+      await sendDashboardRequest('fws.logs.open', { shell_id: shellId });
+      if (logState.shellId === shellId) {
+        setLogStatus('Connected', true);
+      }
+    } catch (error) {
+      if (logState.shellId !== shellId) {
+        return;
+      }
+      renderLogError(error instanceof Error ? error.message : String(error));
+      setLogStatus('Error', false);
+    }
+  }
+
+  async function closeLogSubscription(shellId: string): Promise<void> {
+    try {
+      await sendDashboardRequest('fws.logs.close', { shell_id: shellId });
+    } catch {
+      // Best-effort cleanup only.
+    }
   }
 
   function syncLogUrl(shellId: string, replace: boolean): void {
@@ -1391,131 +1440,28 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       }
     }
 
-    closeLogSocket();
-
-    const socket = new ReconnectingWebSocket(getWebSocketUrl(`/ws/fws/logs/${encodeURIComponent(nextShellId)}`), {
-      reconnectInterval: 1000,
-      maxReconnectInterval: 5000,
-      reconnectDecay: 1.5,
+    void getFwsSocket().then((socket) => {
+      if (logState.shellId !== nextShellId || !socket.connected) {
+        return;
+      }
+      void openLogSubscription(nextShellId);
     });
-    logState.socket = socket;
-    let logMessageBuffer = '';
-    let logOpenRequestId = '';
-
-    socket.onopen = () => {
-      if (logState.socket !== socket) {
-        return;
-      }
-      setLogStatus('Connecting...', false);
-      logOpenRequestId = `fws_log_${Date.now()}`;
-      socket.send(frameJsonRpcLine(stringifyClientRequest('fws.logs.open', logOpenRequestId, { shell_id: nextShellId })));
-    };
-
-    socket.onmessage = (event: MessageEvent) => {
-      if (logState.socket !== socket) {
-        return;
-      }
-      const consumed = consumeJsonlChunk(logMessageBuffer, event.data);
-      logMessageBuffer = consumed.buffer;
-      for (const line of consumed.lines) {
-        const message = parseIncomingJsonRpcMessage(line);
-        if (!message) {
-          continue;
-        }
-        if ('id' in message && typeof message.id === 'string') {
-          if (message.id === logOpenRequestId) {
-            if ('error' in message) {
-              for (const stream of LOG_STREAMS) {
-                const state = logState.streams[stream];
-                if (state.container) {
-                  state.container.innerHTML = `<div class="loading">${escapeHtml(message.error.message)}</div>`;
-                }
-              }
-              setLogStatus('Error', false);
-            } else {
-              setLogStatus('Connected', true);
-            }
-          }
-          continue;
-        }
-        if (!isServerNotificationMessage(message)) {
-          continue;
-        }
-        switch (message.method) {
-          case 'fws.logs.initial':
-            parseTextIntoState('stdout', message.params.stdout);
-            parseTextIntoState('stderr', message.params.stderr);
-            renderStream('stdout');
-            renderStream('stderr');
-            break;
-          case 'fws.logs.reset':
-            resetStream(message.params.stream);
-            break;
-          case 'fws.logs.chunk': {
-            const stream = message.params.stream;
-            const appended = appendChunkToState(stream, message.params.chunk);
-            if (logState.paused) {
-              logState.streams[stream].pendingCount += appended.newLines.length;
-              setPendingLabel(stream);
-              break;
-            }
-            if (hasActiveFilters(stream)) {
-              renderStream(stream);
-            } else {
-              appendLines(stream, appended.newLines, appended.partialLine);
-            }
-            break;
-          }
-          case 'fws.error':
-            for (const stream of LOG_STREAMS) {
-              const state = logState.streams[stream];
-              if (state.container) {
-                state.container.innerHTML = `<div class="loading">${escapeHtml(message.params.message)}</div>`;
-              }
-            }
-            if (message.params.shell_id === nextShellId || message.params.shell_id === undefined) {
-              setLogStatus('Error', false);
-            }
-            break;
-          default:
-            break;
-        }
-      }
-    };
-
-    socket.onreconnect = (_attempt: number, delayMs: number) => {
-      if (logState.socket !== socket) {
-        return;
-      }
-      setLogStatus(`Reconnecting in ${Math.round(delayMs)}ms...`, false);
-    };
-
-    socket.onerror = () => {
-      if (logState.socket !== socket) {
-        return;
-      }
-      setLogStatus('Error', false);
-    };
-
-    socket.onclose = () => {
-      if (logState.socket !== socket) {
-        return;
-      }
-      setLogStatus('Disconnected', false);
-    };
   }
 
   function closeLogDrawer(options: DrawerOptions = {}): void {
     if (!logDrawer) {
       return;
     }
-    closeLogSocket();
+    const previousShellId = logState.shellId;
     logState.shellId = '';
     logState.shellLabel = '';
     logDrawer.classList.remove('is-open');
     logDrawer.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('has-log-drawer');
     setLogStatus('Disconnected', false);
+    if (previousShellId) {
+      void closeLogSubscription(previousShellId);
+    }
     if (!options.fromPopState) {
       syncLogUrl('', true);
     }
@@ -1693,43 +1639,62 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     flashCopied(target);
   });
 
-  const ws = new ReconnectingWebSocket(getWebSocketUrl('/ws/fws'), {
-    reconnectInterval: 1500,
-    maxReconnectInterval: 5000,
-    reconnectDecay: 1.5,
-  });
+  void fwsSocketReady
+    .then((socket) => {
+      fwsSocket = socket;
 
-  ws.onopen = () => {
-    dashboardMessageBuffer = '';
-    setStatus('Connecting...', false);
-    void sendDashboardRequest('fws.dashboard.open', { view: 'html' })
-      .then((result) => {
-        if (hasDashboardStateResult(result)) {
-          applyDashboardState(result.state);
-          setStatus('Live', true);
-        } else {
-          setStatus('Error', false);
+      const handleConnect = (): void => {
+        setStatus('Connecting...', false);
+        if (logState.shellId) {
+          setLogStatus('Connecting...', false);
         }
-      })
-      .catch(() => setStatus('Error', false));
-  };
+        void sendDashboardRequest('fws.dashboard.open', { view: 'html' })
+          .then((result) => {
+            if (hasDashboardStateResult(result)) {
+              applyDashboardState(result.state);
+              setStatus('Live', true);
+            } else {
+              setStatus('Error', false);
+            }
+          })
+          .catch(() => setStatus('Error', false));
+        if (logState.shellId) {
+          void openLogSubscription(logState.shellId);
+        }
+      };
 
-  ws.onmessage = (event: MessageEvent) => {
-    processDashboardChunk(event.data);
-  };
+      socket.on('connect', handleConnect);
+      socket.on('fws_notification', (payload: unknown) => {
+        const message = coerceIncomingJsonRpcMessage(payload);
+        if (!message || !isServerNotificationMessage(message)) {
+          return;
+        }
+        routeDashboardNotification(message);
+        routeLogNotification(message);
+      });
+      socket.on('connect_error', () => {
+        setStatus('Error', false);
+        if (logState.shellId) {
+          setLogStatus('Error', false);
+        }
+      });
+      socket.on('disconnect', () => {
+        setStatus('Disconnected', false);
+        if (logState.shellId) {
+          setLogStatus('Disconnected', false);
+        }
+      });
 
-  ws.onreconnect = (_attempt: number, delayMs: number) => {
-    setStatus(`Reconnecting in ${Math.round(delayMs)}ms...`, false);
-  };
-
-  ws.onerror = () => {
-    setStatus('Error', false);
-  };
-
-  ws.onclose = () => {
-    rejectPendingRequests(dashboardPendingRequests, 'FWS dashboard socket closed');
-    setStatus('Disconnected', false);
-  };
+      if (socket.connected) {
+        handleConnect();
+      }
+    })
+    .catch(() => {
+      setStatus('Error', false);
+      if (logState.shellId) {
+        setLogStatus('Error', false);
+      }
+    });
 
   updateToggleAllLabel();
 

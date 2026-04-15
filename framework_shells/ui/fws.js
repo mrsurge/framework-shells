@@ -1,158 +1,327 @@
 "use strict";
 (() => {
-  // framework_shells/ui/src/reconnecting_websocket.ts
-  var DEFAULT_OPTIONS = {
-    maxRetries: Number.POSITIVE_INFINITY,
-    reconnectInterval: 1e3,
-    maxReconnectInterval: 3e4,
-    reconnectDecay: 1.5,
-    debug: false,
-    protocols: []
-  };
-  var ReconnectingWebSocket = class {
-    constructor(url, options = {}) {
-      this.ws = null;
-      this.reconnectAttempts = 0;
-      this.reconnectTimeout = null;
-      this.messageQueue = [];
-      this.forcedClose = false;
-      this.readyState = WebSocket.CONNECTING;
-      this.onopen = null;
-      this.onmessage = null;
-      this.onerror = null;
-      this.onclose = null;
-      this.onreconnect = null;
-      this.url = url;
-      this.options = {
-        maxRetries: options.maxRetries ?? DEFAULT_OPTIONS.maxRetries,
-        reconnectInterval: options.reconnectInterval ?? DEFAULT_OPTIONS.reconnectInterval,
-        maxReconnectInterval: options.maxReconnectInterval ?? DEFAULT_OPTIONS.maxReconnectInterval,
-        reconnectDecay: options.reconnectDecay ?? DEFAULT_OPTIONS.reconnectDecay,
-        debug: options.debug ?? DEFAULT_OPTIONS.debug,
-        protocols: options.protocols ?? DEFAULT_OPTIONS.protocols
+  // framework_shells/ui/src/socketio_client.ts
+  var DEFAULT_SOCKET_IO_SCRIPT_PATH = "/static/vendor/socket.io.min.js";
+  function getSocketIoFactory() {
+    const io = window.io;
+    return typeof io === "function" ? io : null;
+  }
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = (event) => {
+        script.remove();
+        reject(event);
       };
-      this.connect();
+      document.head.appendChild(script);
+    });
+  }
+  async function ensureSocketIoClient(scriptPath = DEFAULT_SOCKET_IO_SCRIPT_PATH) {
+    if (getSocketIoFactory()) {
+      return;
     }
-    log(...args) {
-      if (this.options.debug) {
-        console.log("[ReconnectingWebSocket]", ...args);
-      }
+    await loadScript(scriptPath);
+    if (!getSocketIoFactory()) {
+      throw new Error("Failed to load Socket.IO client");
     }
-    connect() {
-      if (this.forcedClose) {
-        this.log("Connection blocked: forcedClose = true");
-        return;
+  }
+  async function connectSocketIo(namespace, options) {
+    await ensureSocketIoClient(options.socketIoScriptPath || DEFAULT_SOCKET_IO_SCRIPT_PATH);
+    const io = getSocketIoFactory();
+    if (!io) {
+      throw new Error("Socket.IO client factory unavailable");
+    }
+    const connectOptions = {
+      path: options.path,
+      transports: options.transports ?? ["websocket"]
+    };
+    if (options.auth) {
+      connectOptions.auth = options.auth;
+    }
+    if (options.query) {
+      connectOptions.query = options.query;
+    }
+    return io(namespace, connectOptions);
+  }
+
+  // framework_shells/ui/src/te2_console_bridge.ts
+  var CONSOLE_LEVELS = ["log", "info", "warn", "error", "debug"];
+  var DEFAULT_SOCKET_IO_SCRIPT_PATH2 = "/static/vendor/socket.io.min.js";
+  var DEFAULT_NAMESPACE = "/te2_console";
+  var DEFAULT_SOCKET_PATH = "/te2_console_ws/socket.io";
+  var DEFAULT_APP_ID = "file_editor_cm6";
+  var DEFAULT_SOURCE = "console_bridge";
+  var bridgeActive = false;
+  var bridgeSocket = null;
+  var bridgeWorkerId = null;
+  var bridgeWorkerLabel = null;
+  var fwsConsoleBridgePromise = null;
+  var originalConsole = {};
+  function getSocketIoFactory2() {
+    const io = window.io;
+    return typeof io === "function" ? io : null;
+  }
+  function isRecord(value) {
+    return typeof value === "object" && value !== null;
+  }
+  function isEvalRequest(value) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return typeof value.reqId === "string" && typeof value.code === "string";
+  }
+  function loadScript2(src) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = (event) => {
+        script.remove();
+        reject(event);
+      };
+      document.head.appendChild(script);
+    });
+  }
+  async function ensureSocketIoClient2(scriptPath) {
+    if (getSocketIoFactory2()) {
+      return;
+    }
+    await loadScript2(scriptPath);
+    if (!getSocketIoFactory2()) {
+      throw new Error("Failed to load Socket.IO client");
+    }
+  }
+  function safeSerialize(value) {
+    const seen = /* @__PURE__ */ new WeakSet();
+    return JSON.stringify(value, (_key, nextValue) => {
+      if (typeof nextValue === "bigint") {
+        return `BigInt(${nextValue.toString()})`;
       }
-      this.log(`Connecting to ${this.url}...`);
-      try {
-        this.ws = new WebSocket(this.url, this.options.protocols);
-        this.readyState = WebSocket.CONNECTING;
-        this.ws.onopen = (event) => {
-          this.log("Connected successfully");
-          this.readyState = WebSocket.OPEN;
-          this.reconnectAttempts = 0;
-          while (this.messageQueue.length > 0) {
-            const message = this.messageQueue.shift();
-            if (message === void 0 || this.ws === null) {
-              continue;
-            }
-            this.log("Sending queued message:", message);
-            this.ws.send(message);
-          }
-          this.onopen?.(event);
-        };
-        this.ws.onmessage = (event) => {
-          this.onmessage?.(event);
-        };
-        this.ws.onerror = (event) => {
-          this.log("WebSocket error:", event);
-          this.onerror?.(event);
-        };
-        this.ws.onclose = (event) => {
-          this.log("Connection closed:", event.code, event.reason);
-          this.readyState = WebSocket.CLOSED;
-          this.onclose?.(event);
-          if (!this.forcedClose) {
-            this.scheduleReconnect();
-          }
-        };
-      } catch (error) {
-        this.log("Connection error:", error);
-        this.readyState = WebSocket.CLOSED;
-        this.onerror?.(error instanceof Error ? error : new Error(String(error)));
-        if (!this.forcedClose) {
-          this.scheduleReconnect();
+      if (nextValue instanceof Error) {
+        return { name: nextValue.name, message: nextValue.message, stack: nextValue.stack };
+      }
+      if (typeof nextValue === "object" && nextValue !== null) {
+        if (seen.has(nextValue)) {
+          return "[Circular]";
         }
+        seen.add(nextValue);
       }
+      return nextValue;
+    });
+  }
+  function serializeArg(value) {
+    try {
+      return JSON.parse(safeSerialize(value));
+    } catch {
+      return String(value);
     }
-    scheduleReconnect() {
-      if (this.reconnectAttempts >= this.options.maxRetries) {
-        this.log(`Max reconnection attempts (${this.options.maxRetries}) reached`);
+  }
+  function randomWorkerSuffix() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID().split("-")[0] || Math.random().toString(36).slice(2, 10);
+    }
+    return Math.random().toString(36).slice(2, 10);
+  }
+  function sanitizeWorkerLabel(value) {
+    const raw = String(value ?? "").trim();
+    const normalized = raw.replace(/[^a-zA-Z0-9._:-]+/g, "_").replace(/^_+|_+$/g, "");
+    return normalized || "worker";
+  }
+  function perWindowWorkerId(label) {
+    const base = sanitizeWorkerLabel(label);
+    const storageKey = `te2.consoleBridge.workerId:${base}`;
+    try {
+      const existing = window.sessionStorage.getItem(storageKey);
+      if (existing && existing.trim()) {
+        return existing.trim();
+      }
+      const created = `${base}:${randomWorkerSuffix()}`;
+      window.sessionStorage.setItem(storageKey, created);
+      return created;
+    } catch {
+      return `${base}:${randomWorkerSuffix()}`;
+    }
+  }
+  function emitLog(level, rawArgs) {
+    if (!bridgeSocket || !bridgeSocket.connected || !bridgeWorkerId || !bridgeWorkerLabel) {
+      return;
+    }
+    bridgeSocket.emit("console:log", {
+      workerId: bridgeWorkerId,
+      workerLabel: bridgeWorkerLabel,
+      level,
+      ts: Date.now(),
+      args: rawArgs.map(serializeArg)
+    });
+  }
+  function patchConsole() {
+    const consoleRef = console;
+    for (const level of CONSOLE_LEVELS) {
+      originalConsole[level] = consoleRef[level].bind(console);
+      consoleRef[level] = (...args) => {
+        try {
+          emitLog(level, args);
+        } catch {
+        }
+        const original = originalConsole[level];
+        if (original) {
+          original(...args);
+        }
+      };
+    }
+  }
+  function hookErrors() {
+    window.addEventListener("error", (event) => {
+      emitLog("error", [event.message, event.filename, event.lineno, event.colno, event.error ?? null]);
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      emitLog("error", ["UnhandledRejection", event.reason]);
+    });
+  }
+  function hookEval() {
+    if (!bridgeSocket) {
+      return;
+    }
+    bridgeSocket.on("console:eval", async (payload) => {
+      if (!isEvalRequest(payload) || !bridgeSocket || !bridgeWorkerId) {
         return;
       }
-      this.reconnectAttempts += 1;
-      const delay = Math.min(
-        this.options.reconnectInterval * Math.pow(this.options.reconnectDecay, this.reconnectAttempts - 1),
-        this.options.maxReconnectInterval
-      );
-      this.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.options.maxRetries})...`);
-      this.onreconnect?.(this.reconnectAttempts, delay);
-      this.reconnectTimeout = window.setTimeout(() => {
-        this.connect();
-      }, delay);
+      try {
+        let result;
+        try {
+          result = (0, eval)(payload.code);
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            result = (0, eval)(`(${payload.code})`);
+          } else {
+            throw error;
+          }
+        }
+        const resolved = await Promise.resolve(result);
+        bridgeSocket.emit("console:evalResult", {
+          workerId: bridgeWorkerId,
+          reqId: payload.reqId,
+          ok: true,
+          value: serializeArg(resolved)
+        });
+      } catch (error) {
+        bridgeSocket.emit("console:evalResult", {
+          workerId: bridgeWorkerId,
+          reqId: payload.reqId,
+          ok: false,
+          error: serializeArg(error)
+        });
+      }
+    });
+  }
+  async function initConsoleBridge(opts = {}) {
+    if (bridgeActive && bridgeSocket && bridgeWorkerId) {
+      return { socket: bridgeSocket, workerId: bridgeWorkerId, destroy: destroyConsoleBridge };
     }
-    send(data) {
-      if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
-        this.log("Sending message:", data);
-        this.ws.send(data);
+    bridgeWorkerLabel = sanitizeWorkerLabel(opts.workerLabel || opts.workerId || "worker");
+    if (opts.uniquePerWindow) {
+      bridgeWorkerId = perWindowWorkerId(bridgeWorkerLabel);
+    } else if (typeof opts.workerId === "string" && opts.workerId.trim()) {
+      bridgeWorkerId = opts.workerId.trim();
+    } else if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      bridgeWorkerId = crypto.randomUUID();
+    } else {
+      bridgeWorkerId = `w_${Math.random().toString(36).slice(2, 10)}`;
+    }
+    if (opts.socket) {
+      bridgeSocket = opts.socket;
+    } else {
+      await ensureSocketIoClient2(opts.socketIoScriptPath || DEFAULT_SOCKET_IO_SCRIPT_PATH2);
+      const io = getSocketIoFactory2();
+      if (!io || !bridgeWorkerId) {
+        console.warn("[console_bridge] window.io not available - bridge not started");
+        return null;
+      }
+      bridgeSocket = io(opts.namespace || DEFAULT_NAMESPACE, {
+        path: opts.socketPath || DEFAULT_SOCKET_PATH,
+        transports: ["websocket"],
+        query: {
+          app_id: opts.appId || DEFAULT_APP_ID,
+          source: opts.source || DEFAULT_SOURCE,
+          workerId: bridgeWorkerId,
+          workerLabel: bridgeWorkerLabel
+        }
+      });
+    }
+    const register = () => {
+      if (!bridgeSocket || !bridgeWorkerId || !bridgeWorkerLabel) {
         return;
       }
-      this.log("Queueing message (not connected):", data);
-      this.messageQueue.push(data);
+      bridgeSocket.emit("console:register", {
+        workerId: bridgeWorkerId,
+        workerLabel: bridgeWorkerLabel,
+        role: "worker"
+      });
+    };
+    bridgeSocket.on("connect", () => {
+      register();
+    });
+    if (bridgeSocket.connected) {
+      register();
     }
-    close(code = 1e3, reason = "Normal closure") {
-      this.log("Manually closing connection");
-      this.forcedClose = true;
-      if (this.reconnectTimeout !== null) {
-        window.clearTimeout(this.reconnectTimeout);
-        this.reconnectTimeout = null;
-      }
-      this.ws?.close(code, reason);
-      this.readyState = WebSocket.CLOSED;
+    patchConsole();
+    hookErrors();
+    hookEval();
+    bridgeActive = true;
+    return bridgeSocket && bridgeWorkerId ? { socket: bridgeSocket, workerId: bridgeWorkerId, destroy: destroyConsoleBridge } : null;
+  }
+  function destroyConsoleBridge() {
+    if (!bridgeActive) {
+      return;
     }
-    reconnect() {
-      this.log("Manual reconnect requested");
-      this.forcedClose = false;
-      this.reconnectAttempts = 0;
-      if (this.reconnectTimeout !== null) {
-        window.clearTimeout(this.reconnectTimeout);
-        this.reconnectTimeout = null;
-      }
-      this.ws?.close();
-      this.connect();
-    }
-    get bufferedAmount() {
-      return this.ws?.bufferedAmount ?? 0;
-    }
-    get extensions() {
-      return this.ws?.extensions ?? "";
-    }
-    get protocol() {
-      return this.ws?.protocol ?? "";
-    }
-    get binaryType() {
-      return this.ws?.binaryType ?? "blob";
-    }
-    set binaryType(type) {
-      if (this.ws !== null) {
-        this.ws.binaryType = type;
+    const consoleRef = console;
+    for (const level of CONSOLE_LEVELS) {
+      const original = originalConsole[level];
+      if (original) {
+        consoleRef[level] = original;
       }
     }
-  };
-  var reconnecting_websocket_default = ReconnectingWebSocket;
+    if (bridgeSocket?.disconnect) {
+      try {
+        bridgeSocket.disconnect();
+      } catch {
+      }
+    }
+    bridgeSocket = null;
+    bridgeWorkerId = null;
+    bridgeWorkerLabel = null;
+    bridgeActive = false;
+  }
+  function initFwsConsoleBridge() {
+    if (fwsConsoleBridgePromise) {
+      return fwsConsoleBridgePromise;
+    }
+    fwsConsoleBridgePromise = (async () => {
+      try {
+        const bridge = await initConsoleBridge({
+          workerLabel: "framework_shells",
+          uniquePerWindow: true,
+          source: "fws_console_bridge"
+        });
+        if (bridge) {
+          window.__fwsConsoleBridge = bridge;
+          console.info("[fws] console bridge ready", bridge.workerId);
+        }
+        return bridge;
+      } catch (error) {
+        console.warn("[fws] failed to init console bridge", error);
+        return null;
+      }
+    })();
+    return fwsConsoleBridgePromise;
+  }
 
   // framework_shells/ui/src/protocol.ts
-  function isRecord(value) {
+  function isRecord2(value) {
     return typeof value === "object" && value !== null;
   }
   function isLogStreamName(value) {
@@ -195,7 +364,7 @@
     return result;
   }
   function asObjectRecord(value) {
-    return isRecord(value) ? value : void 0;
+    return isRecord2(value) ? value : void 0;
   }
   function coerceDashboardShellStats(value) {
     const record = asObjectRecord(value);
@@ -466,61 +635,41 @@
     }
     return { shells, processes };
   }
-  function parseJsonRpcObject(raw) {
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return null;
-    }
-    if (!isRecord(parsed) || !isJsonRpcVersion(parsed.jsonrpc)) {
-      return null;
-    }
-    return parsed;
-  }
-  function stringifyClientRequest(method, id, params) {
-    const payload = {
+  function buildClientRequest(method, id, params) {
+    return {
       jsonrpc: "2.0",
       id,
       method,
       params
     };
-    return JSON.stringify(payload);
   }
-  function frameJsonRpcLine(payload) {
-    return payload.endsWith("\n") ? payload : `${payload}
-`;
-  }
-  function consumeJsonlChunk(buffer, chunk) {
-    if (typeof chunk !== "string" || chunk.length === 0) {
-      return { lines: [], buffer };
-    }
-    const combined = buffer + chunk;
-    const parts = combined.split("\n");
-    const nextBuffer = parts.pop() ?? "";
-    const lines = parts.map((line) => line.trim()).filter((line) => line.length > 0);
-    return { lines, buffer: nextBuffer };
-  }
-  function parseIncomingJsonRpcMessage(raw) {
-    const parsed = parseJsonRpcObject(raw);
-    if (!parsed) {
+  function coerceIncomingJsonRpcObject(parsed) {
+    if (!isRecord2(parsed)) {
       return null;
     }
-    if (typeof parsed.id === "string" && isRecord(parsed.result)) {
-      const result = parsed.result;
+    if (!isJsonRpcVersion(parsed.jsonrpc)) {
+      return null;
+    }
+    const parsedId = parsed.id;
+    const parsedMethod = parsed.method;
+    const parsedResult = parsed.result;
+    const parsedError = parsed.error;
+    const parsedParams = parsed.params;
+    if (typeof parsedId === "string" && isRecord2(parsedResult)) {
+      const result = parsedResult;
       if (result.accepted === true) {
         const state = coerceDashboardStatePayload(result.state);
         if (state) {
           return {
             jsonrpc: "2.0",
-            id: parsed.id,
+            id: parsedId,
             result: { accepted: true, state }
           };
         }
         if (typeof result.shell_id === "string") {
           return {
             jsonrpc: "2.0",
-            id: parsed.id,
+            id: parsedId,
             result: { accepted: true, shell_id: result.shell_id }
           };
         }
@@ -531,32 +680,32 @@
         if (state) {
           return {
             jsonrpc: "2.0",
-            id: parsed.id,
+            id: parsedId,
             result: { ok: true, state }
           };
         }
         return {
           jsonrpc: "2.0",
-          id: parsed.id,
+          id: parsedId,
           result: { ok: true }
         };
       }
       return null;
     }
-    if ((typeof parsed.id === "string" || parsed.id === null) && isRecord(parsed.error)) {
-      const error = parsed.error;
+    if ((typeof parsedId === "string" || parsedId === null) && isRecord2(parsedError)) {
+      const error = parsedError;
       if (typeof error.code !== "number" || typeof error.message !== "string") {
         return null;
       }
       const response = {
         jsonrpc: "2.0",
-        id: typeof parsed.id === "string" ? parsed.id : null,
+        id: typeof parsedId === "string" ? parsedId : null,
         error: {
           code: error.code,
           message: error.message
         }
       };
-      if (isRecord(error.data)) {
+      if (isRecord2(error.data)) {
         const data = {};
         if (typeof error.data.code === "string") {
           data.code = error.data.code;
@@ -570,83 +719,83 @@
       }
       return response;
     }
-    if (typeof parsed.method !== "string" || !isRecord(parsed.params)) {
+    if (typeof parsedMethod !== "string" || !isRecord2(parsedParams)) {
       return null;
     }
-    switch (parsed.method) {
+    switch (parsedMethod) {
       case "fws.shell.created":
       case "fws.shell.spawned":
       case "fws.shell.updated":
       case "fws.shell.exited": {
-        const shell = coerceDashboardShellPayload(parsed.params.shell);
+        const shell = coerceDashboardShellPayload(parsedParams.shell);
         if (!shell) {
           return null;
         }
         return {
           jsonrpc: "2.0",
-          method: parsed.method,
+          method: parsedMethod,
           params: { shell }
         };
       }
       case "fws.shell.removed":
-        if (typeof parsed.params.shell_id === "string") {
+        if (typeof parsedParams.shell_id === "string") {
           return {
             jsonrpc: "2.0",
-            method: parsed.method,
-            params: { shell_id: parsed.params.shell_id }
+            method: parsedMethod,
+            params: { shell_id: parsedParams.shell_id }
           };
         }
         return null;
       case "fws.logs.initial":
-        if (typeof parsed.params.shell_id === "string" && typeof parsed.params.stdout === "string" && typeof parsed.params.stderr === "string") {
+        if (typeof parsedParams.shell_id === "string" && typeof parsedParams.stdout === "string" && typeof parsedParams.stderr === "string") {
           return {
             jsonrpc: "2.0",
-            method: parsed.method,
+            method: parsedMethod,
             params: {
-              shell_id: parsed.params.shell_id,
-              stdout: parsed.params.stdout,
-              stderr: parsed.params.stderr
+              shell_id: parsedParams.shell_id,
+              stdout: parsedParams.stdout,
+              stderr: parsedParams.stderr
             }
           };
         }
         return null;
       case "fws.logs.chunk":
-        if (typeof parsed.params.shell_id === "string" && isLogStreamName(parsed.params.stream) && typeof parsed.params.chunk === "string") {
+        if (typeof parsedParams.shell_id === "string" && isLogStreamName(parsedParams.stream) && typeof parsedParams.chunk === "string") {
           return {
             jsonrpc: "2.0",
-            method: parsed.method,
+            method: parsedMethod,
             params: {
-              shell_id: parsed.params.shell_id,
-              stream: parsed.params.stream,
-              chunk: parsed.params.chunk
+              shell_id: parsedParams.shell_id,
+              stream: parsedParams.stream,
+              chunk: parsedParams.chunk
             }
           };
         }
         return null;
       case "fws.logs.reset":
-        if (typeof parsed.params.shell_id === "string" && isLogStreamName(parsed.params.stream)) {
+        if (typeof parsedParams.shell_id === "string" && isLogStreamName(parsedParams.stream)) {
           return {
             jsonrpc: "2.0",
-            method: parsed.method,
+            method: parsedMethod,
             params: {
-              shell_id: parsed.params.shell_id,
-              stream: parsed.params.stream
+              shell_id: parsedParams.shell_id,
+              stream: parsedParams.stream
             }
           };
         }
         return null;
       case "fws.error":
-        if (typeof parsed.params.message === "string") {
-          const result = { message: parsed.params.message };
-          if (typeof parsed.params.code === "string") {
-            result.code = parsed.params.code;
+        if (typeof parsedParams.message === "string") {
+          const result = { message: parsedParams.message };
+          if (typeof parsedParams.code === "string") {
+            result.code = parsedParams.code;
           }
-          if (typeof parsed.params.shell_id === "string") {
-            result.shell_id = parsed.params.shell_id;
+          if (typeof parsedParams.shell_id === "string") {
+            result.shell_id = parsedParams.shell_id;
           }
           return {
             jsonrpc: "2.0",
-            method: parsed.method,
+            method: parsedMethod,
             params: result
           };
         }
@@ -655,6 +804,9 @@
         return null;
     }
   }
+  function coerceIncomingJsonRpcMessage(value) {
+    return coerceIncomingJsonRpcObject(value);
+  }
 
   // framework_shells/ui/src/fws.ts
   var LOG_STREAMS = ["stdout", "stderr"];
@@ -662,7 +814,9 @@
   var GROUP_EXPANDED_KEY = "fws.group.expanded";
   var EXITED_PAGE_SIZE = 50;
   var CSS_COLOR_RE = /^[#()0-9a-zA-Z.,%\s-]+$/;
-  function isRecord2(value) {
+  var FWS_SOCKETIO_NAMESPACE = "/fws";
+  var FWS_SOCKETIO_PATH = "/fws_ws/socket.io";
+  function isRecord3(value) {
     return typeof value === "object" && value !== null;
   }
   function getElementById(id) {
@@ -684,7 +838,7 @@
     }
     try {
       const parsed = JSON.parse(raw);
-      if (!isRecord2(parsed)) {
+      if (!isRecord3(parsed)) {
         return {};
       }
       const result = {};
@@ -703,10 +857,6 @@
       partial: "",
       pendingCount: 0
     };
-  }
-  function getWebSocketUrl(path) {
-    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-    return `${scheme}://${window.location.host}${path}`;
   }
   function escapeHtml(value) {
     return String(value ?? "").split("&").join("&amp;").split("<").join("&lt;").split(">").join("&gt;").split('"').join("&quot;").split("'").join("&#39;");
@@ -783,15 +933,15 @@
   function collectSubgroupStyles(shells) {
     const merged = {};
     for (const shell of shells) {
-      if (!isRecord2(shell.ui)) {
+      if (!isRecord3(shell.ui)) {
         continue;
       }
       const raw = shell.ui.subgroup_styles ?? shell.ui.subgroupStyles;
-      if (!isRecord2(raw)) {
+      if (!isRecord3(raw)) {
         continue;
       }
       for (const [key, styleValue] of Object.entries(raw)) {
-        if (!isRecord2(styleValue)) {
+        if (!isRecord3(styleValue)) {
           continue;
         }
         const normalized = {};
@@ -1186,6 +1336,7 @@
     return parts.join("\n");
   }
   (() => {
+    void initFwsConsoleBridge();
     const content = getElementById("fws-content");
     const statusEl = getElementById("fws-status");
     const toggleAllBtn = getElementById("fws-toggle-all");
@@ -1199,14 +1350,16 @@
     let defaultCollapsed = true;
     let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
     let exitedVisibleCount = EXITED_PAGE_SIZE;
-    let dashboardMessageBuffer = "";
     let dashboardRequestCounter = 0;
     let dashboardState = { shells: [], processes: [] };
-    const dashboardPendingRequests = /* @__PURE__ */ new Map();
+    let fwsSocket = null;
+    const fwsSocketReady = connectSocketIo(FWS_SOCKETIO_NAMESPACE, {
+      path: FWS_SOCKETIO_PATH,
+      transports: ["websocket"]
+    });
     const logState = {
       shellId: "",
       shellLabel: "",
-      socket: null,
       paused: false,
       streams: {
         stdout: makeStreamState("stdout-container"),
@@ -1217,12 +1370,12 @@
       dashboardRequestCounter += 1;
       return `fws_req_${dashboardRequestCounter}`;
     }
-    function rejectPendingRequests(pending, message) {
-      const error = new Error(message);
-      for (const [, request] of pending) {
-        request.reject(error);
+    async function getFwsSocket() {
+      if (fwsSocket) {
+        return fwsSocket;
       }
-      pending.clear();
+      fwsSocket = await fwsSocketReady;
+      return fwsSocket;
     }
     function isJsonRpcErrorMessage(message) {
       return "error" in message;
@@ -1234,7 +1387,7 @@
       return "method" in message && "params" in message;
     }
     function hasDashboardStateResult(result) {
-      return isRecord2(result) && isRecord2(result.state) && Array.isArray(result.state.shells) && Array.isArray(result.state.processes);
+      return isRecord3(result) && isRecord3(result.state) && Array.isArray(result.state.shells) && Array.isArray(result.state.processes);
     }
     function findShellLabel(shellId) {
       const match = dashboardState.shells.find((shell) => shell.id === shellId);
@@ -1333,23 +1486,7 @@
         }
       }
     }
-    function routeDashboardRpcMessage(message) {
-      if (isJsonRpcResponseMessage(message)) {
-        const pending = dashboardPendingRequests.get(message.id);
-        if (!pending) {
-          return;
-        }
-        dashboardPendingRequests.delete(message.id);
-        if (isJsonRpcErrorMessage(message)) {
-          pending.reject(new Error(message.error.message));
-          return;
-        }
-        pending.resolve(message.result);
-        return;
-      }
-      if (!isServerNotificationMessage(message)) {
-        return;
-      }
+    function routeDashboardNotification(message) {
       switch (message.method) {
         case "fws.shell.created":
         case "fws.shell.spawned":
@@ -1361,30 +1498,31 @@
           removeShellDelta(message.params.shell_id);
           return;
         case "fws.error":
-          setStatus(message.params.message, false);
+          if (!message.params.shell_id) {
+            setStatus(message.params.message, false);
+          }
           return;
         default:
           return;
       }
     }
-    function processDashboardChunk(raw) {
-      const consumed = consumeJsonlChunk(dashboardMessageBuffer, raw);
-      dashboardMessageBuffer = consumed.buffer;
-      for (const line of consumed.lines) {
-        const message = parseIncomingJsonRpcMessage(line);
-        if (message) {
-          routeDashboardRpcMessage(message);
-        }
-      }
-    }
     async function sendDashboardRequest(method, params) {
       const requestId = nextDashboardRequestId();
+      const request = buildClientRequest(method, requestId, params);
+      const socket = await getFwsSocket();
       return await new Promise((resolve, reject) => {
-        dashboardPendingRequests.set(requestId, {
-          resolve,
-          reject
+        socket.emit("fws_request", request, (payload) => {
+          const message = coerceIncomingJsonRpcMessage(payload);
+          if (!message || !isJsonRpcResponseMessage(message)) {
+            reject(new Error(`Invalid response for ${method}`));
+            return;
+          }
+          if (isJsonRpcErrorMessage(message)) {
+            reject(new Error(message.error.message));
+            return;
+          }
+          resolve(message.result);
         });
-        ws.send(frameJsonRpcLine(stringifyClientRequest(method, requestId, params)));
       });
     }
     async function submitActionForm(form) {
@@ -1792,15 +1930,83 @@
       state.pendingCount = 0;
       renderStream(stream);
     }
-    function closeLogSocket() {
-      if (!logState.socket) {
+    function renderLogError(message) {
+      for (const stream of LOG_STREAMS) {
+        const state = logState.streams[stream];
+        if (state.container) {
+          state.container.innerHTML = `<div class="loading">${escapeHtml(message)}</div>`;
+        }
+      }
+    }
+    function routeLogNotification(message) {
+      const currentShellId = logState.shellId;
+      if (!currentShellId) {
         return;
       }
+      switch (message.method) {
+        case "fws.logs.initial":
+          if (message.params.shell_id !== currentShellId) {
+            return;
+          }
+          parseTextIntoState("stdout", message.params.stdout);
+          parseTextIntoState("stderr", message.params.stderr);
+          renderStream("stdout");
+          renderStream("stderr");
+          return;
+        case "fws.logs.reset":
+          if (message.params.shell_id !== currentShellId) {
+            return;
+          }
+          resetStream(message.params.stream);
+          return;
+        case "fws.logs.chunk": {
+          if (message.params.shell_id !== currentShellId) {
+            return;
+          }
+          const stream = message.params.stream;
+          const appended = appendChunkToState(stream, message.params.chunk);
+          if (logState.paused) {
+            logState.streams[stream].pendingCount += appended.newLines.length;
+            setPendingLabel(stream);
+            return;
+          }
+          if (hasActiveFilters(stream)) {
+            renderStream(stream);
+          } else {
+            appendLines(stream, appended.newLines, appended.partialLine);
+          }
+          return;
+        }
+        case "fws.error":
+          if (message.params.shell_id !== void 0 && message.params.shell_id !== currentShellId) {
+            return;
+          }
+          renderLogError(message.params.message);
+          setLogStatus("Error", false);
+          return;
+        default:
+          return;
+      }
+    }
+    async function openLogSubscription(shellId) {
       try {
-        logState.socket.close();
+        await sendDashboardRequest("fws.logs.open", { shell_id: shellId });
+        if (logState.shellId === shellId) {
+          setLogStatus("Connected", true);
+        }
+      } catch (error) {
+        if (logState.shellId !== shellId) {
+          return;
+        }
+        renderLogError(error instanceof Error ? error.message : String(error));
+        setLogStatus("Error", false);
+      }
+    }
+    async function closeLogSubscription(shellId) {
+      try {
+        await sendDashboardRequest("fws.logs.close", { shell_id: shellId });
       } catch {
       }
-      logState.socket = null;
     }
     function syncLogUrl(shellId, replace) {
       const url = new URL(window.location.href);
@@ -1843,124 +2049,27 @@
           state.container.innerHTML = '<div class="loading">Connecting...</div>';
         }
       }
-      closeLogSocket();
-      const socket = new reconnecting_websocket_default(getWebSocketUrl(`/ws/fws/logs/${encodeURIComponent(nextShellId)}`), {
-        reconnectInterval: 1e3,
-        maxReconnectInterval: 5e3,
-        reconnectDecay: 1.5
+      void getFwsSocket().then((socket) => {
+        if (logState.shellId !== nextShellId || !socket.connected) {
+          return;
+        }
+        void openLogSubscription(nextShellId);
       });
-      logState.socket = socket;
-      let logMessageBuffer = "";
-      let logOpenRequestId = "";
-      socket.onopen = () => {
-        if (logState.socket !== socket) {
-          return;
-        }
-        setLogStatus("Connecting...", false);
-        logOpenRequestId = `fws_log_${Date.now()}`;
-        socket.send(frameJsonRpcLine(stringifyClientRequest("fws.logs.open", logOpenRequestId, { shell_id: nextShellId })));
-      };
-      socket.onmessage = (event) => {
-        if (logState.socket !== socket) {
-          return;
-        }
-        const consumed = consumeJsonlChunk(logMessageBuffer, event.data);
-        logMessageBuffer = consumed.buffer;
-        for (const line of consumed.lines) {
-          const message = parseIncomingJsonRpcMessage(line);
-          if (!message) {
-            continue;
-          }
-          if ("id" in message && typeof message.id === "string") {
-            if (message.id === logOpenRequestId) {
-              if ("error" in message) {
-                for (const stream of LOG_STREAMS) {
-                  const state = logState.streams[stream];
-                  if (state.container) {
-                    state.container.innerHTML = `<div class="loading">${escapeHtml(message.error.message)}</div>`;
-                  }
-                }
-                setLogStatus("Error", false);
-              } else {
-                setLogStatus("Connected", true);
-              }
-            }
-            continue;
-          }
-          if (!isServerNotificationMessage(message)) {
-            continue;
-          }
-          switch (message.method) {
-            case "fws.logs.initial":
-              parseTextIntoState("stdout", message.params.stdout);
-              parseTextIntoState("stderr", message.params.stderr);
-              renderStream("stdout");
-              renderStream("stderr");
-              break;
-            case "fws.logs.reset":
-              resetStream(message.params.stream);
-              break;
-            case "fws.logs.chunk": {
-              const stream = message.params.stream;
-              const appended = appendChunkToState(stream, message.params.chunk);
-              if (logState.paused) {
-                logState.streams[stream].pendingCount += appended.newLines.length;
-                setPendingLabel(stream);
-                break;
-              }
-              if (hasActiveFilters(stream)) {
-                renderStream(stream);
-              } else {
-                appendLines(stream, appended.newLines, appended.partialLine);
-              }
-              break;
-            }
-            case "fws.error":
-              for (const stream of LOG_STREAMS) {
-                const state = logState.streams[stream];
-                if (state.container) {
-                  state.container.innerHTML = `<div class="loading">${escapeHtml(message.params.message)}</div>`;
-                }
-              }
-              if (message.params.shell_id === nextShellId || message.params.shell_id === void 0) {
-                setLogStatus("Error", false);
-              }
-              break;
-            default:
-              break;
-          }
-        }
-      };
-      socket.onreconnect = (_attempt, delayMs) => {
-        if (logState.socket !== socket) {
-          return;
-        }
-        setLogStatus(`Reconnecting in ${Math.round(delayMs)}ms...`, false);
-      };
-      socket.onerror = () => {
-        if (logState.socket !== socket) {
-          return;
-        }
-        setLogStatus("Error", false);
-      };
-      socket.onclose = () => {
-        if (logState.socket !== socket) {
-          return;
-        }
-        setLogStatus("Disconnected", false);
-      };
     }
     function closeLogDrawer(options = {}) {
       if (!logDrawer) {
         return;
       }
-      closeLogSocket();
+      const previousShellId = logState.shellId;
       logState.shellId = "";
       logState.shellLabel = "";
       logDrawer.classList.remove("is-open");
       logDrawer.setAttribute("aria-hidden", "true");
       document.body.classList.remove("has-log-drawer");
       setLogStatus("Disconnected", false);
+      if (previousShellId) {
+        void closeLogSubscription(previousShellId);
+      }
       if (!options.fromPopState) {
         syncLogUrl("", true);
       }
@@ -2117,36 +2226,55 @@
       void copyText(value);
       flashCopied(target);
     });
-    const ws = new reconnecting_websocket_default(getWebSocketUrl("/ws/fws"), {
-      reconnectInterval: 1500,
-      maxReconnectInterval: 5e3,
-      reconnectDecay: 1.5
-    });
-    ws.onopen = () => {
-      dashboardMessageBuffer = "";
-      setStatus("Connecting...", false);
-      void sendDashboardRequest("fws.dashboard.open", { view: "html" }).then((result) => {
-        if (hasDashboardStateResult(result)) {
-          applyDashboardState(result.state);
-          setStatus("Live", true);
-        } else {
-          setStatus("Error", false);
+    void fwsSocketReady.then((socket) => {
+      fwsSocket = socket;
+      const handleConnect = () => {
+        setStatus("Connecting...", false);
+        if (logState.shellId) {
+          setLogStatus("Connecting...", false);
         }
-      }).catch(() => setStatus("Error", false));
-    };
-    ws.onmessage = (event) => {
-      processDashboardChunk(event.data);
-    };
-    ws.onreconnect = (_attempt, delayMs) => {
-      setStatus(`Reconnecting in ${Math.round(delayMs)}ms...`, false);
-    };
-    ws.onerror = () => {
+        void sendDashboardRequest("fws.dashboard.open", { view: "html" }).then((result) => {
+          if (hasDashboardStateResult(result)) {
+            applyDashboardState(result.state);
+            setStatus("Live", true);
+          } else {
+            setStatus("Error", false);
+          }
+        }).catch(() => setStatus("Error", false));
+        if (logState.shellId) {
+          void openLogSubscription(logState.shellId);
+        }
+      };
+      socket.on("connect", handleConnect);
+      socket.on("fws_notification", (payload) => {
+        const message = coerceIncomingJsonRpcMessage(payload);
+        if (!message || !isServerNotificationMessage(message)) {
+          return;
+        }
+        routeDashboardNotification(message);
+        routeLogNotification(message);
+      });
+      socket.on("connect_error", () => {
+        setStatus("Error", false);
+        if (logState.shellId) {
+          setLogStatus("Error", false);
+        }
+      });
+      socket.on("disconnect", () => {
+        setStatus("Disconnected", false);
+        if (logState.shellId) {
+          setLogStatus("Disconnected", false);
+        }
+      });
+      if (socket.connected) {
+        handleConnect();
+      }
+    }).catch(() => {
       setStatus("Error", false);
-    };
-    ws.onclose = () => {
-      rejectPendingRequests(dashboardPendingRequests, "FWS dashboard socket closed");
-      setStatus("Disconnected", false);
-    };
+      if (logState.shellId) {
+        setLogStatus("Error", false);
+      }
+    });
     updateToggleAllLabel();
     const initialLog = new URL(window.location.href).searchParams.get("log");
     if (initialLog) {

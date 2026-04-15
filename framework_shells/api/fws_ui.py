@@ -16,10 +16,10 @@ import fnmatch
 from fastapi import APIRouter, Form, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from .. import get_manager
 from ..events import EventType, ShellEvent, get_event_bus
 from ..process_snapshot import ProcessRecord
 from ..protocols.jsonrpc import dump_json_line
+from ..shared_manager import get_manager
 from ..protocols.fws_ui import (
     APP_SHUTDOWN_METHOD,
     DASHBOARD_OPEN_METHOD,

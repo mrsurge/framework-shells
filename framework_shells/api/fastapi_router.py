@@ -8,7 +8,7 @@ from pathlib import Path
 from ..auth import get_secret, derive_api_token
 from ..manager import FrameworkShellManager
 from ..record import ShellRecord
-from .. import get_manager as get_shared_manager
+from ..shared_manager import get_manager as get_shared_manager
 
 router = APIRouter()
 

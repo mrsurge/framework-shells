@@ -454,5 +454,18 @@ FWS_SOCKETIO_ASGI_APP = socketio.ASGIApp(FWS_SOCKETIO_SIO, socketio_path="")
 
 
 def mount_fws_socketio_runtime(app: FastAPI) -> None:
+    if getattr(app.state, "_framework_shells_fws_socketio_runtime_mounted", False):
+        return
     os.environ["FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID"] = str(os.getpid())
     app.mount(FWS_SOCKETIO_SOCKET_PATH, FWS_SOCKETIO_ASGI_APP)
+    setattr(app.state, "_framework_shells_fws_socketio_runtime_mounted", True)
+
+
+def mount_fws_dashboard_runtime(app: FastAPI) -> None:
+    if getattr(app.state, "_framework_shells_fws_dashboard_runtime_mounted", False):
+        return
+    from .fws_ui import router as fws_ui_router
+
+    app.include_router(fws_ui_router)
+    mount_fws_socketio_runtime(app)
+    setattr(app.state, "_framework_shells_fws_dashboard_runtime_mounted", True)

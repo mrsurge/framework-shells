@@ -6,6 +6,26 @@ import shutil
 import subprocess
 
 from setuptools import setup
+try:
+    from setuptools.command.build_py import build_py as _build_py
+except Exception:  # pragma: no cover - setuptools should provide this in normal builds
+    _build_py = None
+try:
+    from setuptools.command.develop import develop as _develop
+except Exception:  # pragma: no cover - legacy editable installs may not be available
+    _develop = None
+try:
+    from setuptools.command.egg_info import egg_info as _egg_info
+except Exception:  # pragma: no cover - setuptools should provide this in normal builds
+    _egg_info = None
+try:
+    from setuptools.command.editable_wheel import editable_wheel as _editable_wheel
+except Exception:  # pragma: no cover - older setuptools may not provide PEP 660 helper
+    _editable_wheel = None
+try:
+    from setuptools.command.dist_info import dist_info as _dist_info
+except Exception:  # pragma: no cover - older setuptools may not provide this helper
+    _dist_info = None
 
 try:
     from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
@@ -232,15 +252,79 @@ def _has_bundled_pipe_pump() -> bool:
     return (ROOT / PIPE_PUMP_PACKAGE_PATH).is_file()
 
 
+def _prepare_native_artifacts() -> None:
+    _prepare_native_broker()
+    _prepare_pipe_pump()
+
+
+def _cleanup_staged_native_artifacts() -> None:
+    _cleanup_staged_native_broker()
+    _cleanup_staged_pipe_pump()
+
+
 cmdclass: dict[str, type[object]] = {}
+
+
+if _build_py is not None:
+
+    class build_py(_build_py):
+        def run(self) -> None:
+            _prepare_native_artifacts()
+            super().run()
+
+
+    cmdclass["build_py"] = build_py
+
+
+if _develop is not None:
+
+    class develop(_develop):
+        def run(self) -> None:
+            _prepare_native_artifacts()
+            super().run()
+
+
+    cmdclass["develop"] = develop
+
+
+if _egg_info is not None:
+
+    class egg_info(_egg_info):
+        def run(self) -> None:
+            _prepare_native_artifacts()
+            super().run()
+
+
+    cmdclass["egg_info"] = egg_info
+
+
+if _dist_info is not None:
+
+    class dist_info(_dist_info):
+        def run(self) -> None:
+            _prepare_native_artifacts()
+            super().run()
+
+
+    cmdclass["dist_info"] = dist_info
+
+
+if _editable_wheel is not None:
+
+    class editable_wheel(_editable_wheel):
+        def run(self) -> None:
+            _prepare_native_artifacts()
+            super().run()
+
+
+    cmdclass["editable_wheel"] = editable_wheel
 
 
 if _bdist_wheel is not None:
 
     class bdist_wheel(_bdist_wheel):
         def finalize_options(self) -> None:
-            _prepare_native_broker()
-            _prepare_pipe_pump()
+            _prepare_native_artifacts()
             super().finalize_options()
             if _has_bundled_native_broker():
                 self.root_is_pure = False
@@ -252,13 +336,11 @@ if _bdist_wheel is not None:
                     self.plat_name = _normalize_wheel_tag(str(self.plat_name))
 
         def run(self) -> None:
-            _prepare_native_broker()
-            _prepare_pipe_pump()
+            _prepare_native_artifacts()
             try:
                 super().run()
             finally:
-                _cleanup_staged_native_broker()
-                _cleanup_staged_pipe_pump()
+                _cleanup_staged_native_artifacts()
 
         def get_tag(self) -> tuple[str, str, str]:
             python_tag, abi_tag, plat_tag = super().get_tag()

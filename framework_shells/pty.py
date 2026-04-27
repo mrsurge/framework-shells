@@ -40,4 +40,6 @@ class PipeState:
     native_engine: str | None = None
     native_phase: str | None = None
     native_pump: object | None = None
+    native_reader_fd: int | None = None
+    native_chunk_queue: AsyncQueue[bytes | None] | None = None
     stdin_supported: bool = True

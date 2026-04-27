@@ -1134,16 +1134,60 @@ class FrameworkShellManager:
         transport = self._pipe_stream_transport(stream)
         if transport is None or not hasattr(transport, "get_extra_info"):
             return None
+        for extra_info_key in ("pipe", "socket"):
+            try:
+                stream_obj = transport.get_extra_info(extra_info_key)
+            except Exception:
+                continue
+            if stream_obj is None or not hasattr(stream_obj, "fileno"):
+                continue
+            try:
+                return int(cast(_HasFileno, stream_obj).fileno())
+            except Exception:
+                continue
+        return None
+
+    def _remove_native_pipe_reader(self, state: PipeState) -> None:
+        reader_fd = state.native_reader_fd
+        if reader_fd is None:
+            return
         try:
-            pipe_obj = transport.get_extra_info("pipe")
+            asyncio.get_running_loop().remove_reader(reader_fd)
         except Exception:
-            return None
-        if pipe_obj is None or not hasattr(pipe_obj, "fileno"):
-            return None
+            pass
+        state.native_reader_fd = None
+
+    def _on_native_pipe_stdout_ready(self, record: ShellRecord, state: PipeState) -> None:
+        if state.stop.is_set():
+            return
+
+        native_pump = cast(Optional[NativePipePumpHandle], state.native_pump)
+        queue = state.native_chunk_queue
+        if native_pump is None or queue is None:
+            return
+
         try:
-            return int(cast(_HasFileno, pipe_obj).fileno())
+            chunks = native_pump.read_available(self.PIPE_NATIVE_MAX_DRAIN_CHUNKS)
         except Exception:
-            return None
+            self._remove_native_pipe_reader(state)
+            try:
+                queue.put_nowait(None)
+            except Exception:
+                pass
+            return
+
+        for chunk in chunks:
+            try:
+                queue.put_nowait(chunk)
+            except Exception:
+                pass
+
+        if native_pump.is_finished():
+            self._remove_native_pipe_reader(state)
+            try:
+                queue.put_nowait(None)
+            except Exception:
+                pass
 
     async def _activate_native_pipe_stdout(
         self,
@@ -1193,14 +1237,43 @@ class FrameworkShellManager:
                     transport.resume_reading()
                 return False
 
+            reader_fd = int(native_pump.reader_fd())
+            if reader_fd < 0:
+                try:
+                    await asyncio.to_thread(native_pump.stop)
+                except Exception:
+                    pass
+                if paused and hasattr(transport, "resume_reading"):
+                    transport.resume_reading()
+                return False
+
             state.native_pump = native_pump
             state.native_engine = "native-pipe"
             state.native_phase = native_extension_phase()
+            state.native_reader_fd = reader_fd
+            state.native_chunk_queue = AsyncQueue()
             if prebuffer:
                 state.native_initial_chunks.append(prebuffer)
+            asyncio.get_running_loop().add_reader(
+                reader_fd,
+                self._on_native_pipe_stdout_ready,
+                record,
+                state,
+            )
             state.stdout_reader = asyncio.create_task(self._native_pipe_stdout_relay(record, state))
             return True
         except Exception:
+            self._remove_native_pipe_reader(state)
+            state.native_chunk_queue = None
+            native_pump = cast(Optional[NativePipePumpHandle], state.native_pump)
+            if native_pump is not None:
+                try:
+                    await asyncio.to_thread(native_pump.stop)
+                except Exception:
+                    pass
+            state.native_pump = None
+            state.native_engine = None
+            state.native_phase = None
             if paused and hasattr(transport, "resume_reading"):
                 try:
                     transport.resume_reading()
@@ -1220,21 +1293,22 @@ class FrameworkShellManager:
                 for chunk in initial_chunks:
                     await self._dispatch_live_chunk(record, state, "stdout", chunk)
 
-            while not state.stop.is_set():
-                chunks = await asyncio.to_thread(
-                    native_pump.wait_for_chunks,
-                    self.PIPE_NATIVE_MAX_DRAIN_CHUNKS,
-                    self.PIPE_NATIVE_WAIT_TIMEOUT_MS,
-                )
-                for chunk in chunks:
-                    await self._dispatch_live_chunk(record, state, "stdout", chunk)
-                if not chunks and native_pump.is_finished():
+            queue = state.native_chunk_queue
+            if queue is None:
+                return
+
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
                     break
+                await self._dispatch_live_chunk(record, state, "stdout", chunk)
         except asyncio.CancelledError:
             raise
         except Exception:
             pass
         finally:
+            self._remove_native_pipe_reader(state)
+            state.native_chunk_queue = None
             state.native_initial_chunks.clear()
             if state.native_pump is native_pump:
                 state.native_pump = None
@@ -1415,10 +1489,31 @@ class FrameworkShellManager:
         state = self._pipes.pop(shell_id, None)
         if not state: return
         state.stop.set()
+        self._remove_native_pipe_reader(state)
+        queue = state.native_chunk_queue
+        if queue is not None:
+            try:
+                queue.put_nowait(None)
+            except Exception:
+                pass
         if state.stdout_reader:
             state.stdout_reader.cancel()
+            if state.stdout_reader is not asyncio.current_task():
+                try:
+                    await state.stdout_reader
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
         if state.stderr_reader:
             state.stderr_reader.cancel()
+            if state.stderr_reader is not asyncio.current_task():
+                try:
+                    await state.stderr_reader
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
         native_pump = cast(Optional[NativePipePumpHandle], state.native_pump)
         if native_pump is not None:
             try:

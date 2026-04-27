@@ -55,16 +55,16 @@ class NativePipePumpHandle(Protocol):
     def stop(self) -> None:
         ...
 
-    def drain_chunks(self, max_items: int | None = None) -> list[bytes]:
+    def read_available(self, max_items: int | None = None) -> list[bytes]:
+        ...
+
+    def reader_fd(self) -> int:
         ...
 
     def stats(self) -> dict[str, object]:
         ...
 
     def is_finished(self) -> bool:
-        ...
-
-    def wait_for_chunks(self, max_items: int | None = None, timeout_ms: int = 0) -> list[bytes]:
         ...
 
 

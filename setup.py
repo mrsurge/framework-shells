@@ -112,9 +112,9 @@ def _build_and_stage_native_broker() -> None:
     global _native_broker_preexisted
 
     mode = _install_mode()
-    if _has_bundled_native_broker():
+    destination = ROOT / BROKER_RELATIVE_PATH
+    if destination.is_file():
         _native_broker_preexisted = True
-        return
     if _skips_native_build(mode):
         _log(f"skipping native terminal broker build ({INSTALL_MODE_ENV}={mode})")
         return
@@ -125,6 +125,8 @@ def _build_and_stage_native_broker() -> None:
         return
 
     try:
+        if destination.exists():
+            destination.unlink()
         subprocess.run(
             ["cargo", "build", "--manifest-path", str(BROKER_SOURCE_MANIFEST), "--release"],
             cwd=str(ROOT),
@@ -133,7 +135,6 @@ def _build_and_stage_native_broker() -> None:
         )
         if not BROKER_SOURCE_BINARY.is_file():
             raise FileNotFoundError(f"Built broker binary not found: {BROKER_SOURCE_BINARY}")
-        destination = ROOT / BROKER_RELATIVE_PATH
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(BROKER_SOURCE_BINARY, destination)
         _ensure_executable(destination)
@@ -183,7 +184,6 @@ def _build_and_stage_pipe_pump() -> None:
     destination = ROOT / PIPE_PUMP_PACKAGE_PATH
     if destination.is_file():
         _pipe_pump_preexisted = True
-        return
 
     mode = _pipe_pump_mode()
     if _skips_native_build(mode):
@@ -196,6 +196,8 @@ def _build_and_stage_pipe_pump() -> None:
         return
 
     try:
+        if destination.exists():
+            destination.unlink()
         subprocess.run(
             ["cargo", "build", "--manifest-path", str(PIPE_PUMP_SOURCE_MANIFEST), "--release"],
             cwd=str(ROOT),

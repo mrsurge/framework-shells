@@ -203,7 +203,7 @@ impl NativePipePump {
                     self.bytes_read
                         .fetch_add(read_count as u64, Ordering::Relaxed);
                     self.chunks_read.fetch_add(1, Ordering::Relaxed);
-                    out.push(PyBytes::new_bound(py, &buffer[..read_count]).unbind());
+                    out.push(PyBytes::new(py, &buffer[..read_count]).unbind());
                 }
                 Err(err) if err.kind() == ErrorKind::Interrupted => {
                     continue;
@@ -237,7 +237,7 @@ impl NativePipePump {
     }
 
     fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         let (reader_fd, eof, error, pending_flush_bytes) = if let Ok(state) = self.state.lock() {
             (
                 state
@@ -272,7 +272,7 @@ fn extension_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn fws_pipe_pump(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__phase__", "phase1")?;
     module.add_class::<NativePipePump>()?;

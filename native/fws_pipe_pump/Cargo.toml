@@ -8,6 +8,10 @@ publish = false
 name = "fws_pipe_pump"
 crate-type = ["cdylib"]
 
+[features]
+default = ["abi3"]
+abi3 = ["pyo3/abi3-py39"]
+
 [dependencies]
 libc = "0.2"
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.28.3", features = ["extension-module"] }

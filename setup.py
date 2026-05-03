@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+import sysconfig
 
 from setuptools import setup
 try:
@@ -44,7 +46,7 @@ PIPE_PUMP_MODE_ALIAS_ENV = "FWS_PIPE_PUMP_MODE"
 PYTHON_ONLY_ENV = "FRAMEWORK_SHELLS_PYTHON_ONLY"
 BUILD_NATIVE_ENV = "FRAMEWORK_SHELLS_BUILD_NATIVE"
 PIPE_PUMP_MODULE_NAME = "fws_pipe_pump"
-PIPE_PUMP_PACKAGE_PATH = Path("framework_shells") / f"{PIPE_PUMP_MODULE_NAME}.so"
+PIPE_PUMP_PACKAGE_DIR = Path("framework_shells")
 PIPE_PUMP_SOURCE_MANIFEST = ROOT / "native" / "fws_pipe_pump" / "Cargo.toml"
 
 _prepared_native_broker = False
@@ -105,6 +107,73 @@ def _normalize_wheel_tag(value: str) -> str:
 
 def _normalize_mode(raw: str) -> str:
     return raw.replace("_", "-")
+
+
+def _is_free_threaded_python() -> bool:
+    return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+
+
+def _python_extension_suffix() -> str:
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    if isinstance(suffix, str) and suffix:
+        return suffix
+    return ".pyd" if os.name == "nt" else ".so"
+
+
+def _pipe_pump_package_path() -> Path:
+    if _is_free_threaded_python():
+        return PIPE_PUMP_PACKAGE_DIR / f"{PIPE_PUMP_MODULE_NAME}{_python_extension_suffix()}"
+    return PIPE_PUMP_PACKAGE_DIR / f"{PIPE_PUMP_MODULE_NAME}.so"
+
+
+def _pipe_pump_package_artifacts() -> list[Path]:
+    package_dir = ROOT / PIPE_PUMP_PACKAGE_DIR
+    if not package_dir.is_dir():
+        return []
+    return _pipe_pump_artifacts_in(package_dir)
+
+
+def _pipe_pump_artifacts_in(package_dir: Path) -> list[Path]:
+    patterns = (
+        f"{PIPE_PUMP_MODULE_NAME}*.so",
+        f"{PIPE_PUMP_MODULE_NAME}*.pyd",
+        f"{PIPE_PUMP_MODULE_NAME}*.dylib",
+        f"{PIPE_PUMP_MODULE_NAME}*.dll",
+    )
+    seen: set[Path] = set()
+    artifacts: list[Path] = []
+    for pattern in patterns:
+        for path in package_dir.glob(pattern):
+            if path in seen or not path.is_file():
+                continue
+            seen.add(path)
+            artifacts.append(path)
+    return artifacts
+
+
+def _pipe_pump_build_artifacts() -> list[Path]:
+    artifacts: list[Path] = []
+    for package_dir in ROOT.glob("build/lib*/framework_shells"):
+        artifacts.extend(_pipe_pump_artifacts_in(package_dir))
+    return artifacts
+
+
+def _pipe_pump_wheel_tag(platform_tag: str) -> tuple[str, str, str]:
+    resolved_plat = _normalize_wheel_tag(platform_tag)
+    if not _is_free_threaded_python():
+        return ("cp39", "abi3", resolved_plat)
+
+    version = sys.version_info
+    python_tag = f"cp{version.major}{version.minor}"
+    soabi = sysconfig.get_config_var("SOABI")
+    abi_tag = ""
+    if isinstance(soabi, str) and soabi:
+        first = soabi.split("-", 1)[0]
+        if first.startswith("cpython-"):
+            abi_tag = "cp" + first.removeprefix("cpython-")
+    if not abi_tag:
+        abi_tag = f"{python_tag}t"
+    return (python_tag, _normalize_wheel_tag(abi_tag), resolved_plat)
 
 
 def _build_and_stage_native_broker() -> None:
@@ -181,8 +250,8 @@ def _build_and_stage_pipe_pump() -> None:
     global _staged_pipe_pump
     global _pipe_pump_preexisted
 
-    destination = ROOT / PIPE_PUMP_PACKAGE_PATH
-    if destination.is_file():
+    existing_artifacts = _pipe_pump_package_artifacts()
+    if existing_artifacts:
         _pipe_pump_preexisted = True
 
     mode = _pipe_pump_mode()
@@ -196,17 +265,16 @@ def _build_and_stage_pipe_pump() -> None:
         return
 
     try:
-        if destination.exists():
-            destination.unlink()
-        subprocess.run(
-            ["cargo", "build", "--manifest-path", str(PIPE_PUMP_SOURCE_MANIFEST), "--release"],
-            cwd=str(ROOT),
-            check=True,
-            text=True,
-        )
+        for artifact_path in [*existing_artifacts, *_pipe_pump_build_artifacts()]:
+            artifact_path.unlink()
+        command = ["cargo", "build", "--manifest-path", str(PIPE_PUMP_SOURCE_MANIFEST), "--release"]
+        if _is_free_threaded_python():
+            command.append("--no-default-features")
+        subprocess.run(command, cwd=str(ROOT), check=True, text=True)
         artifact = next((path for path in _pipe_pump_artifact_candidates() if path.is_file()), None)
         if artifact is None:
             raise FileNotFoundError("Built pipe pump artifact not found")
+        destination = ROOT / _pipe_pump_package_path()
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(artifact, destination)
         _ensure_executable(destination)
@@ -242,16 +310,15 @@ def _cleanup_staged_native_broker() -> None:
 def _cleanup_staged_pipe_pump() -> None:
     if not _staged_pipe_pump or _pipe_pump_preexisted:
         return
-    destination = ROOT / PIPE_PUMP_PACKAGE_PATH
     try:
-        if destination.exists():
+        for destination in _pipe_pump_package_artifacts():
             destination.unlink()
     except Exception:
         pass
 
 
 def _has_bundled_pipe_pump() -> bool:
-    return (ROOT / PIPE_PUMP_PACKAGE_PATH).is_file()
+    return bool(_pipe_pump_package_artifacts())
 
 
 def _prepare_native_artifacts() -> None:
@@ -350,7 +417,7 @@ if _bdist_wheel is not None:
                 return python_tag, abi_tag, plat_tag
             resolved_plat = _normalize_wheel_tag(str(self.plat_name or plat_tag))
             if _has_bundled_pipe_pump():
-                return ("cp39", "abi3", resolved_plat)
+                return _pipe_pump_wheel_tag(resolved_plat)
             return ("py3", "none", resolved_plat)
 
 

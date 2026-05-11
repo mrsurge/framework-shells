@@ -12,6 +12,13 @@
   --destructive: hsl(0, 84%, 60%);
   --destructive-foreground: #fff;
   --hairline: 0.5px;
+  --gh-json-key: #d2a8ff;
+  --gh-json-string: #a5d6ff;
+  --gh-json-number: #79c0ff;
+  --gh-json-constant: #ff7b72;
+  --gh-json-punctuation: #c9d1d9;
+  --ansi-control-fg: #ffa657;
+  --ansi-control-bg: rgba(187, 128, 9, 0.18);
 }
 
 * {
@@ -559,6 +566,29 @@ body.has-log-drawer {
   min-width: 72px;
 }
 
+.log-pane-title-row {
+  min-width: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-render-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--foreground);
+  font-size: 0.72rem;
+  font-weight: 400;
+  line-height: 1;
+  white-space: nowrap;
+  opacity: 0.88;
+}
+
+.log-render-toggle input {
+  margin: 0;
+}
+
 .filters {
   display: flex;
   flex-direction: column;
@@ -620,6 +650,67 @@ body.has-log-drawer {
 
 .log-line {
   min-height: 1.2em;
+}
+
+.ansi-bold {
+  font-weight: 700;
+}
+
+.ansi-dim {
+  opacity: 0.68;
+}
+
+.ansi-italic {
+  font-style: italic;
+}
+
+.ansi-underline {
+  text-decoration: underline;
+  text-decoration-thickness: var(--hairline);
+}
+
+.ansi-control {
+  display: inline-block;
+  margin: 0 1px;
+  padding: 0 3px;
+  border: var(--hairline) solid rgba(187, 128, 9, 0.45);
+  border-radius: 2px;
+  background: var(--ansi-control-bg);
+  color: var(--ansi-control-fg);
+  font-size: 0.72em;
+  line-height: 1.25;
+  vertical-align: 0.05em;
+}
+
+.json-token-key {
+  color: var(--gh-json-key);
+}
+
+.json-token-string {
+  color: var(--gh-json-string);
+}
+
+.json-token-number {
+  color: var(--gh-json-number);
+}
+
+.json-token-boolean,
+.json-token-null {
+  color: var(--gh-json-constant);
+}
+
+.json-token-punctuation {
+  color: var(--gh-json-punctuation);
+}
+
+.json-pretty-block {
+  display: block;
+  margin: 3px 0;
+  padding: 6px 8px;
+  border-left: var(--hairline) solid var(--border);
+  background: rgba(13, 17, 23, 0.58);
+  overflow-x: auto;
+  white-space: pre;
 }
 
 .loading {

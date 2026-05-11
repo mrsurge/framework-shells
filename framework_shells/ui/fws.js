@@ -320,6 +320,507 @@
     return fwsConsoleBridgePromise;
   }
 
+  // framework_shells/ui/src/ansi_json_log_renderer.ts
+  var MAX_JSON_FRAGMENT_CHARS = 2e5;
+  var DEFAULT_FG = "#c9d1d9";
+  var DEFAULT_BG = "#0d1117";
+  var ANSI_16_COLORS = {
+    0: "#484f58",
+    1: "#ff7b72",
+    2: "#7ee787",
+    3: "#d29922",
+    4: "#79c0ff",
+    5: "#d2a8ff",
+    6: "#76e3ea",
+    7: "#c9d1d9",
+    8: "#6e7681",
+    9: "#ffa198",
+    10: "#56d364",
+    11: "#e3b341",
+    12: "#a5d6ff",
+    13: "#d2a8ff",
+    14: "#39c5cf",
+    15: "#f0f6fc"
+  };
+  function createDefaultAnsiStyle() {
+    return {
+      bold: false,
+      dim: false,
+      italic: false,
+      underline: false,
+      inverse: false
+    };
+  }
+  function cloneAnsiStyle(style) {
+    const clone = createDefaultAnsiStyle();
+    if (style.fg) {
+      clone.fg = style.fg;
+    }
+    if (style.bg) {
+      clone.bg = style.bg;
+    }
+    clone.bold = style.bold;
+    clone.dim = style.dim;
+    clone.italic = style.italic;
+    clone.underline = style.underline;
+    clone.inverse = style.inverse;
+    return clone;
+  }
+  function advanceAnsiStyle(text, initialStyle = createDefaultAnsiStyle()) {
+    return parseAnsiSegments(text, initialStyle).style;
+  }
+  function renderLogLine(text, initialStyle = createDefaultAnsiStyle(), options = {}) {
+    const parsed = parseAnsiSegments(text, initialStyle);
+    const fragment = document.createDocumentFragment();
+    for (const segment of parsed.segments) {
+      if (segment.type === "control") {
+        appendControlMarker(fragment, segment.marker, segment.kind, segment.style);
+      } else {
+        appendStyledText(fragment, segment.text, segment.style, options);
+      }
+    }
+    return { fragment, finalStyle: parsed.style };
+  }
+  function parseAnsiSegments(text, initialStyle) {
+    const segments = [];
+    let style = cloneAnsiStyle(initialStyle);
+    let buffer = "";
+    const flush = () => {
+      if (!buffer) {
+        return;
+      }
+      segments.push({ type: "text", text: buffer, style: cloneAnsiStyle(style) });
+      buffer = "";
+    };
+    for (let index = 0; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      if (code === 27) {
+        const csi = parseCsiSequence(text, index);
+        if (csi && csi.final === "m") {
+          flush();
+          style = applySgrParams(style, csi.params);
+          index = csi.end;
+          continue;
+        }
+        flush();
+        segments.push({ type: "control", marker: "[ESC]", kind: "esc", style: cloneAnsiStyle(style) });
+        continue;
+      }
+      if (code === 8) {
+        flush();
+        segments.push({ type: "control", marker: "[BS]", kind: "backspace", style: cloneAnsiStyle(style) });
+        continue;
+      }
+      if (code === 127) {
+        flush();
+        segments.push({ type: "control", marker: "[DEL]", kind: "delete", style: cloneAnsiStyle(style) });
+        continue;
+      }
+      if (code === 13) {
+        flush();
+        segments.push({ type: "control", marker: "[CR]", kind: "carriage-return", style: cloneAnsiStyle(style) });
+        continue;
+      }
+      if (code < 32 && code !== 9) {
+        flush();
+        segments.push({ type: "control", marker: `[0x${code.toString(16).padStart(2, "0")}]`, kind: "control", style: cloneAnsiStyle(style) });
+        continue;
+      }
+      buffer += text[index] ?? "";
+    }
+    flush();
+    return { segments, style };
+  }
+  function parseCsiSequence(text, start) {
+    if (text[start] !== "\x1B" || text[start + 1] !== "[") {
+      return null;
+    }
+    for (let index = start + 2; index < text.length && index < start + 80; index += 1) {
+      const code = text.charCodeAt(index);
+      if (code >= 64 && code <= 126) {
+        const rawParams = text.slice(start + 2, index);
+        const params = rawParams.length === 0 ? [0] : rawParams.split(";").map((part) => {
+          const parsed = Number.parseInt(part || "0", 10);
+          return Number.isFinite(parsed) ? parsed : 0;
+        });
+        return { params, final: text[index] ?? "", end: index };
+      }
+    }
+    return null;
+  }
+  function applySgrParams(inputStyle, params) {
+    const style = cloneAnsiStyle(inputStyle);
+    const effectiveParams = params.length > 0 ? params : [0];
+    for (let index = 0; index < effectiveParams.length; index += 1) {
+      const code = effectiveParams[index] ?? 0;
+      if (code === 0) {
+        return createDefaultAnsiStyle();
+      }
+      if (code === 1) {
+        style.bold = true;
+        continue;
+      }
+      if (code === 2) {
+        style.dim = true;
+        continue;
+      }
+      if (code === 3) {
+        style.italic = true;
+        continue;
+      }
+      if (code === 4) {
+        style.underline = true;
+        continue;
+      }
+      if (code === 7) {
+        style.inverse = true;
+        continue;
+      }
+      if (code === 22) {
+        style.bold = false;
+        style.dim = false;
+        continue;
+      }
+      if (code === 23) {
+        style.italic = false;
+        continue;
+      }
+      if (code === 24) {
+        style.underline = false;
+        continue;
+      }
+      if (code === 27) {
+        style.inverse = false;
+        continue;
+      }
+      if (code === 39) {
+        delete style.fg;
+        continue;
+      }
+      if (code === 49) {
+        delete style.bg;
+        continue;
+      }
+      if (code >= 30 && code <= 37) {
+        setColor(style, "fg", ansi16Color(code - 30));
+        continue;
+      }
+      if (code >= 40 && code <= 47) {
+        setColor(style, "bg", ansi16Color(code - 40));
+        continue;
+      }
+      if (code >= 90 && code <= 97) {
+        setColor(style, "fg", ansi16Color(code - 90 + 8));
+        continue;
+      }
+      if (code >= 100 && code <= 107) {
+        setColor(style, "bg", ansi16Color(code - 100 + 8));
+        continue;
+      }
+      if (code === 38 || code === 48) {
+        const target = code === 38 ? "fg" : "bg";
+        const mode = effectiveParams[index + 1];
+        if (mode === 5) {
+          const color = effectiveParams[index + 2];
+          if (typeof color === "number") {
+            setColor(style, target, ansi256Color(color));
+            index += 2;
+          }
+          continue;
+        }
+        if (mode === 2) {
+          const red = effectiveParams[index + 2];
+          const green = effectiveParams[index + 3];
+          const blue = effectiveParams[index + 4];
+          if (isByte(red) && isByte(green) && isByte(blue)) {
+            setColor(style, target, `rgb(${red}, ${green}, ${blue})`);
+            index += 4;
+          }
+          continue;
+        }
+      }
+    }
+    return style;
+  }
+  function isByte(value) {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255;
+  }
+  function setColor(style, target, color) {
+    if (!color) {
+      return;
+    }
+    if (target === "fg") {
+      style.fg = color;
+    } else {
+      style.bg = color;
+    }
+  }
+  function ansi16Color(index) {
+    return ANSI_16_COLORS[index] ?? null;
+  }
+  function ansi256Color(index) {
+    if (!Number.isInteger(index) || index < 0 || index > 255) {
+      return null;
+    }
+    if (index < 16) {
+      return ansi16Color(index);
+    }
+    if (index >= 232) {
+      const level = 8 + (index - 232) * 10;
+      return `rgb(${level}, ${level}, ${level})`;
+    }
+    const offset = index - 16;
+    const red = Math.floor(offset / 36);
+    const green = Math.floor(offset % 36 / 6);
+    const blue = offset % 6;
+    return `rgb(${ansiCubeLevel(red)}, ${ansiCubeLevel(green)}, ${ansiCubeLevel(blue)})`;
+  }
+  function ansiCubeLevel(value) {
+    return value === 0 ? 0 : 55 + value * 40;
+  }
+  function appendControlMarker(parent, marker, kind, style) {
+    const node = document.createElement("span");
+    node.className = `ansi-control ansi-control-${kind}`;
+    applyAnsiStyle(node, style);
+    node.textContent = marker;
+    parent.appendChild(node);
+  }
+  function appendStyledText(parent, text, style, options) {
+    if (!text) {
+      return;
+    }
+    const target = hasVisibleAnsiStyle(style) ? document.createElement("span") : parent;
+    if (target instanceof HTMLElement) {
+      target.className = "ansi-segment";
+      applyAnsiStyle(target, style);
+    }
+    appendJsonHighlightedText(target, text, options);
+    if (target !== parent) {
+      parent.appendChild(target);
+    }
+  }
+  function hasVisibleAnsiStyle(style) {
+    return Boolean(style.fg || style.bg || style.bold || style.dim || style.italic || style.underline || style.inverse);
+  }
+  function applyAnsiStyle(node, style) {
+    let fg = style.fg;
+    let bg = style.bg;
+    if (style.inverse) {
+      const nextFg = bg || DEFAULT_BG;
+      bg = fg || DEFAULT_FG;
+      fg = nextFg;
+    }
+    if (fg) {
+      node.style.color = fg;
+    }
+    if (bg) {
+      node.style.backgroundColor = bg;
+    }
+    if (style.bold) {
+      node.classList.add("ansi-bold");
+    }
+    if (style.dim) {
+      node.classList.add("ansi-dim");
+    }
+    if (style.italic) {
+      node.classList.add("ansi-italic");
+    }
+    if (style.underline) {
+      node.classList.add("ansi-underline");
+    }
+  }
+  function appendJsonHighlightedText(parent, text, options) {
+    const fragments = findJsonFragments(text);
+    if (fragments.length === 0) {
+      parent.appendChild(document.createTextNode(text));
+      return;
+    }
+    let cursor = 0;
+    for (const fragment of fragments) {
+      if (fragment.start > cursor) {
+        parent.appendChild(document.createTextNode(text.slice(cursor, fragment.start)));
+      }
+      if (options.prettyJson) {
+        appendPrettyJsonBlock(parent, fragment.raw);
+      } else {
+        appendJsonTokens(parent, fragment.raw);
+      }
+      cursor = fragment.end;
+    }
+    if (cursor < text.length) {
+      parent.appendChild(document.createTextNode(text.slice(cursor)));
+    }
+  }
+  function appendPrettyJsonBlock(parent, raw) {
+    const node = document.createElement("span");
+    node.className = "json-pretty-block";
+    try {
+      appendJsonTokens(node, JSON.stringify(JSON.parse(raw), null, 2));
+    } catch {
+      appendJsonTokens(node, raw);
+    }
+    parent.appendChild(node);
+  }
+  function findJsonFragments(text) {
+    const fragments = [];
+    let start = -1;
+    let stack = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < text.length; index += 1) {
+      const ch = text[index] ?? "";
+      if (start < 0) {
+        if (ch === "{" || ch === "[") {
+          start = index;
+          stack = [ch];
+          inString = false;
+          escaped = false;
+        }
+        continue;
+      }
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{" || ch === "[") {
+        stack.push(ch);
+        continue;
+      }
+      if (ch !== "}" && ch !== "]") {
+        continue;
+      }
+      const opener = stack[stack.length - 1];
+      if (opener === "{" && ch !== "}" || opener === "[" && ch !== "]") {
+        start = -1;
+        stack = [];
+        continue;
+      }
+      stack.pop();
+      if (stack.length > 0) {
+        continue;
+      }
+      const end = index + 1;
+      const raw = text.slice(start, end);
+      if (raw.length <= MAX_JSON_FRAGMENT_CHARS && isValidJson(raw)) {
+        fragments.push({ start, end, raw });
+      }
+      start = -1;
+      stack = [];
+    }
+    return fragments;
+  }
+  function isValidJson(raw) {
+    try {
+      JSON.parse(raw);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function appendJsonTokens(parent, raw) {
+    let index = 0;
+    while (index < raw.length) {
+      const ch = raw[index] ?? "";
+      if (isWhitespace(ch)) {
+        const next = scanWhile(raw, index, isWhitespace);
+        parent.appendChild(document.createTextNode(raw.slice(index, next)));
+        index = next;
+        continue;
+      }
+      if (ch === '"') {
+        const end = scanStringEnd(raw, index);
+        const after = skipWhitespace(raw, end);
+        appendToken(parent, raw.slice(index, end), raw[after] === ":" ? "key" : "string");
+        index = end;
+        continue;
+      }
+      if (isNumberStart(ch)) {
+        const end = scanJsonNumberEnd(raw, index);
+        appendToken(parent, raw.slice(index, end), "number");
+        index = end;
+        continue;
+      }
+      if (raw.startsWith("true", index)) {
+        appendToken(parent, "true", "boolean");
+        index += 4;
+        continue;
+      }
+      if (raw.startsWith("false", index)) {
+        appendToken(parent, "false", "boolean");
+        index += 5;
+        continue;
+      }
+      if (raw.startsWith("null", index)) {
+        appendToken(parent, "null", "null");
+        index += 4;
+        continue;
+      }
+      appendToken(parent, ch, "punctuation");
+      index += 1;
+    }
+  }
+  function appendToken(parent, text, kind) {
+    const node = document.createElement("span");
+    node.className = `json-token json-token-${kind}`;
+    node.textContent = text;
+    parent.appendChild(node);
+  }
+  function scanStringEnd(raw, start) {
+    let escaped = false;
+    for (let index = start + 1; index < raw.length; index += 1) {
+      const ch = raw[index] ?? "";
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        return index + 1;
+      }
+    }
+    return raw.length;
+  }
+  function scanJsonNumberEnd(raw, start) {
+    let index = start;
+    while (index < raw.length && /[-+0-9.eE]/.test(raw[index] ?? "")) {
+      index += 1;
+    }
+    return index;
+  }
+  function scanWhile(raw, start, predicate) {
+    let index = start;
+    while (index < raw.length && predicate(raw[index] ?? "")) {
+      index += 1;
+    }
+    return index;
+  }
+  function skipWhitespace(raw, start) {
+    return scanWhile(raw, start, isWhitespace);
+  }
+  function isWhitespace(ch) {
+    return ch === " " || ch === "	" || ch === "\n" || ch === "\r";
+  }
+  function isNumberStart(ch) {
+    return ch === "-" || ch >= "0" && ch <= "9";
+  }
+
   // framework_shells/ui/src/protocol.ts
   function isRecord2(value) {
     return typeof value === "object" && value !== null;
@@ -812,6 +1313,7 @@
   var LOG_STREAMS = ["stdout", "stderr"];
   var EXITED_EXPANDED_KEY = "fws.exited.expanded";
   var GROUP_EXPANDED_KEY = "fws.group.expanded";
+  var LOG_RENDER_OPTIONS_KEY = "fws.log.render.options";
   var EXITED_PAGE_SIZE = 50;
   var CSS_COLOR_RE = /^[#()0-9a-zA-Z.,%\s-]+$/;
   var FWS_SOCKETIO_NAMESPACE = "/fws";
@@ -850,12 +1352,53 @@
       return {};
     }
   }
+  function normalizeStreamRenderOptions(value) {
+    if (!isRecord3(value)) {
+      return { prettyJson: false };
+    }
+    return { prettyJson: normalizeStoredBoolean(value.prettyJson) };
+  }
+  function parseStoredLogRenderOptions(raw) {
+    if (!raw) {
+      return {};
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!isRecord3(parsed)) {
+        return {};
+      }
+      const result = {};
+      for (const [shellId, value] of Object.entries(parsed)) {
+        if (!isRecord3(value)) {
+          continue;
+        }
+        const shellOptions = {};
+        if ("stdout" in value) {
+          shellOptions.stdout = normalizeStreamRenderOptions(value.stdout);
+        }
+        if ("stderr" in value) {
+          shellOptions.stderr = normalizeStreamRenderOptions(value.stderr);
+        }
+        if (shellOptions.stdout || shellOptions.stderr) {
+          result[shellId] = shellOptions;
+        }
+      }
+      return result;
+    } catch {
+      return {};
+    }
+  }
+  function getStoredStreamRenderOptions(store, shellId, stream) {
+    return store[shellId]?.[stream] ?? { prettyJson: false };
+  }
   function makeStreamState(containerId) {
     return {
       container: getElementById(containerId),
       lines: [],
       partial: "",
-      pendingCount: 0
+      pendingCount: 0,
+      ansiStyle: createDefaultAnsiStyle(),
+      prettyJson: false
     };
   }
   function escapeHtml(value) {
@@ -1349,6 +1892,7 @@
     const collapseState = /* @__PURE__ */ new Map();
     let defaultCollapsed = true;
     let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
+    let logRenderOptions = parseStoredLogRenderOptions(window.localStorage.getItem(LOG_RENDER_OPTIONS_KEY));
     let exitedVisibleCount = EXITED_PAGE_SIZE;
     let dashboardRequestCounter = 0;
     let dashboardState = { shells: [], processes: [] };
@@ -1833,14 +2377,18 @@
       const label = state.pendingCount > 0 ? `${state.pendingCount} new line${state.pendingCount === 1 ? "" : "s"} buffered` : "";
       container.setAttribute("data-pending-label", label);
     }
-    function buildLineNodes(lines) {
+    function buildLineNodes(stream, lines) {
       const fragment = document.createDocumentFragment();
       const wrapper = document.createElement("div");
       wrapper.className = "log-lines";
+      const renderOptions = { prettyJson: logState.streams[stream].prettyJson };
+      let renderStyle = createDefaultAnsiStyle();
       for (const line of lines) {
         const node = document.createElement("div");
         node.className = "log-line";
-        node.textContent = line;
+        const rendered = renderLogLine(line, renderStyle, renderOptions);
+        node.appendChild(rendered.fragment);
+        renderStyle = rendered.finalStyle;
         wrapper.appendChild(node);
       }
       fragment.appendChild(wrapper);
@@ -1861,14 +2409,14 @@
         empty.textContent = logState.shellId ? "No lines matched." : "Select a shell log.";
         container.appendChild(empty);
       } else {
-        container.appendChild(buildLineNodes(lines));
+        container.appendChild(buildLineNodes(stream, lines));
       }
       if (pinned) {
         container.scrollTop = container.scrollHeight;
       }
       setPendingLabel(stream);
     }
-    function appendLines(stream, newLines, partialLine) {
+    function appendLines(stream, newLines, partialLine, initialAnsiStyle) {
       const state = logState.streams[stream];
       const container = state.container;
       if (!container) {
@@ -1882,22 +2430,23 @@
         wrapper.className = "log-lines";
         container.appendChild(wrapper);
       }
+      const previousPartialNode = wrapper.querySelector(".log-line.is-partial");
+      previousPartialNode?.remove();
+      let renderStyle = cloneAnsiStyle(initialAnsiStyle);
+      const renderOptions = { prettyJson: state.prettyJson };
       for (const line of newLines) {
         const node = document.createElement("div");
         node.className = "log-line";
-        node.textContent = line;
+        const rendered = renderLogLine(line, renderStyle, renderOptions);
+        node.appendChild(rendered.fragment);
+        renderStyle = rendered.finalStyle;
         wrapper.appendChild(node);
       }
-      let partialNode = wrapper.querySelector(".log-line.is-partial");
       if (partialLine) {
-        if (!partialNode) {
-          partialNode = document.createElement("div");
-          partialNode.className = "log-line is-partial";
-          wrapper.appendChild(partialNode);
-        }
-        partialNode.textContent = partialLine;
-      } else if (partialNode) {
-        partialNode.remove();
+        const partialNode = document.createElement("div");
+        partialNode.className = "log-line is-partial";
+        wrapper.appendChild(partialNode);
+        partialNode.replaceChildren(renderLogLine(partialLine, renderStyle, renderOptions).fragment);
       }
       if (pinned) {
         container.scrollTop = container.scrollHeight;
@@ -1909,26 +2458,63 @@
       const parts = normalized.split("\n");
       state.partial = normalized.endsWith("\n") ? "" : parts.pop() || "";
       state.lines = parts;
+      state.ansiStyle = createDefaultAnsiStyle();
+      for (const line of state.lines) {
+        state.ansiStyle = advanceAnsiStyle(line, state.ansiStyle);
+      }
       state.pendingCount = 0;
       setPendingLabel(stream);
     }
     function appendChunkToState(stream, chunk) {
       const state = logState.streams[stream];
+      const initialAnsiStyle = cloneAnsiStyle(state.ansiStyle);
       const text = `${state.partial}${String(chunk || "")}`;
       const parts = text.split("\n");
       state.partial = text.endsWith("\n") ? "" : parts.pop() || "";
       const newLines = parts;
       if (newLines.length > 0) {
         state.lines.push(...newLines);
+        for (const line of newLines) {
+          state.ansiStyle = advanceAnsiStyle(line, state.ansiStyle);
+        }
       }
-      return { newLines, partialLine: state.partial };
+      return { newLines, partialLine: state.partial, initialAnsiStyle };
     }
     function resetStream(stream) {
       const state = logState.streams[stream];
       state.lines = [];
       state.partial = "";
       state.pendingCount = 0;
+      state.ansiStyle = createDefaultAnsiStyle();
       renderStream(stream);
+    }
+    function saveLogRenderOptions() {
+      try {
+        window.localStorage.setItem(LOG_RENDER_OPTIONS_KEY, JSON.stringify(logRenderOptions));
+      } catch {
+      }
+    }
+    function setStoredPrettyJson(shellId, stream, enabled) {
+      if (!shellId) {
+        return;
+      }
+      const shellOptions = logRenderOptions[shellId] ?? {};
+      shellOptions[stream] = { prettyJson: enabled };
+      logRenderOptions[shellId] = shellOptions;
+      saveLogRenderOptions();
+    }
+    function syncPrettyJsonToggle(stream) {
+      const input = getElementById(`${stream}-pretty-json`);
+      if (input) {
+        input.checked = logState.streams[stream].prettyJson;
+      }
+    }
+    function applyStoredLogRenderOptions(shellId) {
+      for (const stream of LOG_STREAMS) {
+        const options = getStoredStreamRenderOptions(logRenderOptions, shellId, stream);
+        logState.streams[stream].prettyJson = options.prettyJson;
+        syncPrettyJsonToggle(stream);
+      }
     }
     function renderLogError(message) {
       for (const stream of LOG_STREAMS) {
@@ -1973,7 +2559,7 @@
           if (hasActiveFilters(stream)) {
             renderStream(stream);
           } else {
-            appendLines(stream, appended.newLines, appended.partialLine);
+            appendLines(stream, appended.newLines, appended.partialLine, appended.initialAnsiStyle);
           }
           return;
         }
@@ -2035,6 +2621,7 @@
       logDrawer.setAttribute("aria-hidden", "false");
       logState.shellId = nextShellId;
       logState.shellLabel = shellLabel || findShellLabel(nextShellId);
+      applyStoredLogRenderOptions(nextShellId);
       if (logTitleEl) {
         logTitleEl.textContent = logState.shellLabel || "Shell Logs";
       }
@@ -2090,8 +2677,19 @@
       excludeInput?.addEventListener("input", applyDebounced);
       radios.forEach((radio) => radio.addEventListener("change", apply));
     }
+    function wirePrettyJsonToggle(stream) {
+      const input = getElementById(`${stream}-pretty-json`);
+      input?.addEventListener("change", () => {
+        const enabled = input.checked;
+        logState.streams[stream].prettyJson = enabled;
+        setStoredPrettyJson(logState.shellId, stream, enabled);
+        renderStream(stream);
+      });
+    }
     wireFilters("stdout");
     wireFilters("stderr");
+    wirePrettyJsonToggle("stdout");
+    wirePrettyJsonToggle("stderr");
     if (logPauseInput) {
       logPauseInput.addEventListener("change", () => {
         logState.paused = logPauseInput.checked;

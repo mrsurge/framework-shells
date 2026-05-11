@@ -66,7 +66,13 @@
       <div class="log-drawer-body">
         <div class="log-pane">
           <div class="log-pane-header stdout">
-            <div class="log-pane-title">STDOUT</div>
+            <div class="log-pane-title-row">
+              <div class="log-pane-title">STDOUT</div>
+              <label class="log-render-toggle">
+                <input type="checkbox" id="stdout-pretty-json" />
+                <span>Pretty JSON</span>
+              </label>
+            </div>
             <div class="filters">
               <div class="filter-row">
                 <input id="stdout-include-input" class="filter-input" type="text" placeholder="Include filter" />
@@ -85,7 +91,13 @@
 
         <div class="log-pane">
           <div class="log-pane-header stderr">
-            <div class="log-pane-title">STDERR</div>
+            <div class="log-pane-title-row">
+              <div class="log-pane-title">STDERR</div>
+              <label class="log-render-toggle">
+                <input type="checkbox" id="stderr-pretty-json" />
+                <span>Pretty JSON</span>
+              </label>
+            </div>
             <div class="filters">
               <div class="filter-row">
                 <input id="stderr-include-input" class="filter-input" type="text" placeholder="Include filter" />

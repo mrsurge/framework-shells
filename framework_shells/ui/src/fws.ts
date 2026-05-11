@@ -1,6 +1,13 @@
 import { connectSocketIo, type SocketIoSocket } from './socketio_client';
 import { initFwsConsoleBridge } from './te2_console_bridge';
 import {
+  advanceAnsiStyle,
+  cloneAnsiStyle,
+  createDefaultAnsiStyle,
+  renderLogLine,
+  type AnsiStyle,
+} from './ansi_json_log_renderer';
+import {
   buildClientRequest,
   type ClientRequestMap,
   type ClientRequestMethod,
@@ -17,6 +24,7 @@ import {
 const LOG_STREAMS: LogStreamName[] = ['stdout', 'stderr'];
 const EXITED_EXPANDED_KEY = 'fws.exited.expanded';
 const GROUP_EXPANDED_KEY = 'fws.group.expanded';
+const LOG_RENDER_OPTIONS_KEY = 'fws.log.render.options';
 const EXITED_PAGE_SIZE = 50;
 const CSS_COLOR_RE = /^[#()0-9a-zA-Z.,%\s-]+$/;
 
@@ -27,6 +35,8 @@ interface StreamState {
   lines: string[];
   partial: string;
   pendingCount: number;
+  ansiStyle: AnsiStyle;
+  prettyJson: boolean;
 }
 
 interface LogState {
@@ -47,6 +57,15 @@ interface FilterConfig {
   excludeMode: FilterMode;
 }
 
+interface StreamRenderOptions {
+  prettyJson: boolean;
+}
+
+interface StoredShellLogRenderOptions {
+  stdout?: StreamRenderOptions;
+  stderr?: StreamRenderOptions;
+}
+
 interface SubgroupStyle {
   bg?: string;
   border?: string;
@@ -56,6 +75,7 @@ interface SubgroupStyle {
 type Matcher = (line: string) => boolean;
 type SubgroupStyleMap = Record<string, SubgroupStyle>;
 type DashboardStateResult = RequestResultMap['fws.dashboard.open'] | RequestResultMap['fws.dashboard.refresh'];
+type StoredLogRenderOptions = Record<string, StoredShellLogRenderOptions>;
 
 const FWS_SOCKETIO_NAMESPACE = '/fws';
 const FWS_SOCKETIO_PATH = '/fws_ws/socket.io';
@@ -99,12 +119,60 @@ function parseStoredGroupExpanded(raw: string | null): Record<string, boolean> {
   }
 }
 
+function normalizeStreamRenderOptions(value: unknown): StreamRenderOptions {
+  if (!isRecord(value)) {
+    return { prettyJson: false };
+  }
+  return { prettyJson: normalizeStoredBoolean(value.prettyJson) };
+}
+
+function parseStoredLogRenderOptions(raw: string | null): StoredLogRenderOptions {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) {
+      return {};
+    }
+    const result: StoredLogRenderOptions = {};
+    for (const [shellId, value] of Object.entries(parsed)) {
+      if (!isRecord(value)) {
+        continue;
+      }
+      const shellOptions: StoredShellLogRenderOptions = {};
+      if ('stdout' in value) {
+        shellOptions.stdout = normalizeStreamRenderOptions(value.stdout);
+      }
+      if ('stderr' in value) {
+        shellOptions.stderr = normalizeStreamRenderOptions(value.stderr);
+      }
+      if (shellOptions.stdout || shellOptions.stderr) {
+        result[shellId] = shellOptions;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function getStoredStreamRenderOptions(
+  store: StoredLogRenderOptions,
+  shellId: string,
+  stream: LogStreamName,
+): StreamRenderOptions {
+  return store[shellId]?.[stream] ?? { prettyJson: false };
+}
+
 function makeStreamState(containerId: string): StreamState {
   return {
     container: getElementById<HTMLElement>(containerId),
     lines: [],
     partial: '',
     pendingCount: 0,
+    ansiStyle: createDefaultAnsiStyle(),
+    prettyJson: false,
   };
 }
 
@@ -653,6 +721,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
   const collapseState = new Map<string, boolean>();
   let defaultCollapsed = true;
   let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
+  let logRenderOptions = parseStoredLogRenderOptions(window.localStorage.getItem(LOG_RENDER_OPTIONS_KEY));
   let exitedVisibleCount = EXITED_PAGE_SIZE;
   let dashboardRequestCounter = 0;
   let dashboardState: DashboardStatePayload = { shells: [], processes: [] };
@@ -1204,14 +1273,18 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     container.setAttribute('data-pending-label', label);
   }
 
-  function buildLineNodes(lines: string[]): DocumentFragment {
+  function buildLineNodes(stream: LogStreamName, lines: string[]): DocumentFragment {
     const fragment = document.createDocumentFragment();
     const wrapper = document.createElement('div');
     wrapper.className = 'log-lines';
+    const renderOptions = { prettyJson: logState.streams[stream].prettyJson };
+    let renderStyle = createDefaultAnsiStyle();
     for (const line of lines) {
       const node = document.createElement('div');
       node.className = 'log-line';
-      node.textContent = line;
+      const rendered = renderLogLine(line, renderStyle, renderOptions);
+      node.appendChild(rendered.fragment);
+      renderStyle = rendered.finalStyle;
       wrapper.appendChild(node);
     }
     fragment.appendChild(wrapper);
@@ -1233,7 +1306,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       empty.textContent = logState.shellId ? 'No lines matched.' : 'Select a shell log.';
       container.appendChild(empty);
     } else {
-      container.appendChild(buildLineNodes(lines));
+      container.appendChild(buildLineNodes(stream, lines));
     }
     if (pinned) {
       container.scrollTop = container.scrollHeight;
@@ -1241,7 +1314,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     setPendingLabel(stream);
   }
 
-  function appendLines(stream: LogStreamName, newLines: string[], partialLine: string): void {
+  function appendLines(stream: LogStreamName, newLines: string[], partialLine: string, initialAnsiStyle: AnsiStyle): void {
     const state = logState.streams[stream];
     const container = state.container;
     if (!container) {
@@ -1256,23 +1329,25 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       container.appendChild(wrapper);
     }
 
+    const previousPartialNode = wrapper.querySelector<HTMLElement>('.log-line.is-partial');
+    previousPartialNode?.remove();
+
+    let renderStyle = cloneAnsiStyle(initialAnsiStyle);
+    const renderOptions = { prettyJson: state.prettyJson };
     for (const line of newLines) {
       const node = document.createElement('div');
       node.className = 'log-line';
-      node.textContent = line;
+      const rendered = renderLogLine(line, renderStyle, renderOptions);
+      node.appendChild(rendered.fragment);
+      renderStyle = rendered.finalStyle;
       wrapper.appendChild(node);
     }
 
-    let partialNode = wrapper.querySelector<HTMLElement>('.log-line.is-partial');
     if (partialLine) {
-      if (!partialNode) {
-        partialNode = document.createElement('div');
-        partialNode.className = 'log-line is-partial';
-        wrapper.appendChild(partialNode);
-      }
-      partialNode.textContent = partialLine;
-    } else if (partialNode) {
-      partialNode.remove();
+      const partialNode = document.createElement('div');
+      partialNode.className = 'log-line is-partial';
+      wrapper.appendChild(partialNode);
+      partialNode.replaceChildren(renderLogLine(partialLine, renderStyle, renderOptions).fragment);
     }
 
     if (pinned) {
@@ -1286,20 +1361,31 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     const parts = normalized.split('\n');
     state.partial = normalized.endsWith('\n') ? '' : parts.pop() || '';
     state.lines = parts;
+    state.ansiStyle = createDefaultAnsiStyle();
+    for (const line of state.lines) {
+      state.ansiStyle = advanceAnsiStyle(line, state.ansiStyle);
+    }
     state.pendingCount = 0;
     setPendingLabel(stream);
   }
 
-  function appendChunkToState(stream: LogStreamName, chunk: string): { newLines: string[]; partialLine: string } {
+  function appendChunkToState(
+    stream: LogStreamName,
+    chunk: string,
+  ): { newLines: string[]; partialLine: string; initialAnsiStyle: AnsiStyle } {
     const state = logState.streams[stream];
+    const initialAnsiStyle = cloneAnsiStyle(state.ansiStyle);
     const text = `${state.partial}${String(chunk || '')}`;
     const parts = text.split('\n');
     state.partial = text.endsWith('\n') ? '' : parts.pop() || '';
     const newLines = parts;
     if (newLines.length > 0) {
       state.lines.push(...newLines);
+      for (const line of newLines) {
+        state.ansiStyle = advanceAnsiStyle(line, state.ansiStyle);
+      }
     }
-    return { newLines, partialLine: state.partial };
+    return { newLines, partialLine: state.partial, initialAnsiStyle };
   }
 
   function resetStream(stream: LogStreamName): void {
@@ -1307,7 +1393,41 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     state.lines = [];
     state.partial = '';
     state.pendingCount = 0;
+    state.ansiStyle = createDefaultAnsiStyle();
     renderStream(stream);
+  }
+
+  function saveLogRenderOptions(): void {
+    try {
+      window.localStorage.setItem(LOG_RENDER_OPTIONS_KEY, JSON.stringify(logRenderOptions));
+    } catch {
+      // Non-critical preference write.
+    }
+  }
+
+  function setStoredPrettyJson(shellId: string, stream: LogStreamName, enabled: boolean): void {
+    if (!shellId) {
+      return;
+    }
+    const shellOptions = logRenderOptions[shellId] ?? {};
+    shellOptions[stream] = { prettyJson: enabled };
+    logRenderOptions[shellId] = shellOptions;
+    saveLogRenderOptions();
+  }
+
+  function syncPrettyJsonToggle(stream: LogStreamName): void {
+    const input = getElementById<HTMLInputElement>(`${stream}-pretty-json`);
+    if (input) {
+      input.checked = logState.streams[stream].prettyJson;
+    }
+  }
+
+  function applyStoredLogRenderOptions(shellId: string): void {
+    for (const stream of LOG_STREAMS) {
+      const options = getStoredStreamRenderOptions(logRenderOptions, shellId, stream);
+      logState.streams[stream].prettyJson = options.prettyJson;
+      syncPrettyJsonToggle(stream);
+    }
   }
 
   function renderLogError(message: string): void {
@@ -1355,7 +1475,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         if (hasActiveFilters(stream)) {
           renderStream(stream);
         } else {
-          appendLines(stream, appended.newLines, appended.partialLine);
+          appendLines(stream, appended.newLines, appended.partialLine, appended.initialAnsiStyle);
         }
         return;
       }
@@ -1424,6 +1544,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     logDrawer.setAttribute('aria-hidden', 'false');
     logState.shellId = nextShellId;
     logState.shellLabel = shellLabel || findShellLabel(nextShellId);
+    applyStoredLogRenderOptions(nextShellId);
     if (logTitleEl) {
       logTitleEl.textContent = logState.shellLabel || 'Shell Logs';
     }
@@ -1484,8 +1605,20 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     radios.forEach((radio) => radio.addEventListener('change', apply));
   }
 
+  function wirePrettyJsonToggle(stream: LogStreamName): void {
+    const input = getElementById<HTMLInputElement>(`${stream}-pretty-json`);
+    input?.addEventListener('change', () => {
+      const enabled = input.checked;
+      logState.streams[stream].prettyJson = enabled;
+      setStoredPrettyJson(logState.shellId, stream, enabled);
+      renderStream(stream);
+    });
+  }
+
   wireFilters('stdout');
   wireFilters('stderr');
+  wirePrettyJsonToggle('stdout');
+  wirePrettyJsonToggle('stderr');
 
   if (logPauseInput) {
     logPauseInput.addEventListener('change', () => {

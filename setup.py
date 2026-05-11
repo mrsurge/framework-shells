@@ -6,8 +6,9 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+from typing import cast
 
-from setuptools import setup
+from setuptools import Command, setup
 try:
     from setuptools.command.build_py import build_py as _build_py
 except Exception:  # pragma: no cover - setuptools should provide this in normal builds
@@ -331,7 +332,7 @@ def _cleanup_staged_native_artifacts() -> None:
     _cleanup_staged_pipe_pump()
 
 
-cmdclass: dict[str, type[object]] = {}
+cmdclass: dict[str, object] = {}
 
 
 if _build_py is not None:
@@ -424,4 +425,4 @@ if _bdist_wheel is not None:
     cmdclass["bdist_wheel"] = bdist_wheel
 
 
-setup(cmdclass=cmdclass)
+setup(cmdclass=cast(dict[str, type[Command]], cmdclass))

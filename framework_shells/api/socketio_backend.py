@@ -1,4 +1,5 @@
 from __future__ import annotations
+# pyright: reportPrivateUsage=false
 
 import asyncio
 import json
@@ -65,16 +66,24 @@ _LOCAL_REPLAY_MAX_LINES = 2000
 _browser_log_subscriptions: dict[str, str] = {}
 _local_event_task: asyncio.Task[None] | None = None
 _local_event_lock = asyncio.Lock()
+_ObjectMapping = Mapping[str, object]
 
 
 def _shell_room(shell_id: str) -> str:
     return f"shell:{shell_id}"
 
 
-def _request_id_from_payload(payload: object) -> str | None:
-    if not isinstance(payload, Mapping):
+def _as_object_mapping(value: object) -> _ObjectMapping | None:
+    if not isinstance(value, Mapping):
         return None
-    request_id = payload.get("id")
+    return cast(_ObjectMapping, value)
+
+
+def _request_id_from_payload(payload: object) -> str | None:
+    mapping = _as_object_mapping(payload)
+    if mapping is None:
+        return None
+    request_id = mapping.get("id")
     return request_id if isinstance(request_id, str) else None
 
 
@@ -94,21 +103,23 @@ def _int_or_zero(value: object) -> int:
 
 
 def _coerce_request_payload(payload: object) -> FwsRequest | None:
-    if not isinstance(payload, Mapping):
+    mapping = _as_object_mapping(payload)
+    if mapping is None:
         return None
     try:
-        raw = json.dumps(dict(payload), separators=(",", ":"))
+        raw = json.dumps(dict(mapping), separators=(",", ":"))
     except Exception:
         return None
     return parse_fws_request(raw)
 
 
 def _coerce_notification_payload(payload: object) -> FwsNotification | None:
-    if not isinstance(payload, Mapping):
+    mapping = _as_object_mapping(payload)
+    if mapping is None:
         return None
-    method = payload.get("method")
-    params = payload.get("params")
-    if payload.get("jsonrpc") != "2.0" or not isinstance(method, str) or not isinstance(params, Mapping):
+    method = mapping.get("method")
+    params = _as_object_mapping(mapping.get("params"))
+    if mapping.get("jsonrpc") != "2.0" or not isinstance(method, str) or params is None:
         return None
     if method not in {
         "fws.shell.created",
@@ -126,7 +137,8 @@ def _coerce_notification_payload(payload: object) -> FwsNotification | None:
 
 
 def _peer_auth_valid(auth: object) -> bool:
-    if not isinstance(auth, Mapping):
+    mapping = _as_object_mapping(auth)
+    if mapping is None:
         return False
     try:
         secret = get_secret()
@@ -134,8 +146,8 @@ def _peer_auth_valid(auth: object) -> bool:
         return False
     expected_token = derive_api_token(secret)
     expected_runtime = derive_runtime_id(secret)
-    api_token = auth.get("api_token")
-    runtime_id = auth.get("runtime_id")
+    api_token = mapping.get("api_token")
+    runtime_id = mapping.get("runtime_id")
     return isinstance(api_token, str) and isinstance(runtime_id, str) and api_token == expected_token and runtime_id == expected_runtime
 
 
@@ -157,7 +169,7 @@ async def _set_browser_log_shell(ns: socketio.AsyncNamespace, sid: str, shell_id
         session = await ns.get_session(sid)
     except Exception:
         session = {}
-    previous_shell_id = session.get("log_shell_id") if isinstance(session, dict) else None
+    previous_shell_id = session.get("log_shell_id")
     if isinstance(previous_shell_id, str) and previous_shell_id:
         try:
             await ns.leave_room(sid, _shell_room(previous_shell_id))
@@ -167,8 +179,6 @@ async def _set_browser_log_shell(ns: socketio.AsyncNamespace, sid: str, shell_id
     if shell_id:
         await ns.enter_room(sid, _shell_room(shell_id))
         _browser_log_subscriptions[sid] = shell_id
-    if not isinstance(session, dict):
-        session = {}
     session["log_shell_id"] = shell_id
     await ns.save_session(sid, session)
     await _broadcast_peer_subscriptions()
@@ -190,11 +200,12 @@ async def _load_log_backlog(shell_id: str) -> tuple[str, str]:
     return await _read_tail(Path(record.stdout_log)), await _read_tail(Path(record.stderr_log))
 
 
-def _notification_shell_id(notification: Mapping[str, object]) -> str | None:
+def _notification_shell_id(notification: _ObjectMapping) -> str | None:
     params = notification.get("params")
-    if not isinstance(params, Mapping):
+    mapping = _as_object_mapping(params)
+    if mapping is None:
         return None
-    shell_id = params.get("shell_id")
+    shell_id = mapping.get("shell_id")
     return shell_id if isinstance(shell_id, str) else None
 
 
@@ -272,7 +283,8 @@ async def _ensure_local_event_forwarder() -> None:
 class FwsSocketIoNamespace(socketio.AsyncNamespace):
     async def on_connect(self, sid: str, environ: Mapping[str, object], auth: object | None = None) -> bool | None:
         await _ensure_local_event_forwarder()
-        if isinstance(auth, Mapping) and auth.get("role") == _PEER_ROLE:
+        auth_mapping = _as_object_mapping(auth)
+        if auth_mapping is not None and auth_mapping.get("role") == _PEER_ROLE:
             if not _peer_auth_valid(auth):
                 return False
             await self.enter_room(sid, _PEER_ROOM)
@@ -289,7 +301,7 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
             session = await self.get_session(sid)
         except Exception:
             session = {}
-        current_shell_id = session.get("log_shell_id") if isinstance(session, dict) else None
+        current_shell_id = session.get("log_shell_id")
         if isinstance(current_shell_id, str) and current_shell_id:
             try:
                 await self.leave_room(sid, _shell_room(current_shell_id))
@@ -338,7 +350,7 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
                     session = await self.get_session(sid)
                 except Exception:
                     session = {}
-                current_shell_id = session.get("log_shell_id") if isinstance(session, dict) else None
+                current_shell_id = session.get("log_shell_id")
                 if current_shell_id == shell_id:
                     await _set_browser_log_shell(self, sid, None)
                 return build_action_response(request["id"])
@@ -406,7 +418,7 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
             session = await self.get_session(sid)
         except Exception:
             session = {}
-        if not isinstance(session, dict) or session.get("role") != _PEER_ROLE:
+        if session.get("role") != _PEER_ROLE:
             return
         notification = _coerce_notification_payload(payload)
         if notification is None:

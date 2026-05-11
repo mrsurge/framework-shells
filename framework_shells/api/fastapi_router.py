@@ -66,7 +66,7 @@ async def _payload_with_capabilities(
     *,
     include_env: bool = False,
 ) -> JsonDict:
-    payload = cast(JsonDict, record.to_payload(include_env=include_env))
+    payload = record.to_payload(include_env=include_env)
     payload["capabilities"] = await mgr.get_shell_capabilities(record)
     return payload
 

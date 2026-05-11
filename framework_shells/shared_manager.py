@@ -46,8 +46,7 @@ async def get_manager(**kwargs: Unpack[FrameworkShellManagerConfig]) -> Framewor
                 _manager_kwargs = kwargs
                 _manager_instance = FrameworkShellManager(**kwargs)
                 manager = _manager_instance
-                async with manager._get_lock():
-                    await manager._adopt_orphaned_shells()
+                await manager.adopt_orphaned_shells()
 
     assert _manager_instance is not None
     try:

@@ -5,7 +5,8 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Optional, TypeAlias, cast
+from collections.abc import Mapping
 
 from .manager import FrameworkShellManager
 from .record import ShellRecord, normalize_launch_backend
@@ -17,8 +18,10 @@ from .shellspec import (
     render_shellspec,
 )
 
+JsonMap: TypeAlias = dict[str, object]
 
-def _deep_merge_dict(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+
+def _deep_merge_dict(a: JsonMap | None, b: JsonMap | None) -> JsonMap:
     if not a and not b:
         return {}
     if not a:
@@ -26,20 +29,25 @@ def _deep_merge_dict(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -
     if not b:
         return dict(a)
 
-    out: Dict[str, Any] = dict(a)
+    out: JsonMap = dict(a)
     for key, value in (b or {}).items():
-        if isinstance(out.get(key), dict) and isinstance(value, dict):
-            out[key] = _deep_merge_dict(out.get(key), value)
+        existing = out.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            out[key] = _deep_merge_dict(cast(JsonMap, existing), cast(JsonMap, value))
         else:
             out[key] = value
     return out
+
+
+def cast_json_map(value: object) -> JsonMap:
+    return cast(JsonMap, value) if isinstance(value, dict) else {}
 
 
 async def _wait_for_tcp_port(*, host: str, port: int, timeout: float, interval: float = 0.2) -> bool:
     deadline = time.monotonic() + float(timeout)
     while time.monotonic() < deadline:
         try:
-            reader, writer = await asyncio.open_connection(host, port)
+            _reader, writer = await asyncio.open_connection(host, port)
         except (OSError, ConnectionError):
             await asyncio.sleep(interval)
             continue
@@ -75,7 +83,7 @@ async def _wait_for_stdout_regex(*, path: str, pattern: str, timeout: float, int
     return False
 
 
-async def _wait_for_http_ok(*, url: str, status_codes: List[int], timeout: float, interval: float = 0.5) -> bool:
+async def _wait_for_http_ok(*, url: str, status_codes: list[int], timeout: float, interval: float = 0.5) -> bool:
     import urllib.request
     import urllib.error
 
@@ -119,12 +127,12 @@ class Orchestrator:
         self,
         spec: ShellSpec,
         *,
-        ctx: Optional[Mapping[str, Any]] = None,
+        ctx: Optional[Mapping[str, object]] = None,
         label: Optional[str] = None,
         record_spec_id: Optional[str] = None,
-        ui: Optional[Dict[str, Any]] = None,
-        env_overrides: Optional[Dict[str, str]] = None,
-        subgroups_overrides: Optional[List[str]] = None,
+        ui: JsonMap | None = None,
+        env_overrides: Optional[dict[str, str]] = None,
+        subgroups_overrides: Optional[list[str]] = None,
         parent_shell_id: Optional[str] = None,
         wait_ready: bool = True,
     ) -> ShellRecord:
@@ -136,7 +144,7 @@ class Orchestrator:
             env_final.update(env_overrides)
 
         subgroups = list(subgroups_overrides) if subgroups_overrides is not None else list(rendered.subgroups or [])
-        ui_final = _deep_merge_dict(rendered.ui or {}, ui or {})
+        ui_final = _deep_merge_dict(cast_json_map(rendered.ui), ui or {})
         label_final = label or rendered.id
         backend = normalize_launch_backend(rendered.backend)
 
@@ -190,12 +198,12 @@ class Orchestrator:
         ref: str,
         *,
         base_dir: Optional[Path] = None,
-        ctx: Optional[Mapping[str, Any]] = None,
+        ctx: Optional[Mapping[str, object]] = None,
         label: Optional[str] = None,
         record_spec_id: Optional[str] = None,
-        ui: Optional[Dict[str, Any]] = None,
-        env_overrides: Optional[Dict[str, str]] = None,
-        subgroups_overrides: Optional[List[str]] = None,
+        ui: JsonMap | None = None,
+        env_overrides: Optional[dict[str, str]] = None,
+        subgroups_overrides: Optional[list[str]] = None,
         parent_shell_id: Optional[str] = None,
         wait_ready: bool = True,
     ) -> ShellRecord:
@@ -226,7 +234,7 @@ class Orchestrator:
             wait_ready=wait_ready,
         )
 
-    async def apply(self, specs: List[ShellSpec], prune: bool = False, *, ctx: Optional[Mapping[str, Any]] = None) -> None:
+    async def apply(self, specs: list[ShellSpec], prune: bool = False, *, ctx: Optional[Mapping[str, object]] = None) -> None:
         """Reconcile specs with current runtime.
 
         This is intentionally conservative: it will start missing shells (if
@@ -235,7 +243,7 @@ class Orchestrator:
         """
         existing_records = await self.manager.list_shells()
 
-        existing_by_spec_id: Dict[str, ShellRecord] = {}
+        existing_by_spec_id: dict[str, ShellRecord] = {}
         for record in existing_records:
             if record.spec_id:
                 existing_by_spec_id[str(record.spec_id)] = record
@@ -246,7 +254,7 @@ class Orchestrator:
             if not spec.autostart:
                 continue
             record = existing_by_spec_id.get(spec.id)
-            if record and record.status == "running" and record.pid and await self.manager._is_pid_alive(record.pid):
+            if record and record.status == "running" and record.pid and await self.manager.is_pid_alive(record.pid):
                 continue
             if record:
                 await self.manager.terminate_shell(record.id, force=True)

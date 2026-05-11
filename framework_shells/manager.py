@@ -18,8 +18,9 @@ import uuid
 import inspect
 from asyncio import Lock as AsyncLock
 from asyncio import Queue as AsyncQueue
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Protocol, cast
+from typing import AsyncIterator, Dict, Iterable, List, Optional, Protocol, cast
 
 import aiofiles
 
@@ -167,7 +168,7 @@ class FrameworkShellManager:
         self._pipes = {}
         
         self._event_bus = get_event_bus()
-        self._lock_instance: AsyncLock | None = None
+        self._lock_instance = None
         self._dtach_bin = shutil.which("dtach")
         self._enable_dtach_proxy = bool(enable_dtach_proxy)
         self._signal_winch_on_resize = (
@@ -251,7 +252,7 @@ class FrameworkShellManager:
 
         return ProcessSnapshot(captured_at=time.time(), processes=processes)
 
-    async def shutdown_app_group(self, app_id: str) -> Dict[str, Any]:
+    async def shutdown_app_group(self, app_id: str) -> dict[str, object]:
         """UI-equivalent shutdown for an app/group id.
 
         Mirrors `/fws/action/app/{app_id}/shutdown` behavior: find running shells
@@ -281,7 +282,7 @@ class FrameworkShellManager:
         )
         return {"ok": True, "data": {"root_pids": root_pids, "stats": stats}}
 
-    def _fire_hook(self, result: Any) -> None:
+    def _fire_hook(self, result: object) -> None:
         """Best-effort hook execution; never blocks core flow."""
         if result is None:
             return
@@ -324,7 +325,7 @@ class FrameworkShellManager:
             self._lock_instance = AsyncLock()
         return self._lock_instance
 
-    async def _emit(self, event_type: EventType, record: ShellRecord, **extra):
+    async def _emit(self, event_type: EventType, record: ShellRecord, **extra: object) -> None:
         event = ShellEvent(
             type=event_type,
             shell_id=record.id,
@@ -406,6 +407,10 @@ class FrameworkShellManager:
         if updated:
             print(f"[FrameworkShells] Adopted {updated} running shell(s) from previous run")
 
+    async def adopt_orphaned_shells(self) -> None:
+        async with self._get_lock():
+            await self._adopt_orphaned_shells()
+
     async def list_active_pids(self) -> List[int]:
         async with self._get_lock():
             pids: List[int] = []
@@ -414,32 +419,37 @@ class FrameworkShellManager:
                     pids.append(record.pid)
             return pids
 
-    async def aggregate_resource_stats(self) -> Dict[str, Any]:
+    async def aggregate_resource_stats(self) -> dict[str, object]:
         async with self._get_lock():
             now = time.time()
-            stats: Dict[str, Any] = {
+            num_shells = 0
+            num_running = 0
+            pids: list[int] = []
+            stats: dict[str, object] = {
                 "run_id": self.run_id,
                 "launcher_pid": self.launcher_pid,
                 "started_at": self.started_at,
                 "uptime": max(0.0, now - self.started_at),
-                "num_shells": 0,
-                "num_running": 0,
+                "num_shells": num_shells,
+                "num_running": num_running,
                 "num_adopted": 0,
                 "cpu_percent": 0.0,
                 "memory_rss": 0,
-                "pids": [],
+                "pids": pids,
                 "has_psutil": bool(psutil),
             }
             running_records: List[ShellRecord] = []
             adopted_count = 0
             async for record in self._aiter_records():
-                stats["num_shells"] += 1
+                num_shells += 1
                 if getattr(record, "adopted", False):
                     adopted_count += 1
                 if record.pid and await self._is_pid_alive(record.pid):
-                    stats["num_running"] += 1
-                    stats["pids"].append(record.pid)
+                    num_running += 1
+                    pids.append(record.pid)
                     running_records.append(record)
+            stats["num_shells"] = num_shells
+            stats["num_running"] = num_running
             stats["num_adopted"] = adopted_count
             if psutil:
                 cpu_total = 0.0
@@ -473,7 +483,10 @@ class FrameworkShellManager:
         try:
             async with aiofiles.open(meta_path, "r", encoding="utf-8") as fh:
                 content = await fh.read()
-                data = json.loads(content)
+                raw_data: object = json.loads(content)
+                if not isinstance(raw_data, dict):
+                    return None
+                data = cast(dict[str, object], raw_data)
         except Exception:
             return None
 
@@ -489,31 +502,61 @@ class FrameworkShellManager:
             return None
         
         try:
-            def get_list(k): return data.get(k) if isinstance(data.get(k), list) else []
-            def get_dict(k): return data.get(k) if isinstance(data.get(k), dict) else {}
+            def get_list(k: str) -> list[str]:
+                value = data.get(k)
+                if not isinstance(value, list):
+                    return []
+                return [str(item) for item in cast(list[object], value)]
 
+            def get_dict(k: str) -> dict[str, object]:
+                value = data.get(k)
+                return dict(cast(dict[str, object], value)) if isinstance(value, dict) else {}
+
+            def get_str(k: str, default: str | None = None) -> str | None:
+                value = data.get(k)
+                return value if isinstance(value, str) else default
+
+            def get_int(k: str) -> int | None:
+                value = data.get(k)
+                return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+            def get_float(k: str, default: float) -> float:
+                value = data.get(k)
+                if isinstance(value, bool):
+                    return default
+                if isinstance(value, int | float | str):
+                    try:
+                        return float(value)
+                    except ValueError:
+                        return default
+                return default
+
+            command_value = data.get("command")
+            command = [str(item) for item in cast(list[object], command_value)] if isinstance(command_value, list) else []
+            env_overrides = {str(k): str(v) for k, v in get_dict("env_overrides").items()}
+            record_id = get_str("id", shell_id) or shell_id
             record = ShellRecord(
-                id=data.get("id", shell_id),
-                command=list(data.get("command") or []),
-                label=data.get("label"),
+                id=record_id,
+                command=command,
+                label=get_str("label"),
                 subgroups=get_list("subgroups"),
                 ui=get_dict("ui"),
-                cwd=data.get("cwd", str(HOME_DIR)),
-                env_overrides=dict(get_dict("env_overrides")),
-                pid=data.get("pid"),
-                status=data.get("status", "unknown"),
-                created_at=float(data.get("created_at", time.time())),
-                updated_at=float(data.get("updated_at", time.time())),
+                cwd=get_str("cwd", str(HOME_DIR)) or str(HOME_DIR),
+                env_overrides=env_overrides,
+                pid=get_int("pid"),
+                status=get_str("status", "unknown") or "unknown",
+                created_at=get_float("created_at", time.time()),
+                updated_at=get_float("updated_at", time.time()),
                 autostart=bool(data.get("autostart", False)),
-                stdout_log=data.get("stdout_log", str(self.logs_dir / f'{data.get("id", shell_id)}.stdout.log')),
-                stderr_log=data.get("stderr_log", str(self.logs_dir / f'{data.get("id", shell_id)}.stderr.log')),
-                spec_id=data.get("spec_id"),
-                exit_code=data.get("exit_code"),
-                run_id=data.get("run_id"),
-                launcher_pid=data.get("launcher_pid"),
+                stdout_log=get_str("stdout_log", str(self.logs_dir / f"{record_id}.stdout.log")) or str(self.logs_dir / f"{record_id}.stdout.log"),
+                stderr_log=get_str("stderr_log", str(self.logs_dir / f"{record_id}.stderr.log")) or str(self.logs_dir / f"{record_id}.stderr.log"),
+                spec_id=get_str("spec_id"),
+                exit_code=get_int("exit_code"),
+                run_id=get_str("run_id"),
+                launcher_pid=get_int("launcher_pid"),
                 adopted=bool(data.get("adopted", False)),
                 backend=normalize_backend(
-                    data.get("backend"),
+                    get_str("backend"),
                     uses_pty=bool(data.get("uses_pty", False)),
                     uses_pipes=bool(data.get("uses_pipes", False)),
                     uses_dtach=bool(data.get("uses_dtach", False)),
@@ -521,11 +564,11 @@ class FrameworkShellManager:
                 uses_pty=bool(data.get("uses_pty", False)),
                 uses_pipes=bool(data.get("uses_pipes", False)),
                 uses_dtach=bool(data.get("uses_dtach", False)),
-                pty_mode=_normalize_pty_mode(data.get("pty_mode"), default=PTY_MODE_RAW),
-                runtime_id=data.get("runtime_id"),
-                signature=data.get("signature"),
-                app_id=data.get("app_id"),
-                parent_shell_id=data.get("parent_shell_id"),
+                pty_mode=_normalize_pty_mode(get_str("pty_mode"), default=PTY_MODE_RAW),
+                runtime_id=get_str("runtime_id"),
+                signature=get_str("signature"),
+                app_id=get_str("app_id"),
+                parent_shell_id=get_str("parent_shell_id"),
                 is_app_worker=bool(data.get("is_app_worker", False)),
             )
             return record
@@ -596,7 +639,7 @@ class FrameworkShellManager:
         label: Optional[str],
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
-        ui: Optional[Dict[str, Any]] = None,
+        ui: Optional[dict[str, object]] = None,
         autostart: bool,
         uses_pty: bool = False,
         uses_pipes: bool = False,
@@ -772,8 +815,6 @@ class FrameworkShellManager:
         
         # IMPORTANT: We need to handle dtach escape key so it doesn't conflict?
         # dtach default detach key is '^\'. 
-        return_code = 0
-        
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=slave_fd,
@@ -987,6 +1028,9 @@ class FrameworkShellManager:
         except OSError:
             return False
         return True
+
+    async def is_pid_alive(self, pid: Optional[int]) -> bool:
+        return await self._is_pid_alive(pid)
 
     async def _mark_exited(self, record: ShellRecord, exit_code: Optional[int]) -> None:
         last_pid = record.pid
@@ -1543,7 +1587,7 @@ class FrameworkShellManager:
         label: Optional[str] = None,
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
-        ui: Optional[Dict[str, Any]] = None,
+        ui: Optional[dict[str, object]] = None,
         autostart: bool = True,
     ) -> ShellRecord:
         record = self._create_record(
@@ -1566,7 +1610,7 @@ class FrameworkShellManager:
         label: Optional[str] = None,
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
-        ui: Optional[Dict[str, Any]] = None,
+        ui: Optional[dict[str, object]] = None,
         pty_mode: Optional[str] = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
@@ -1591,7 +1635,7 @@ class FrameworkShellManager:
         label: Optional[str] = None,
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
-        ui: Optional[Dict[str, Any]] = None,
+        ui: Optional[dict[str, object]] = None,
         pipe_config: dict[str, object] | None = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
@@ -1617,7 +1661,7 @@ class FrameworkShellManager:
         label: Optional[str] = None,
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
-        ui: Optional[Dict[str, Any]] = None,
+        ui: Optional[dict[str, object]] = None,
         pty_mode: Optional[str] = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
@@ -1639,7 +1683,7 @@ class FrameworkShellManager:
     async def list_shells(self) -> List[ShellRecord]:
         async with self._get_lock():
             await self._adopt_orphaned_shells()
-            records = []
+            records: list[ShellRecord] = []
             async for record in self._aiter_records():
                 records.append(record)
             return sorted(records, key=lambda rec: rec.created_at)
@@ -1929,7 +1973,7 @@ class FrameworkShellManager:
         path: Path,
         *,
         lines: Optional[List[str]] = None,
-        extra: JSONMap | None = None,
+        extra: Mapping[str, object] | None = None,
     ) -> JSONMap:
         exists = path.exists()
         stat = await asyncio.to_thread(path.stat) if exists else None

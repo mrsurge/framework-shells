@@ -27,6 +27,12 @@ def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _as_object_mapping(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return cast(Mapping[str, object], value)
+
+
 def _is_socketio_server_process() -> bool:
     server_pid = os.environ.get("FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID", "").strip()
     if server_pid:
@@ -39,8 +45,8 @@ def _default_framework_url() -> str:
 
 
 def _notification_shell_id(notification: Mapping[str, object]) -> str | None:
-    params = notification.get("params")
-    if not isinstance(params, Mapping):
+    params = _as_object_mapping(notification.get("params"))
+    if params is None:
         return None
     shell_id = params.get("shell_id")
     return shell_id if isinstance(shell_id, str) else None
@@ -68,14 +74,19 @@ class FwsSocketIoPeerRelay:
         self.client.on("fws_peer_subscriptions", self._on_subscriptions, namespace=FWS_SOCKETIO_NAMESPACE)
 
     async def _on_subscriptions(self, payload: object) -> None:
-        if not isinstance(payload, Mapping):
+        mapping = _as_object_mapping(payload)
+        if mapping is None:
             self._subscriptions = set()
             return
-        shell_ids = payload.get("shell_ids")
+        shell_ids = mapping.get("shell_ids")
         if not isinstance(shell_ids, list):
             self._subscriptions = set()
             return
-        self._subscriptions = {str(shell_id).strip() for shell_id in shell_ids if str(shell_id).strip()}
+        self._subscriptions = {
+            shell_id
+            for raw_shell_id in cast(list[object], shell_ids)
+            if (shell_id := str(raw_shell_id).strip())
+        }
 
     async def start(self) -> None:
         if self._started:

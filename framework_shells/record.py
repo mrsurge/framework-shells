@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional
-import json
+from typing import Optional, TypeAlias
 
 BACKEND_PROC = "proc"
 BACKEND_PTY = "pty"
@@ -10,6 +9,7 @@ KNOWN_BACKENDS = {BACKEND_PROC, BACKEND_PTY, BACKEND_PIPE, BACKEND_DTACH}
 DEPRECATED_BACKEND_ALIASES = {
     BACKEND_DTACH: BACKEND_PTY,
 }
+JsonMap: TypeAlias = dict[str, object]
 
 
 def normalize_backend(
@@ -49,7 +49,7 @@ def normalize_launch_backend(
     return DEPRECATED_BACKEND_ALIASES.get(normalized, normalized)
 
 
-def backend_flags(backend: str) -> Dict[str, bool]:
+def backend_flags(backend: str) -> dict[str, bool]:
     normalized = normalize_backend(backend)
     return {
         "uses_pty": normalized in {BACKEND_PTY, BACKEND_DTACH},
@@ -62,10 +62,10 @@ class ShellRecord:
     """Serializable metadata describing a framework shell."""
 
     id: str
-    command: List[str]
+    command: list[str]
     label: Optional[str]
     cwd: str
-    env_overrides: Dict[str, str]
+    env_overrides: dict[str, str]
     pid: Optional[int]
     status: str
     created_at: float
@@ -75,8 +75,8 @@ class ShellRecord:
     stderr_log: str
     spec_id: Optional[str] = None
     exit_code: Optional[int] = None
-    subgroups: List[str] = field(default_factory=list)
-    ui: Dict[str, Any] = field(default_factory=dict)
+    subgroups: list[str] = field(default_factory=list)
+    ui: JsonMap = field(default_factory=dict)
     run_id: Optional[str] = None
     launcher_pid: Optional[int] = None
     adopted: bool = False
@@ -134,7 +134,7 @@ class ShellRecord:
             return False
         return verify_record(secret, self.to_dict())
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> JsonMap:
         self.set_backend(
             normalize_backend(
                 self.backend,
@@ -175,7 +175,7 @@ class ShellRecord:
             "is_app_worker": self.is_app_worker,
         }
 
-    def to_payload(self, *, include_env: bool = False) -> Dict[str, Any]:
+    def to_payload(self, *, include_env: bool = False) -> JsonMap:
         self.set_backend(
             normalize_backend(
                 self.backend,
@@ -184,7 +184,7 @@ class ShellRecord:
                 uses_dtach=self.uses_dtach,
             )
         )
-        payload: Dict[str, Any] = {
+        payload: JsonMap = {
             "id": self.id,
             "spec_id": self.spec_id,
             "command": list(self.command),

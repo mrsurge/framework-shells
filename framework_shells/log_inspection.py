@@ -5,7 +5,7 @@ import fnmatch
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional, TypedDict, cast
 
 import aiofiles
 
@@ -14,6 +14,60 @@ JSON_FORMAT = "json"
 JSONRPC_FORMAT = "jsonrpc"
 PLAIN_FORMAT = "plain"
 PLAIN_PREFIX_RE = re.compile(r"^\[([A-Za-z0-9._:-]+)\](?:\s|$)")
+JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+
+
+class LogRecord(TypedDict, total=False):
+    stream: str | None
+    ordinal: int
+    line_number: int | None
+    byte_start: int
+    byte_end: int
+    partial_head: bool
+    partial_tail: bool
+    raw_length: int
+    text: str
+    text_truncated: bool
+    prefix: str | None
+    formats_detected: list[str]
+    kinds: list[str]
+    event_signature: str
+    fragments: list["JsonFragment"]
+    json_payloads: list[JsonValue]
+
+
+class JsonFragment(TypedDict):
+    format: str
+    start: int
+    end: int
+    summary: str
+    parsed: JsonValue
+
+
+class JsonRpcClassification(TypedDict):
+    formats: list[str]
+    kinds: list[str]
+    signature: str | None
+
+
+class EventWindow(TypedDict):
+    records: list[LogRecord]
+    byte_window_start: int
+    byte_window_end: int
+    partial_head: bool
+    truncated: bool
+    event_count: int
+
+
+class InspectionSummary(TypedDict):
+    counts_by_signature: dict[str, int]
+    counts_by_kind: dict[str, int]
+    counts_by_format: dict[str, int]
+    top_signatures: list[dict[str, object]]
+
+
+class InspectionResult(EventWindow):
+    summary: InspectionSummary
 
 
 def _strip_line_endings(text: str) -> str:
@@ -24,7 +78,7 @@ def _strip_line_endings(text: str) -> str:
     return text
 
 
-def _safe_json_summary(value: Any) -> str:
+def _safe_json_summary(value: JsonValue) -> str:
     if isinstance(value, dict):
         keys = list(value.keys())[:5]
         suffix = ", ..." if len(value) > 5 else ""
@@ -42,7 +96,7 @@ def _extract_plain_prefix(text: str) -> Optional[str]:
     return prefix or None
 
 
-def _classify_jsonrpc(payload: Any) -> Dict[str, Any]:
+def _classify_jsonrpc(payload: JsonValue) -> JsonRpcClassification:
     if not isinstance(payload, dict):
         return {"formats": [], "kinds": [], "signature": None}
 
@@ -88,10 +142,10 @@ def _classify_jsonrpc(payload: Any) -> Dict[str, Any]:
     return {"formats": [], "kinds": [], "signature": None}
 
 
-def _extract_json_fragments(text: str) -> List[Dict[str, Any]]:
-    fragments: List[Dict[str, Any]] = []
+def _extract_json_fragments(text: str) -> list[JsonFragment]:
+    fragments: list[JsonFragment] = []
     start: Optional[int] = None
-    stack: List[str] = []
+    stack: list[str] = []
     in_string = False
     escaped = False
 
@@ -135,7 +189,7 @@ def _extract_json_fragments(text: str) -> List[Dict[str, Any]]:
                 continue
             raw = text[start : idx + 1]
             try:
-                parsed = json.loads(raw)
+                parsed = cast(JsonValue, json.loads(raw))
             except Exception:
                 start = None
                 continue
@@ -154,14 +208,14 @@ def _extract_json_fragments(text: str) -> List[Dict[str, Any]]:
     return fragments
 
 
-def _build_inspected_record(raw_record: Dict[str, Any]) -> Dict[str, Any]:
-    record = dict(raw_record)
+def _build_inspected_record(raw_record: LogRecord) -> LogRecord:
+    record: LogRecord = raw_record.copy()
     text = str(record.get("text") or "")
     prefix = _extract_plain_prefix(text)
     fragments = _extract_json_fragments(text)
-    formats_detected: List[str] = []
-    kinds: List[str] = []
-    json_payloads: List[Any] = []
+    formats_detected: list[str] = []
+    kinds: list[str] = []
+    json_payloads: list[JsonValue] = []
     signature: Optional[str] = None
 
     for frag in fragments:
@@ -189,22 +243,18 @@ def _build_inspected_record(raw_record: Dict[str, Any]) -> Dict[str, Any]:
     if signature is None:
         signature = formats_detected[0]
 
-    record.update(
-        {
-            "text_truncated": False,
-            "prefix": prefix,
-            "formats_detected": formats_detected,
-            "kinds": kinds,
-            "event_signature": signature,
-            "fragments": fragments,
-            "json_payloads": json_payloads,
-        }
-    )
+    record["text_truncated"] = False
+    record["prefix"] = prefix
+    record["formats_detected"] = formats_detected
+    record["kinds"] = kinds
+    record["event_signature"] = signature
+    record["fragments"] = fragments
+    record["json_payloads"] = json_payloads
     return record
 
 
 def _record_matches(
-    record: Dict[str, Any],
+    record: LogRecord,
     *,
     query: Optional[str],
     exclude_query: Optional[str],
@@ -255,10 +305,10 @@ def _record_matches(
     return True
 
 
-def summarize_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    counts_by_signature: Dict[str, int] = {}
-    counts_by_kind: Dict[str, int] = {}
-    counts_by_format: Dict[str, int] = {}
+def summarize_records(records: list[LogRecord]) -> InspectionSummary:
+    counts_by_signature: dict[str, int] = {}
+    counts_by_kind: dict[str, int] = {}
+    counts_by_format: dict[str, int] = {}
 
     for record in records:
         signature = str(record.get("event_signature") or "")
@@ -286,7 +336,7 @@ def summarize_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-async def read_event_window(path: Path, *, lines: int, max_bytes: int) -> Dict[str, Any]:
+async def read_event_window(path: Path, *, lines: int, max_bytes: int) -> EventWindow:
     if lines <= 0 or not path.exists():
         return {
             "records": [],
@@ -336,12 +386,12 @@ async def read_event_window(path: Path, *, lines: int, max_bytes: int) -> Dict[s
         raw_lines = [data]
 
     starts_mid_line = start_offset > 0 and previous_byte not in {b"", b"\n", b"\r"}
-    records: List[Dict[str, Any]] = []
+    records: list[LogRecord] = []
     cursor = start_offset
     for idx, raw_line in enumerate(raw_lines):
         decoded = raw_line.decode("utf-8", errors="replace")
         text = _strip_line_endings(decoded)
-        record = {
+        record: LogRecord = {
             "stream": None,
             "ordinal": idx + 1,
             "line_number": None,
@@ -371,8 +421,8 @@ async def read_event_window(path: Path, *, lines: int, max_bytes: int) -> Dict[s
 
     return {
         "records": selected,
-        "byte_window_start": int(selected[0]["byte_start"]),
-        "byte_window_end": int(selected[-1]["byte_end"]),
+        "byte_window_start": int(selected[0].get("byte_start", start_offset)),
+        "byte_window_end": int(selected[-1].get("byte_end", start_offset + len(data))),
         "partial_head": bool(selected[0].get("partial_head")),
         "truncated": start_offset > 0,
         "event_count": len(selected),
@@ -392,9 +442,9 @@ async def inspect_log_file(
     format_filter: Optional[str] = None,
     signature_filter: Optional[str] = None,
     exclude_signature: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> InspectionResult:
     window = await read_event_window(path, lines=lines, max_bytes=max_bytes)
-    inspected: List[Dict[str, Any]] = []
+    inspected: list[LogRecord] = []
     compiled_query: Optional[re.Pattern[str]] = None
     compiled_exclude_query: Optional[re.Pattern[str]] = None
     if query and regex:

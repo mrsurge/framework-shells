@@ -190,10 +190,4 @@ async def collect_external_processes(
     """Call a provider that may be sync or async."""
     value = provider.list_processes(root_pids=root_pids)
     processes = await _maybe_await(value)
-    if not isinstance(processes, list):
-        return []
-    out: list[ProcessRecord] = []
-    for item in processes:
-        if isinstance(item, ProcessRecord):
-            out.append(item)
-    return out
+    return list(processes)

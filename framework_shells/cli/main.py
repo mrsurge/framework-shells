@@ -6,7 +6,7 @@ import sys
 import shutil
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 from ..manager import FrameworkShellManager
 from ..process_snapshot import ProcfsProcessProvider, ProcessSnapshot
@@ -117,6 +117,12 @@ def _arg_bool(args: argparse.Namespace, name: str, default: bool = False) -> boo
 
 def _arg_int(args: argparse.Namespace, name: str, default: int) -> int:
     value = getattr(args, name, default)
+    return _arg_like_int(value, default=default)
+
+
+def _arg_like_int(value: object, default: int = 0) -> int:
+    if not isinstance(value, int | float | str) or isinstance(value, bool):
+        return default
     try:
         return int(value)
     except Exception:
@@ -125,6 +131,12 @@ def _arg_int(args: argparse.Namespace, name: str, default: int) -> int:
 
 def _arg_float(args: argparse.Namespace, name: str, default: float) -> float:
     value = getattr(args, name, default)
+    return _arg_like_float(value, default=default)
+
+
+def _arg_like_float(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, int | float | str) or isinstance(value, bool):
+        return default
     try:
         return float(value)
     except Exception:
@@ -133,7 +145,7 @@ def _arg_float(args: argparse.Namespace, name: str, default: float) -> float:
 
 def _arg_str_list(args: argparse.Namespace, name: str) -> list[str]:
     value = getattr(args, name, None)
-    return [str(item) for item in value] if isinstance(value, list) else []
+    return [str(item) for item in cast(list[object], value)] if isinstance(value, list) else []
 
 async def _resolve_shell_target(
     manager: FrameworkShellManager,
@@ -359,7 +371,7 @@ async def run_async(args: argparse.Namespace) -> None:
                 live.append(s)
             shells = live
 
-        described: list[dict[str, Any]] = []
+        described: list[dict[str, object]] = []
         for rec in shells:
             try:
                 described.append(await manager.describe(rec))
@@ -382,7 +394,7 @@ async def run_async(args: argparse.Namespace) -> None:
             except Exception:
                 continue
 
-        def backend_for(info: dict[str, Any]) -> str:
+        def backend_for(info: dict[str, object]) -> str:
             if info.get("backend"):
                 return str(info.get("backend"))
             if info.get("uses_dtach"):
@@ -420,7 +432,7 @@ async def run_async(args: argparse.Namespace) -> None:
             if not pid:
                 continue
             try:
-                shell_pid_set.add(int(pid))
+                shell_pid_set.add(_arg_like_int(pid))
             except Exception:
                 continue
         for info in sorted(described, key=lambda x: (str(x.get("label") or ""), str(x.get("id") or ""))):
@@ -432,7 +444,7 @@ async def run_async(args: argparse.Namespace) -> None:
                 print(f"{sid}  {label}  status={status}  pid=-  backend={backend_for(info)}")
                 continue
             print(f"{sid}  {label}  status={status}  pid={pid}  backend={backend_for(info)}")
-            render_node(int(pid), indent="  ", shell_pid_set=shell_pid_set, visited=set())
+            render_node(_arg_like_int(pid), indent="  ", shell_pid_set=shell_pid_set, visited=set())
         return
 
     if command == "terminate":
@@ -516,11 +528,11 @@ async def run_async(args: argparse.Namespace) -> None:
             try:
                 info = await manager.describe(s)
                 stats_obj = info.get("stats")
-                stats: dict[str, Any] = stats_obj if isinstance(stats_obj, dict) else {}
+                stats = cast(dict[str, object], stats_obj) if isinstance(stats_obj, dict) else {}
                 cpu = stats.get("cpu_percent")
                 rss = stats.get("memory_rss")
-                cpu_s = "-" if cpu is None else f"{float(cpu):.1f}%"
-                rss_s = "-" if rss is None else f"{int(rss) // (1024 * 1024)}MiB"
+                cpu_s = "-" if cpu is None else f"{_arg_like_float(cpu):.1f}%"
+                rss_s = "-" if rss is None else f"{_arg_like_int(rss) // (1024 * 1024)}MiB"
             except Exception:
                 cpu_s = "-"
                 rss_s = "-"
@@ -577,8 +589,9 @@ async def run_async(args: argparse.Namespace) -> None:
         if _arg_bool(args, "json", False):
             print(json.dumps(result, sort_keys=True))
             return
-        data = result.get("data") if isinstance(result, dict) else None
-        root_pids = (data or {}).get("root_pids") if isinstance(data, dict) else None
+        data = result.get("data")
+        data_map = cast(dict[str, object], data) if isinstance(data, dict) else {}
+        root_pids = data_map.get("root_pids")
         print(f"Shutdown group {app_id} (root_pids={root_pids or []})")
         return
 
@@ -614,12 +627,19 @@ async def run_async(args: argparse.Namespace) -> None:
             payload = result.get(stream_name)
             if not isinstance(payload, dict):
                 continue
-            records = payload.get("records") or []
+            payload_map = cast(dict[str, object], payload)
+            records_obj = payload_map.get("records")
+            records = cast(list[object], records_obj) if isinstance(records_obj, list) else []
             print(
-                f"{stream_name}: events={payload.get('event_count', 0)} "
-                f"matched={len(records)} partial_head={payload.get('partial_head', False)}"
+                f"{stream_name}: events={payload_map.get('event_count', 0)} "
+                f"matched={len(records)} partial_head={payload_map.get('partial_head', False)}"
             )
-            for item in payload.get("summary", {}).get("top_signatures", [])[:5]:
+            summary = payload_map.get("summary")
+            summary_map = cast(dict[str, object], summary) if isinstance(summary, dict) else {}
+            top_signatures_obj = summary_map.get("top_signatures")
+            top_signatures = cast(list[object], top_signatures_obj) if isinstance(top_signatures_obj, list) else []
+            for item_obj in top_signatures[:5]:
+                item = cast(dict[str, object], item_obj) if isinstance(item_obj, dict) else {}
                 try:
                     print(f"  {item.get('signature')}: {item.get('count')}")
                 except Exception:

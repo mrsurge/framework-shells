@@ -2442,10 +2442,8 @@ class FrameworkShellManager:
                 backend = str(pty_state.backend or BACKEND_PTY)
                 await self._write_live_pty_state(pty_state, payload)
             elif pipe_state is not None:
-                record = await self.get_shell(shell_id)
-                if not record:
-                    raise KeyError(f"Shell not found: {shell_id}")
-                backend = self._backend_name(record)
+                record = await self.load_shell_record(shell_id)
+                backend = self._backend_name(record) if record else BACKEND_PIPE
                 await self.write_to_pipe(shell_id, payload)
             else:
                 record = await self.get_shell(shell_id)

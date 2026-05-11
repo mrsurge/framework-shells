@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
+  "include": [
+    "framework_shells",
+    "scripts/release",
+    "setup.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".code_cm6",
+    "build",
+    "dist",
+    "framework_shells.egg-info",
+    "native/**/target",
+    "node_modules",
+    "scripts/bench_*.py"
+  ],
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "strict"
+}

@@ -37,7 +37,12 @@ interface JsonFragment {
 
 export interface RenderLogLineOptions {
   prettyJson?: boolean;
+  highlight?: TextHighlightSpec | undefined;
 }
+
+export type TextHighlightSpec =
+  | { kind: 'line' }
+  | { kind: 'regex'; source: string; flags: string };
 
 const MAX_JSON_FRAGMENT_CHARS = 200_000;
 const DEFAULT_FG = '#c9d1d9';
@@ -379,34 +384,34 @@ function applyAnsiStyle(node: HTMLElement, style: AnsiStyle): void {
 function appendJsonHighlightedText(parent: Node, text: string, options: RenderLogLineOptions): void {
   const fragments = findJsonFragments(text);
   if (fragments.length === 0) {
-    parent.appendChild(document.createTextNode(text));
+    appendHighlightedText(parent, text, options.highlight);
     return;
   }
 
   let cursor = 0;
   for (const fragment of fragments) {
     if (fragment.start > cursor) {
-      parent.appendChild(document.createTextNode(text.slice(cursor, fragment.start)));
+      appendHighlightedText(parent, text.slice(cursor, fragment.start), options.highlight);
     }
     if (options.prettyJson) {
-      appendPrettyJsonBlock(parent, fragment.raw);
+      appendPrettyJsonBlock(parent, fragment.raw, options);
     } else {
-      appendJsonTokens(parent, fragment.raw);
+      appendJsonTokens(parent, fragment.raw, options);
     }
     cursor = fragment.end;
   }
   if (cursor < text.length) {
-    parent.appendChild(document.createTextNode(text.slice(cursor)));
+    appendHighlightedText(parent, text.slice(cursor), options.highlight);
   }
 }
 
-function appendPrettyJsonBlock(parent: Node, raw: string): void {
+function appendPrettyJsonBlock(parent: Node, raw: string, options: RenderLogLineOptions): void {
   const node = document.createElement('span');
   node.className = 'json-pretty-block';
   try {
-    appendJsonTokens(node, JSON.stringify(JSON.parse(raw), null, 2));
+    appendJsonTokens(node, JSON.stringify(JSON.parse(raw), null, 2), options);
   } catch {
-    appendJsonTokens(node, raw);
+    appendJsonTokens(node, raw, options);
   }
   parent.appendChild(node);
 }
@@ -489,52 +494,99 @@ function isValidJson(raw: string): boolean {
   }
 }
 
-function appendJsonTokens(parent: Node, raw: string): void {
+function appendJsonTokens(parent: Node, raw: string, options: RenderLogLineOptions): void {
   let index = 0;
   while (index < raw.length) {
     const ch = raw[index] ?? '';
     if (isWhitespace(ch)) {
       const next = scanWhile(raw, index, isWhitespace);
-      parent.appendChild(document.createTextNode(raw.slice(index, next)));
+      appendHighlightedText(parent, raw.slice(index, next), options.highlight);
       index = next;
       continue;
     }
     if (ch === '"') {
       const end = scanStringEnd(raw, index);
       const after = skipWhitespace(raw, end);
-      appendToken(parent, raw.slice(index, end), raw[after] === ':' ? 'key' : 'string');
+      appendToken(parent, raw.slice(index, end), raw[after] === ':' ? 'key' : 'string', options);
       index = end;
       continue;
     }
     if (isNumberStart(ch)) {
       const end = scanJsonNumberEnd(raw, index);
-      appendToken(parent, raw.slice(index, end), 'number');
+      appendToken(parent, raw.slice(index, end), 'number', options);
       index = end;
       continue;
     }
     if (raw.startsWith('true', index)) {
-      appendToken(parent, 'true', 'boolean');
+      appendToken(parent, 'true', 'boolean', options);
       index += 4;
       continue;
     }
     if (raw.startsWith('false', index)) {
-      appendToken(parent, 'false', 'boolean');
+      appendToken(parent, 'false', 'boolean', options);
       index += 5;
       continue;
     }
     if (raw.startsWith('null', index)) {
-      appendToken(parent, 'null', 'null');
+      appendToken(parent, 'null', 'null', options);
       index += 4;
       continue;
     }
-    appendToken(parent, ch, 'punctuation');
+    appendToken(parent, ch, 'punctuation', options);
     index += 1;
   }
 }
 
-function appendToken(parent: Node, text: string, kind: string): void {
+function appendToken(parent: Node, text: string, kind: string, options: RenderLogLineOptions): void {
   const node = document.createElement('span');
   node.className = `json-token json-token-${kind}`;
+  appendHighlightedText(node, text, options.highlight);
+  parent.appendChild(node);
+}
+
+function appendHighlightedText(parent: Node, text: string, highlight: TextHighlightSpec | undefined): void {
+  if (!text) {
+    return;
+  }
+  if (!highlight) {
+    parent.appendChild(document.createTextNode(text));
+    return;
+  }
+  if (highlight.kind === 'line') {
+    appendHighlightNode(parent, text);
+    return;
+  }
+
+  const flags = highlight.flags.includes('g') ? highlight.flags : `${highlight.flags}g`;
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(highlight.source, flags);
+  } catch {
+    parent.appendChild(document.createTextNode(text));
+    return;
+  }
+
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index;
+    const value = match[0] ?? '';
+    if (index === undefined || value.length === 0) {
+      continue;
+    }
+    if (index > cursor) {
+      parent.appendChild(document.createTextNode(text.slice(cursor, index)));
+    }
+    appendHighlightNode(parent, value);
+    cursor = index + value.length;
+  }
+  if (cursor < text.length) {
+    parent.appendChild(document.createTextNode(text.slice(cursor)));
+  }
+}
+
+function appendHighlightNode(parent: Node, text: string): void {
+  const node = document.createElement('mark');
+  node.className = 'log-filter-match';
   node.textContent = text;
   parent.appendChild(node);
 }

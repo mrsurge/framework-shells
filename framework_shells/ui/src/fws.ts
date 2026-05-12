@@ -6,6 +6,7 @@ import {
   createDefaultAnsiStyle,
   renderLogLine,
   type AnsiStyle,
+  type TextHighlightSpec,
 } from './ansi_json_log_renderer';
 import {
   buildClientRequest,
@@ -1255,6 +1256,23 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     });
   }
 
+  function getFilterHighlight(stream: LogStreamName): TextHighlightSpec | undefined {
+    const cfg = getFilterConfig(stream);
+    if (!cfg.includeQuery) {
+      return undefined;
+    }
+    if (cfg.includeMode === 'exact') {
+      return { kind: 'line' };
+    }
+    try {
+      // Compile here so invalid regex filters do not reach the renderer.
+      new RegExp(cfg.includeQuery);
+    } catch {
+      return undefined;
+    }
+    return { kind: 'regex', source: cfg.includeQuery, flags: 'g' };
+  }
+
   function isPinned(container: HTMLElement | null): boolean {
     if (!container) {
       return true;
@@ -1277,7 +1295,10 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     const fragment = document.createDocumentFragment();
     const wrapper = document.createElement('div');
     wrapper.className = 'log-lines';
-    const renderOptions = { prettyJson: logState.streams[stream].prettyJson };
+    const renderOptions = {
+      prettyJson: logState.streams[stream].prettyJson,
+      highlight: getFilterHighlight(stream),
+    };
     let renderStyle = createDefaultAnsiStyle();
     for (const line of lines) {
       const node = document.createElement('div');
@@ -1333,7 +1354,10 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     previousPartialNode?.remove();
 
     let renderStyle = cloneAnsiStyle(initialAnsiStyle);
-    const renderOptions = { prettyJson: state.prettyJson };
+    const renderOptions = {
+      prettyJson: state.prettyJson,
+      highlight: getFilterHighlight(stream),
+    };
     for (const line of newLines) {
       const node = document.createElement('div');
       node.className = 'log-line';

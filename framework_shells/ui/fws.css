@@ -19,6 +19,8 @@
   --gh-json-punctuation: #c9d1d9;
   --ansi-control-fg: #ffa657;
   --ansi-control-bg: rgba(187, 128, 9, 0.18);
+  --log-filter-match-bg: rgba(210, 153, 34, 0.34);
+  --log-filter-match-outline: rgba(210, 153, 34, 0.62);
 }
 
 * {
@@ -650,6 +652,13 @@ body.has-log-drawer {
 
 .log-line {
   min-height: 1.2em;
+}
+
+.log-filter-match {
+  border-radius: 2px;
+  background: var(--log-filter-match-bg);
+  box-shadow: 0 0 0 var(--hairline) var(--log-filter-match-outline);
+  color: inherit;
 }
 
 .ansi-bold {

@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+from typing import Final
+
+__phase__: Final[str]
+
+
+class NativePipePump:
+    def __init__(
+        self,
+        stdout_fd: int,
+        log_path: str,
+        read_chunk_bytes: int,
+        log_flush_bytes: int,
+        log_flush_interval_ms: int,
+    ) -> None: ...
+
+    def stop(self) -> None: ...
+    def reader_fd(self) -> int: ...
+    def read_available(self, max_items: int | None = None) -> list[bytes]: ...
+    def is_finished(self) -> bool: ...
+    def stats(self) -> dict[str, object]: ...
+
+
+def phase0_marker() -> str: ...
+def extension_version() -> str: ...

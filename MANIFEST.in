@@ -1,5 +1,7 @@
 recursive-include framework_shells/ui *
 recursive-include framework_shells/bin *
+include framework_shells/py.typed
+include framework_shells/*.pyi
 recursive-include native/fws_terminal_stream_broker *
 recursive-include native/fws_pipe_pump *
 recursive-include scripts/release *

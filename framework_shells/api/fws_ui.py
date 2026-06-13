@@ -17,6 +17,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..events import EventType, ShellEvent, get_event_bus
+from ..io_metadata import read_io_metadata
 from ..process_snapshot import ProcessRecord
 from ..protocols.jsonrpc import dump_json_line
 from ..shared_manager import get_manager
@@ -34,7 +35,9 @@ from ..protocols.fws_ui import (
     EXITED_PURGE_METHOD,
     FwsNotification,
     FwsRequest,
+    IoMetadataPayload,
     PidTerminateRequest,
+    ShellInputRequest,
     ShellPurgeRequest,
     ShellTerminateRequest,
     ShutdownRequest,
@@ -44,6 +47,7 @@ from ..protocols.fws_ui import (
     build_action_response,
     build_logs_chunk_notification,
     build_logs_initial_notification,
+    build_logs_io_metadata_notification,
     build_logs_open_response,
     build_logs_reset_notification,
     build_shell_event_notification,
@@ -54,6 +58,7 @@ from ..protocols.fws_ui import (
     LOGS_OPEN_METHOD,
     LOGS_TRUNCATE_METHOD,
     PID_TERMINATE_METHOD,
+    SHELL_INPUT_METHOD,
     SHELL_PURGE_METHOD,
     SHELL_TERMINATE_METHOD,
     SHUTDOWN_METHOD,
@@ -782,6 +787,8 @@ async def _action_truncate_logs() -> None:
     for rec in shells:
         candidates.append(Path(rec.stdout_log))
         candidates.append(Path(rec.stderr_log))
+        if rec.io_metadata_log:
+            candidates.append(Path(rec.io_metadata_log))
 
     try:
         candidates.extend(list(Path(mgr.logs_dir).glob("*.log")))
@@ -815,6 +822,23 @@ async def _action_purge_exited() -> None:
 async def _action_terminate_shell(shell_id: str) -> None:
     mgr = await get_manager()
     await mgr.terminate_shell(shell_id, force=True)
+
+
+async def _action_shell_input(
+    shell_id: str,
+    data: str | None,
+    *,
+    append_newline: bool = False,
+    eof: bool = False,
+    source: str = "dashboard",
+) -> None:
+    mgr = await get_manager()
+    if eof:
+        _ = await mgr.send_shell_eof(shell_id, source=source)
+        return
+    if data is None:
+        raise ValueError("data is required unless eof=true")
+    _ = await mgr.write_to_shell(shell_id, data, append_newline=append_newline, source=source)
 
 
 async def _action_purge_shell(shell_id: str) -> None:
@@ -957,6 +981,18 @@ async def fws_ws(websocket: WebSocket):
             if method == SHELL_PURGE_METHOD:
                 shell_request = cast(ShellPurgeRequest, request)
                 await _action_purge_shell(shell_request["params"]["shell_id"])
+                await _send_ws_response(websocket, build_action_response(request_id))
+                return
+            if method == SHELL_INPUT_METHOD:
+                shell_request = cast(ShellInputRequest, request)
+                params = shell_request["params"]
+                shell_id = str(params.get("shell_id") or "")
+                await _action_shell_input(
+                    shell_id,
+                    params.get("data"),
+                    append_newline=bool(params.get("append_newline", False)),
+                    eof=bool(params.get("eof", False)),
+                )
                 await _send_ws_response(websocket, build_action_response(request_id))
                 return
             if method == PID_TERMINATE_METHOD:
@@ -1130,6 +1166,18 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
         if stderr_path.exists():
             async with aiofiles.open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
                 stderr_lines = (await f.read()).splitlines()
+        io_metadata_records: list[IoMetadataPayload] = []
+        if rec.io_metadata_log:
+            io_metadata_records = cast(
+                list[IoMetadataPayload],
+                await read_io_metadata(
+                    Path(rec.io_metadata_log),
+                    limit=2000,
+                    include_output=False,
+                    include_stdin=True,
+                    include_timestamps=True,
+                ),
+            )
 
         await _send_ws_notification(
             websocket,
@@ -1137,6 +1185,7 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
                 shell_id,
                 "\n".join(stdout_lines[-2000:]),
                 "\n".join(stderr_lines[-2000:]),
+                io_metadata=io_metadata_records,
             ),
         )
 
@@ -1174,6 +1223,16 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
                         chunk = str(event.data.get("chunk") or "")
                         if chunk:
                             await _send_ws_notification(websocket, build_logs_chunk_notification(shell_id, "stdout", chunk))
+                    elif event.type == EventType.IO_METADATA:
+                        record_obj = event.data.get("record")
+                        if isinstance(record_obj, dict):
+                            await _send_ws_notification(
+                                websocket,
+                                build_logs_io_metadata_notification(
+                                    shell_id,
+                                    cast(IoMetadataPayload, dict(cast(dict[object, object], record_obj))),
+                                ),
+                            )
                     elif event.type == EventType.LOG_RESET:
                         stream = str(event.data.get("stream") or "stdout")
                         if stream in {"stdout", "stderr"}:

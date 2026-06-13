@@ -6,7 +6,7 @@ import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import aiofiles
 import socketio
@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from ..auth import derive_api_token, derive_runtime_id, get_secret
 from ..events import EventType, ShellEvent, get_event_bus
 from ..fws_socketio_contract import FWS_SOCKETIO_NAMESPACE, FWS_SOCKETIO_SOCKET_PATH
+from ..io_metadata import read_io_metadata
 from ..protocols.fws_ui import (
     APP_SHUTDOWN_METHOD,
     DASHBOARD_OPEN_METHOD,
@@ -24,13 +25,16 @@ from ..protocols.fws_ui import (
     EXITED_PURGE_METHOD,
     FwsNotification,
     FwsRequest,
+    IoMetadataPayload,
     LOGS_CHUNK_METHOD,
     LOGS_CLOSE_METHOD,
     LOGS_INITIAL_METHOD,
+    LOGS_IO_METADATA_METHOD,
     LOGS_OPEN_METHOD,
     LOGS_RESET_METHOD,
     LOGS_TRUNCATE_METHOD,
     PID_TERMINATE_METHOD,
+    SHELL_INPUT_METHOD,
     SHELL_PURGE_METHOD,
     SHELL_REMOVED_NOTIFICATION_METHOD,
     SHELL_TERMINATE_METHOD,
@@ -39,6 +43,7 @@ from ..protocols.fws_ui import (
     build_error_notification,
     build_logs_chunk_notification,
     build_logs_initial_notification,
+    build_logs_io_metadata_notification,
     build_logs_open_response,
     build_logs_reset_notification,
     build_request_error_response,
@@ -64,9 +69,25 @@ _PEER_ROLE = "peer"
 _LOCAL_REPLAY_MAX_LINES = 2000
 
 _browser_log_subscriptions: dict[str, str] = {}
+_peer_sids: set[str] = set()
 _local_event_task: asyncio.Task[None] | None = None
 _local_event_lock = asyncio.Lock()
 _ObjectMapping = Mapping[str, object]
+
+
+class _SocketIoCallServer(Protocol):
+    async def call(
+        self,
+        event: str,
+        data: object = None,
+        *,
+        to: str | None = None,
+        sid: str | None = None,
+        namespace: str | None = None,
+        timeout: int | float = 60,
+        ignore_queue: bool = False,
+    ) -> object:
+        ...
 
 
 def _shell_room(shell_id: str) -> str:
@@ -129,6 +150,7 @@ def _coerce_notification_payload(payload: object) -> FwsNotification | None:
         SHELL_REMOVED_NOTIFICATION_METHOD,
         LOGS_INITIAL_METHOD,
         LOGS_CHUNK_METHOD,
+        LOGS_IO_METADATA_METHOD,
         LOGS_RESET_METHOD,
         "fws.error",
     }:
@@ -184,7 +206,7 @@ async def _set_browser_log_shell(ns: socketio.AsyncNamespace, sid: str, shell_id
     await _broadcast_peer_subscriptions()
 
 
-async def _load_log_backlog(shell_id: str) -> tuple[str, str]:
+async def _load_log_backlog(shell_id: str) -> tuple[str, str, list[IoMetadataPayload]]:
     mgr = await get_manager()
     record = await mgr.load_shell_record(shell_id)
     if record is None:
@@ -197,7 +219,19 @@ async def _load_log_backlog(shell_id: str) -> tuple[str, str]:
             lines = (await fh.read()).splitlines()
         return "\n".join(lines[-_LOCAL_REPLAY_MAX_LINES:])
 
-    return await _read_tail(Path(record.stdout_log)), await _read_tail(Path(record.stderr_log))
+    metadata: list[IoMetadataPayload] = []
+    if record.io_metadata_log:
+        metadata = cast(
+            list[IoMetadataPayload],
+            await read_io_metadata(
+                Path(record.io_metadata_log),
+                limit=_LOCAL_REPLAY_MAX_LINES,
+                include_output=False,
+                include_stdin=True,
+                include_timestamps=True,
+            ),
+        )
+    return await _read_tail(Path(record.stdout_log)), await _read_tail(Path(record.stderr_log)), metadata
 
 
 def _notification_shell_id(notification: _ObjectMapping) -> str | None:
@@ -209,13 +243,133 @@ def _notification_shell_id(notification: _ObjectMapping) -> str | None:
     return shell_id if isinstance(shell_id, str) else None
 
 
+def _is_live_input_unavailable(exc: BaseException) -> bool:
+    return "Live input unavailable" in str(exc)
+
+
+def _response_error_code(value: object) -> str:
+    mapping = _as_object_mapping(value)
+    if mapping is None:
+        return ""
+    code = mapping.get("code")
+    return code if isinstance(code, str) else ""
+
+
+async def _write_shell_input_local(
+    shell_id: str,
+    data: str | None,
+    *,
+    append_newline: bool,
+    eof: bool,
+    source: str,
+) -> Mapping[str, object]:
+    mgr = await get_manager()
+    if eof:
+        return await mgr.send_shell_eof(shell_id, source=source)
+    return await mgr.write_to_shell(shell_id, data or "", append_newline=append_newline, source=source)
+
+
+async def _call_peer_shell_input(
+    shell_id: str,
+    data: str | None,
+    *,
+    append_newline: bool,
+    eof: bool,
+    source: str,
+) -> Mapping[str, object]:
+    peer_sids = list(_peer_sids)
+    if not peer_sids:
+        raise RuntimeError(f"Live input unavailable for shell {shell_id}: no connected FWS peer owns live input")
+
+    payload: Mapping[str, object] = {
+        "method": SHELL_INPUT_METHOD,
+        "params": {
+            "shell_id": shell_id,
+            "data": data or "",
+            "append_newline": append_newline,
+            "eof": eof,
+            "source": source,
+        },
+    }
+
+    async def _call_one(sid: str) -> object:
+        try:
+            sio = cast(_SocketIoCallServer, FWS_SOCKETIO_SIO)
+            response = await sio.call(
+                "fws_peer_request",
+                payload,
+                to=sid,
+                namespace=FWS_SOCKETIO_NAMESPACE,
+                timeout=3,
+            )
+            return response
+        except Exception as exc:
+            return {"ok": False, "code": "peer_error", "error": str(exc)}
+
+    responses = await asyncio.gather(*(_call_one(sid) for sid in peer_sids))
+    fallback_errors: list[str] = []
+    for response in responses:
+        response_map = _as_object_mapping(response)
+        if response_map is None:
+            continue
+        if response_map.get("ok") is True:
+            data_obj = response_map.get("data")
+            if isinstance(data_obj, Mapping):
+                return cast(Mapping[str, object], data_obj)
+            return {"ok": True}
+        code = _response_error_code(response)
+        error = response_map.get("error")
+        if code not in {"not_owner", "not_found"} and isinstance(error, str) and error:
+            fallback_errors.append(error)
+
+    if fallback_errors:
+        raise RuntimeError(fallback_errors[0])
+    raise RuntimeError(f"Live input unavailable for shell {shell_id}: no connected FWS peer accepted the write")
+
+
+async def write_shell_input_control(
+    shell_id: str,
+    data: str | None,
+    *,
+    append_newline: bool = False,
+    eof: bool = False,
+    source: str = "control",
+) -> Mapping[str, object]:
+    try:
+        return await _write_shell_input_local(
+            shell_id,
+            data,
+            append_newline=append_newline,
+            eof=eof,
+            source=source,
+        )
+    except KeyError:
+        return await _call_peer_shell_input(
+            shell_id,
+            data,
+            append_newline=append_newline,
+            eof=eof,
+            source=source,
+        )
+    except RuntimeError as exc:
+        if not _is_live_input_unavailable(exc):
+            raise
+        return await _call_peer_shell_input(
+            shell_id,
+            data,
+            append_newline=append_newline,
+            eof=eof,
+            source=source,
+        )
+
+
 async def _emit_notification(notification: FwsNotification) -> None:
     method = notification["method"]
     if method in {"fws.shell.created", "fws.shell.spawned", "fws.shell.updated", "fws.shell.exited", SHELL_REMOVED_NOTIFICATION_METHOD}:
         await FWS_SOCKETIO_SIO.emit("fws_notification", notification, namespace=FWS_SOCKETIO_NAMESPACE, room=_DASHBOARD_ROOM)
         return
     shell_id = _notification_shell_id(notification)
-    if method in {LOGS_INITIAL_METHOD, LOGS_CHUNK_METHOD, LOGS_RESET_METHOD} and shell_id:
+    if method in {LOGS_INITIAL_METHOD, LOGS_CHUNK_METHOD, LOGS_IO_METADATA_METHOD, LOGS_RESET_METHOD} and shell_id:
         await FWS_SOCKETIO_SIO.emit("fws_notification", notification, namespace=FWS_SOCKETIO_NAMESPACE, room=_shell_room(shell_id))
         return
     if method == "fws.error":
@@ -242,6 +396,17 @@ async def _emit_notifications_for_event(event: ShellEvent) -> None:
         chunk = str(event.data.get("chunk") or "")
         if chunk:
             await _emit_notification(build_logs_chunk_notification(event.shell_id, "stdout", chunk))
+        return
+
+    if event.type == EventType.IO_METADATA:
+        record_obj = event.data.get("record")
+        if isinstance(record_obj, dict):
+            await _emit_notification(
+                build_logs_io_metadata_notification(
+                    event.shell_id,
+                    cast(IoMetadataPayload, dict(cast(dict[object, object], record_obj))),
+                )
+            )
         return
 
     if event.type == EventType.LOG_RESET:
@@ -287,6 +452,7 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
         if auth_mapping is not None and auth_mapping.get("role") == _PEER_ROLE:
             if not _peer_auth_valid(auth):
                 return False
+            _peer_sids.add(sid)
             await self.enter_room(sid, _PEER_ROOM)
             await self.save_session(sid, {"role": _PEER_ROLE, "log_shell_id": None})
             await self.emit("fws_peer_subscriptions", {"shell_ids": _active_log_shell_ids()}, to=sid)
@@ -296,6 +462,7 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
 
     async def on_disconnect(self, sid: str, reason: object | None = None) -> None:
         _ = reason
+        _peer_sids.discard(sid)
         _ = _browser_log_subscriptions.pop(sid, None)
         try:
             session = await self.get_session(sid)
@@ -334,11 +501,11 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
             if method == LOGS_OPEN_METHOD:
                 params = cast(Mapping[str, object], request["params"])
                 shell_id = str(params.get("shell_id") or "")
-                stdout_text, stderr_text = await _load_log_backlog(shell_id)
+                stdout_text, stderr_text, io_metadata_records = await _load_log_backlog(shell_id)
                 await _set_browser_log_shell(self, sid, shell_id)
                 await self.emit(
                     "fws_notification",
-                    build_logs_initial_notification(shell_id, stdout_text, stderr_text),
+                    build_logs_initial_notification(shell_id, stdout_text, stderr_text, io_metadata=io_metadata_records),
                     to=sid,
                 )
                 return build_logs_open_response(request["id"], shell_id)
@@ -371,6 +538,18 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
             if method == SHELL_PURGE_METHOD:
                 params = cast(Mapping[str, object], request["params"])
                 await _action_purge_shell(str(params.get("shell_id") or ""))
+                return build_action_response(request["id"])
+
+            if method == SHELL_INPUT_METHOD:
+                params = cast(Mapping[str, object], request["params"])
+                data = params.get("data")
+                _ = await write_shell_input_control(
+                    str(params.get("shell_id") or ""),
+                    data if isinstance(data, str) else None,
+                    append_newline=bool(params.get("append_newline", False)),
+                    eof=bool(params.get("eof", False)),
+                    source="dashboard",
+                )
                 return build_action_response(request["id"])
 
             if method == PID_TERMINATE_METHOD:
@@ -424,7 +603,6 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
         if notification is None:
             return
         await _emit_notification(notification)
-
 
 def build_action_or_state_response(
     request_id: str,

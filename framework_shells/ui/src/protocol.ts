@@ -56,6 +56,13 @@ export interface ShellActionParams {
   shell_id: string;
 }
 
+export interface ShellInputParams {
+  shell_id: string;
+  data?: string;
+  append_newline?: boolean;
+  eof?: boolean;
+}
+
 export interface PidActionParams {
   pid: number;
 }
@@ -99,6 +106,7 @@ export interface DashboardShellPayload {
   label?: string | null;
   subgroups?: string[];
   ui?: Record<string, unknown>;
+  debug?: Record<string, unknown>;
   cwd?: string;
   pid?: number | null;
   status?: string;
@@ -107,6 +115,7 @@ export interface DashboardShellPayload {
   autostart?: boolean;
   stdout_log?: string;
   stderr_log?: string;
+  io_metadata_log?: string | null;
   exit_code?: number | null;
   env_keys?: string[];
   run_id?: string | null;
@@ -152,12 +161,37 @@ export interface LogsInitialParams {
   shell_id: string;
   stdout: string;
   stderr: string;
+  io_metadata: IoMetadataRecord[];
 }
 
 export interface LogsChunkParams {
   shell_id: string;
   stream: LogStreamName;
   chunk: string;
+}
+
+export interface IoMetadataRecord {
+  schema?: string;
+  shell_id: string;
+  kind: 'output' | 'stdin_write' | 'stdin_eof';
+  stream: 'stdout' | 'stderr' | 'stdin';
+  ts?: number;
+  source?: string;
+  backend?: string;
+  byte_start?: number;
+  byte_end?: number;
+  byte_count?: number;
+  append_newline?: boolean;
+  newline_appended?: boolean;
+  preview?: string;
+  text?: string;
+  preview_truncated?: boolean;
+  sha256?: string;
+}
+
+export interface LogsIoMetadataParams {
+  shell_id: string;
+  record: IoMetadataRecord;
 }
 
 export interface LogsResetParams {
@@ -180,6 +214,7 @@ export interface ClientRequestMap {
   'fws.exited.purge': EmptyParams;
   'fws.shell.terminate': ShellActionParams;
   'fws.shell.purge': ShellActionParams;
+  'fws.shell.input': ShellInputParams;
   'fws.pid.terminate': PidActionParams;
   'fws.app.shutdown': AppActionParams;
   'fws.shutdown': ShutdownParams;
@@ -194,6 +229,7 @@ export interface RequestResultMap {
   'fws.exited.purge': { ok: true };
   'fws.shell.terminate': { ok: true };
   'fws.shell.purge': { ok: true };
+  'fws.shell.input': { ok: true };
   'fws.pid.terminate': { ok: true };
   'fws.app.shutdown': { ok: true };
   'fws.shutdown': { ok: true };
@@ -207,6 +243,7 @@ export interface ServerNotificationMap {
   'fws.shell.removed': ShellRemovedParams;
   'fws.logs.initial': LogsInitialParams;
   'fws.logs.chunk': LogsChunkParams;
+  'fws.logs.io_metadata': LogsIoMetadataParams;
   'fws.logs.reset': LogsResetParams;
   'fws.error': ErrorParams;
 }
@@ -404,6 +441,10 @@ function coerceDashboardShellPayload(value: unknown): DashboardShellPayload | nu
   if (ui !== undefined) {
     result.ui = ui;
   }
+  const debug = asObjectRecord(record.debug);
+  if (debug !== undefined) {
+    result.debug = debug;
+  }
   const cwd = asString(record.cwd);
   if (cwd !== undefined) {
     result.cwd = cwd;
@@ -435,6 +476,10 @@ function coerceDashboardShellPayload(value: unknown): DashboardShellPayload | nu
   const stderrLog = asString(record.stderr_log);
   if (stderrLog !== undefined) {
     result.stderr_log = stderrLog;
+  }
+  const ioMetadataLog = asNullableString(record.io_metadata_log);
+  if (ioMetadataLog !== undefined) {
+    result.io_metadata_log = ioMetadataLog;
   }
   const exitCode = asNullableNumber(record.exit_code);
   if (exitCode !== undefined) {
@@ -560,6 +605,80 @@ function coerceDashboardStatePayload(value: unknown): DashboardStatePayload | nu
     }
   }
   return { shells, processes };
+}
+
+function coerceIoMetadataRecord(value: unknown): IoMetadataRecord | null {
+  const record = asObjectRecord(value);
+  if (!record) {
+    return null;
+  }
+  const shellId = asString(record.shell_id);
+  const kind = asString(record.kind);
+  const stream = asString(record.stream);
+  if (!shellId || !['output', 'stdin_write', 'stdin_eof'].includes(kind ?? '')) {
+    return null;
+  }
+  if (!stream || !['stdout', 'stderr', 'stdin'].includes(stream)) {
+    return null;
+  }
+  const result: IoMetadataRecord = {
+    shell_id: shellId,
+    kind: kind as IoMetadataRecord['kind'],
+    stream: stream as IoMetadataRecord['stream'],
+  };
+  const schema = asString(record.schema);
+  if (schema !== undefined) {
+    result.schema = schema;
+  }
+  const ts = asNumber(record.ts);
+  if (ts !== undefined) {
+    result.ts = ts;
+  }
+  const source = asString(record.source);
+  if (source !== undefined) {
+    result.source = source;
+  }
+  const backend = asString(record.backend);
+  if (backend !== undefined) {
+    result.backend = backend;
+  }
+  const byteStart = asNumber(record.byte_start);
+  if (byteStart !== undefined) {
+    result.byte_start = byteStart;
+  }
+  const byteEnd = asNumber(record.byte_end);
+  if (byteEnd !== undefined) {
+    result.byte_end = byteEnd;
+  }
+  const byteCount = asNumber(record.byte_count);
+  if (byteCount !== undefined) {
+    result.byte_count = byteCount;
+  }
+  const appendNewline = asBoolean(record.append_newline);
+  if (appendNewline !== undefined) {
+    result.append_newline = appendNewline;
+  }
+  const newlineAppended = asBoolean(record.newline_appended);
+  if (newlineAppended !== undefined) {
+    result.newline_appended = newlineAppended;
+  }
+  const preview = asString(record.preview);
+  if (preview !== undefined) {
+    result.preview = preview;
+  }
+  const text = asString(record.text);
+  if (text !== undefined) {
+    result.text = text;
+  }
+  const previewTruncated = asBoolean(record.preview_truncated);
+  if (previewTruncated !== undefined) {
+    result.preview_truncated = previewTruncated;
+  }
+  const sha256 = asString(record.sha256);
+  if (sha256 !== undefined) {
+    result.sha256 = sha256;
+  }
+  return result;
 }
 
 function parseJsonRpcObject(raw: string): Record<string, unknown> | null {
@@ -729,6 +848,15 @@ function coerceIncomingJsonRpcObject(parsed: unknown): IncomingJsonRpcMessage | 
         typeof parsedParams.stdout === 'string' &&
         typeof parsedParams.stderr === 'string'
       ) {
+        const ioMetadata: IoMetadataRecord[] = [];
+        if (Array.isArray(parsedParams.io_metadata)) {
+          for (const item of parsedParams.io_metadata) {
+            const record = coerceIoMetadataRecord(item);
+            if (record) {
+              ioMetadata.push(record);
+            }
+          }
+        }
         return {
           jsonrpc: '2.0',
           method: parsedMethod,
@@ -736,6 +864,7 @@ function coerceIncomingJsonRpcObject(parsed: unknown): IncomingJsonRpcMessage | 
             shell_id: parsedParams.shell_id,
             stdout: parsedParams.stdout,
             stderr: parsedParams.stderr,
+            io_metadata: ioMetadata,
           },
         };
       }
@@ -757,6 +886,20 @@ function coerceIncomingJsonRpcObject(parsed: unknown): IncomingJsonRpcMessage | 
         };
       }
       return null;
+    case 'fws.logs.io_metadata': {
+      const record = coerceIoMetadataRecord(parsedParams.record);
+      if (typeof parsedParams.shell_id === 'string' && record) {
+        return {
+          jsonrpc: '2.0',
+          method: parsedMethod,
+          params: {
+            shell_id: parsedParams.shell_id,
+            record,
+          },
+        };
+      }
+      return null;
+    }
     case 'fws.logs.reset':
       if (typeof parsedParams.shell_id === 'string' && isLogStreamName(parsedParams.stream)) {
         return {

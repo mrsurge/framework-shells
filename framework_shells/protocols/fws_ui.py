@@ -28,6 +28,7 @@ LOGS_TRUNCATE_METHOD = "fws.logs.truncate"
 EXITED_PURGE_METHOD = "fws.exited.purge"
 SHELL_TERMINATE_METHOD = "fws.shell.terminate"
 SHELL_PURGE_METHOD = "fws.shell.purge"
+SHELL_INPUT_METHOD = "fws.shell.input"
 PID_TERMINATE_METHOD = "fws.pid.terminate"
 APP_SHUTDOWN_METHOD = "fws.app.shutdown"
 SHUTDOWN_METHOD = "fws.shutdown"
@@ -39,6 +40,7 @@ SHELL_EXITED_NOTIFICATION_METHOD: Literal["fws.shell.exited"] = "fws.shell.exite
 SHELL_REMOVED_NOTIFICATION_METHOD: Literal["fws.shell.removed"] = "fws.shell.removed"
 LOGS_INITIAL_METHOD = "fws.logs.initial"
 LOGS_CHUNK_METHOD = "fws.logs.chunk"
+LOGS_IO_METADATA_METHOD = "fws.logs.io_metadata"
 LOGS_RESET_METHOD = "fws.logs.reset"
 ERROR_METHOD = "fws.error"
 
@@ -61,6 +63,13 @@ class EmptyParams(TypedDict):
 
 class ShellActionParams(TypedDict):
     shell_id: str
+
+
+class ShellInputParams(TypedDict, total=False):
+    shell_id: str
+    data: str
+    append_newline: bool
+    eof: bool
 
 
 class PidActionParams(TypedDict):
@@ -151,12 +160,37 @@ class LogsInitialParams(TypedDict):
     shell_id: str
     stdout: str
     stderr: str
+    io_metadata: list["IoMetadataPayload"]
 
 
 class LogsChunkParams(TypedDict):
     shell_id: str
     stream: LogStreamName
     chunk: str
+
+
+class IoMetadataPayload(TypedDict, total=False):
+    schema: str
+    shell_id: str
+    kind: str
+    stream: str
+    ts: float
+    source: str
+    backend: str
+    byte_start: int
+    byte_end: int
+    byte_count: int
+    append_newline: bool
+    newline_appended: bool
+    preview: str
+    text: str
+    preview_truncated: bool
+    sha256: str
+
+
+class LogsIoMetadataParams(TypedDict):
+    shell_id: str
+    record: IoMetadataPayload
 
 
 class LogsResetParams(TypedDict):
@@ -253,6 +287,13 @@ class ShellPurgeRequest(TypedDict):
     params: ShellActionParams
 
 
+class ShellInputRequest(TypedDict):
+    jsonrpc: Literal["2.0"]
+    method: Literal["fws.shell.input"]
+    id: str
+    params: ShellInputParams
+
+
 class PidTerminateRequest(TypedDict):
     jsonrpc: Literal["2.0"]
     method: Literal["fws.pid.terminate"]
@@ -283,6 +324,7 @@ FwsRequest: TypeAlias = (
     | ExitedPurgeRequest
     | ShellTerminateRequest
     | ShellPurgeRequest
+    | ShellInputRequest
     | PidTerminateRequest
     | AppShutdownRequest
     | ShutdownRequest
@@ -331,6 +373,12 @@ class LogsChunkNotification(TypedDict):
     params: LogsChunkParams
 
 
+class LogsIoMetadataNotification(TypedDict):
+    jsonrpc: Literal["2.0"]
+    method: Literal["fws.logs.io_metadata"]
+    params: LogsIoMetadataParams
+
+
 class LogsResetNotification(TypedDict):
     jsonrpc: Literal["2.0"]
     method: Literal["fws.logs.reset"]
@@ -351,6 +399,7 @@ FwsNotification: TypeAlias = (
     | ShellRemovedNotification
     | LogsInitialNotification
     | LogsChunkNotification
+    | LogsIoMetadataNotification
     | LogsResetNotification
     | ErrorNotification
 )
@@ -465,6 +514,37 @@ def parse_fws_request(raw: str) -> FwsRequest | None:
             "id": parsed.id,
             "method": SHELL_PURGE_METHOD,
             "params": {"shell_id": shell_id},
+        }
+
+    if parsed.method == SHELL_INPUT_METHOD:
+        shell_id = parsed.params.get("shell_id")
+        eof = parsed.params.get("eof")
+        data = parsed.params.get("data")
+        append_newline = parsed.params.get("append_newline")
+        if not isinstance(shell_id, str) or not shell_id.strip():
+            return None
+        if eof is not None and not isinstance(eof, bool):
+            return None
+        if append_newline is not None and not isinstance(append_newline, bool):
+            return None
+        if data is not None and not isinstance(data, str):
+            return None
+        if eof is True and data not in (None, ""):
+            return None
+        if eof is not True and data is None:
+            return None
+        params: ShellInputParams = {"shell_id": shell_id}
+        if isinstance(data, str):
+            params["data"] = data
+        if isinstance(append_newline, bool):
+            params["append_newline"] = append_newline
+        if isinstance(eof, bool):
+            params["eof"] = eof
+        return {
+            "jsonrpc": JSONRPC_VERSION,
+            "id": parsed.id,
+            "method": SHELL_INPUT_METHOD,
+            "params": params,
         }
 
     if parsed.method == PID_TERMINATE_METHOD:
@@ -613,15 +693,27 @@ def build_shell_removed_notification(shell_id: str) -> ShellRemovedNotification:
     }
 
 
-def build_logs_initial_notification(shell_id: str, stdout: str, stderr: str) -> LogsInitialNotification:
+def build_logs_initial_notification(
+    shell_id: str,
+    stdout: str,
+    stderr: str,
+    *,
+    io_metadata: list[IoMetadataPayload] | None = None,
+) -> LogsInitialNotification:
+    params: LogsInitialParams = {
+        "shell_id": shell_id,
+        "stdout": stdout,
+        "stderr": stderr,
+        "io_metadata": list(io_metadata or []),
+    }
     notification = build_jsonrpc_notification(
         LOGS_INITIAL_METHOD,
-        {"shell_id": shell_id, "stdout": stdout, "stderr": stderr},
+        params,
     )
     return {
         "jsonrpc": notification["jsonrpc"],
         "method": LOGS_INITIAL_METHOD,
-        "params": {"shell_id": shell_id, "stdout": stdout, "stderr": stderr},
+        "params": params,
     }
 
 
@@ -634,6 +726,16 @@ def build_logs_chunk_notification(shell_id: str, stream: LogStreamName, chunk: s
         "jsonrpc": notification["jsonrpc"],
         "method": LOGS_CHUNK_METHOD,
         "params": {"shell_id": shell_id, "stream": stream, "chunk": chunk},
+    }
+
+
+def build_logs_io_metadata_notification(shell_id: str, record: IoMetadataPayload) -> LogsIoMetadataNotification:
+    params: LogsIoMetadataParams = {"shell_id": shell_id, "record": record}
+    notification = build_jsonrpc_notification(LOGS_IO_METADATA_METHOD, params)
+    return {
+        "jsonrpc": notification["jsonrpc"],
+        "method": LOGS_IO_METADATA_METHOD,
+        "params": params,
     }
 
 

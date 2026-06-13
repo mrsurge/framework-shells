@@ -526,6 +526,83 @@ body.has-log-drawer {
   font-size: 0.8rem;
 }
 
+.log-pause-toggle.is-disabled {
+  opacity: 0.45;
+}
+
+.stdin-injector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: var(--hairline) solid var(--border);
+  background:
+    linear-gradient(90deg, rgba(121, 192, 255, 0.08), transparent 34%),
+    var(--card);
+  padding: 8px;
+}
+
+.stdin-injector.is-disabled {
+  opacity: 0.58;
+}
+
+.stdin-injector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stdin-injector-title {
+  color: var(--foreground);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.stdin-injector-subtitle {
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  margin-top: 2px;
+}
+
+.stdin-injector-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.stdin-newline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--foreground);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.stdin-newline-toggle input {
+  margin: 0;
+}
+
+.stdin-injector-input {
+  width: 100%;
+  min-height: 62px;
+  resize: vertical;
+  border: var(--hairline) solid var(--border);
+  border-radius: 3px;
+  background: rgba(13, 17, 23, 0.82);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  padding: 6px 8px;
+}
+
+.stdin-injector-input:disabled {
+  cursor: not-allowed;
+}
+
 .log-drawer-body {
   flex: 1;
   min-height: 0;
@@ -652,6 +729,35 @@ body.has-log-drawer {
 
 .log-line {
   min-height: 1.2em;
+}
+
+.io-metadata-line {
+  display: block;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  background: rgba(88, 166, 255, 0.055);
+  border: var(--hairline) solid rgba(88, 166, 255, 0.22);
+  border-radius: 6px;
+  margin: 3px 0;
+  padding: 0;
+}
+
+.io-metadata-label {
+  display: block;
+  color: #8b949e;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  background: rgba(88, 166, 255, 0.075);
+  border-bottom: var(--hairline) solid rgba(88, 166, 255, 0.18);
+  padding: 3px 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+}
+
+.io-metadata-body {
+  display: block;
+  color: #c9d1d9;
+  padding: 4px 6px 5px;
 }
 
 .log-filter-match {

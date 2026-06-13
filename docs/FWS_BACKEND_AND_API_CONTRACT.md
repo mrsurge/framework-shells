@@ -248,7 +248,7 @@ Relevant manager primitives:
 Migration notes:
 
 - Existing `backend: pipe` shellspecs do not require a schema change.
-- The compatibility change is mostly behavioral: FWS now owns live stdout observation and stdin/EOF control for pipe shells while the current manager process remains alive.
+- The compatibility change is mostly behavioral: FWS now owns live stdout observation and stdin write control for pipe shells while the current manager process remains alive.
 - If a wrapper previously fanned stdout into stderr only so FWS could observe it, remove that workaround and let protocol/data stdout remain on stdout.
 - Review wrappers that use `exec 1>&2`, `2>&1`, or `tee /dev/stderr`; they may now duplicate output or corrupt stdio protocol boundaries.
 - For stdio protocol services, keep protocol traffic on stdout and human diagnostics on stderr.
@@ -256,7 +256,7 @@ Migration notes:
 - A client can reconnect through the live FWS manager and the shell's `shell_id` while that manager still owns the pipe state.
 - A new manager process still cannot reconstruct an old raw pipe session after the original owner dies or restarts.
 - Experimental `pipe.mode` values now include:
-  - `native_pipe_testing` for the raw native stdout pump
+  - `native_pipe_testing` for the raw native stdout reader
   - `native_terminal_pipe_testing` for the PTY-backed native terminal broker over `pipe`
   - `python_terminal_pipe_testing` to force the Python PTY terminal-stream broker
 - `pipe.mode: native_terminal_pipe_testing` may be declared without a shellspec `command`.
@@ -274,11 +274,12 @@ Migration notes:
 - The maintained typed contract helpers for these surfaces now live in:
   - `framework_shells.protocols.fws_ui` for the self-hosted dashboard/log websocket JSON-RPC request/response lanes plus JSONL-framed JSON-RPC notifications
   - `framework_shells.protocols.terminal_stream` for the PTY terminal broker JSON-RPC stdin and JSONL stdout frames
+- The self-hosted dashboard request lane includes `fws.shell.input` for guarded live stdin writes from the log drawer. The drawer does not expose EOF; it includes a client-side JSON minifier for prettified probe payloads. The request maps to the same write primitive as `POST /api/framework_shells/{shell_id}/input`.
 - `pipe.mode: python_terminal_pipe_testing` is the explicit escape hatch for always using the Python PTY broker.
   - It may also omit a shellspec `command`; the shellspec parser injects the same internal placeholder command.
   - The manager always replaces that placeholder with `python -m framework_shells.terminal_stream_broker`, regardless of whether a native broker binary is installed.
 - Git source installs now attempt to bundle the native terminal broker during wheel build by default.
-  - The same source-build path also attempts to bundle the `fws_pipe_pump` extension for the current host Python.
+  - The same source-build path also attempts to bundle the native pipe reader extension (`fws_pipe_pump`) for the current host Python.
   - `FRAMEWORK_SHELLS_INSTALL_MODE=auto` is the default behavior: try to build the broker, then fall back to a pure-Python wheel if the build is unavailable.
   - `FRAMEWORK_SHELLS_INSTALL_MODE=build` requires that broker build to succeed.
   - `FRAMEWORK_SHELLS_INSTALL_MODE=python-only` disables native broker build and forces a pure-Python wheel.
@@ -457,7 +458,8 @@ Response:
 
 Purpose:
 
-- generic live stdin write / EOF route
+- generic live stdin write route
+- explicit stdin EOF is available as a lower-level pipe-control option, but it is not exposed by the dashboard or `fws write`
 
 Write request:
 
@@ -615,6 +617,10 @@ Query params:
 - `format=plain|json|jsonrpc`
 - `signature`
 - `exclude_signature`
+- `include_io_metadata`
+- `include_stdin`
+- `include_timestamps`
+- `include_output_metadata`
 
 Response:
 
@@ -623,12 +629,51 @@ Response:
 - event-window metadata
 - inspected event records
 - summary/counts
+- optional `io_metadata` sidecar records when explicitly requested
 
 Supported parser/classifier scope is intentionally narrow:
 
 - `plain`
 - `json`
 - `jsonrpc`
+
+## Debug I/O Metadata Sidecar
+
+`debug.io_metadata: true` is an opt-in shell flag for observability-only I/O metadata.
+It never changes the raw stdout/stderr log files, and stdin is never written to
+those raw logs.
+
+When enabled, the shell record includes `debug` and `io_metadata_log`, and FWS
+writes JSONL records for:
+
+- stdout/stderr output chunks (`kind: "output"`, byte ranges, timestamp)
+- stdin writes (`kind: "stdin_write"`, source, byte count, hash, capped preview)
+- stdin EOF (`kind: "stdin_eof"`, source, timestamp)
+
+Shellspec shape:
+
+```yaml
+debug:
+  io_metadata: true
+  stdin_capture: preview
+  stdin_preview_bytes: 240
+```
+
+Inspection stays explicit to avoid hot-path overhead:
+
+```bash
+fws inspect <shell_id> --io-metadata --stdin --timestamps --json
+```
+
+REST callers use:
+
+```text
+GET /api/framework_shells/logs/{shell_id}/inspect?include_io_metadata=true&include_stdin=true&include_timestamps=true
+```
+
+Dashboard rendering is also gated twice: the shell must have
+`debug.io_metadata: true`, and the user must enable the `IO overlay` checkbox in
+the log drawer.
 
 ## WebSocket Contract
 

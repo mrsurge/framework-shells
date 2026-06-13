@@ -13,7 +13,7 @@ Git source installs now default to `auto` native packaging:
 
 - if `cargo` is available, the install build attempts to compile and bundle:
   - the native terminal broker
-  - the native pipe pump extension
+  - the native pipe reader extension
 - if that build fails, install falls back to the pure-Python package by default
 
 You can override that behavior with `FRAMEWORK_SHELLS_INSTALL_MODE`:
@@ -141,9 +141,10 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 - Stdin/stdout/stderr as separate streams
 - Good for LSP servers, daemons
 - FWS now tees pipe `stdout` into the shell's `stdout_log`
-- Supports live stdin write / EOF while the current manager process owns the live pipe state
+- Supports live stdin write while the current manager process owns the live pipe state
+- The lower-level API can also send explicit stdin EOF for live pipe shells
 - Supports experimental native modes under `pipe.mode`, including:
-  - `native_pipe_testing` for the raw high-traffic pipe pump
+  - `native_pipe_testing` for the raw high-traffic pipe reader
   - `native_terminal_pipe_testing` for the PTY-backed terminal stream broker
   - `python_terminal_pipe_testing` to force the Python PTY terminal-stream broker
 - No current manager-adoption path for resuming live raw-pipe I/O after a manager restart
@@ -151,7 +152,7 @@ The compatibility booleans remain in payloads, but `backend` is the canonical ba
 ### Pipe Migration Notes
 
 - Existing `backend: pipe` shellspecs do not require a schema change.
-- The main change is behavioral: FWS now owns live pipe stdout observability and stdin write/EOF while the current manager process is alive.
+- The main change is behavioral: FWS now owns live pipe stdout observability and stdin writes while the current manager process is alive.
 - If an old wrapper mirrored stdout to stderr only so FWS could see it, remove that workaround and let stdout stay on stdout.
 - Review wrappers that use `exec 1>&2`, `2>&1`, or `tee /dev/stderr`; they may now duplicate output or pollute protocol stdout.
 - For stdio protocol servers, keep protocol/data traffic on stdout and human diagnostics on stderr.
@@ -238,6 +239,7 @@ tail = await mgr.get_log_tail(shell_id, stream="both", lines=50)
 matches = await mgr.search_logs(shell_id, stream="stdout", query="ready", limit=20)
 inspection = await mgr.inspect_logs(shell_id, stream="stdout", lines=100, format="jsonrpc")
 inspection = await mgr.inspect_logs(shell_id, stream="stderr", exclude_signature="plain:ipc_chunk")
+inspection = await mgr.inspect_logs(shell_id, include_io_metadata=True, include_stdin=True, include_timestamps=True)
 purged = await mgr.prune_exited_shells(max_count=50)
 
 # Optional: enumerate running PIDs for external monitoring
@@ -278,7 +280,7 @@ POST   /api/framework_shells                 # Create shell
 GET    /api/framework_shells/{id}            # Get shell details
 POST   /api/framework_shells/{id}/terminate  # Terminate shell
 POST   /api/framework_shells/{id}/action     # Terminate, etc.
-POST   /api/framework_shells/{id}/input      # Generic live stdin write / EOF
+POST   /api/framework_shells/{id}/input      # Generic live stdin write; explicit EOF is a low-level option
 DELETE /api/framework_shells/{id}            # Purge metadata/logs (Exited-shell cleanup)
 POST   /api/framework_shells/purge_exited    # Purge metadata/logs for all exited shells
 POST   /api/framework_shells/app/{app_id}/shutdown      # UI-equivalent group shutdown
@@ -297,6 +299,31 @@ The inspection surface is intentionally narrow in v1:
 - `tail` now includes boundary metadata such as `partial_head`, byte-window offsets, and event count
 - stable bracketed plain-text prefixes are promoted into signatures such as `plain:ipc_chunk`
 - the only negative filters are `exclude_query` and `exclude_signature`
+- sidecar I/O metadata is opt-in with `include_io_metadata`; stdin records require `include_stdin`, timestamps require `include_timestamps`, and output chunk records require `include_output_metadata`
+
+### Debug I/O Metadata
+
+Raw stdout/stderr logs stay unmodified. If a shell opts in with `debug.io_metadata: true`, FWS writes a sibling JSONL sidecar (`io_metadata_log`) with chunk-level output metadata and stdin write records. Explicit stdin EOF, when used through lower-level APIs, is also recorded there. Stdin is never appended to the raw stdout/stderr logs.
+
+Shellspec example:
+
+```yaml
+shells:
+  rpc-worker:
+    backend: pipe
+    command: ["python", "-m", "my_rpc_worker"]
+    debug:
+      io_metadata: true
+      stdin_capture: preview
+      stdin_preview_bytes: 240
+```
+
+CLI example:
+
+```bash
+fws run --backend pipe --debug-io-metadata -- python -m my_rpc_worker
+fws inspect <shell_id> --io-metadata --stdin --timestamps --json
+```
 
 Example input body for the new live input route:
 
@@ -307,13 +334,18 @@ Example input body for the new live input route:
 }
 ```
 
-Or, for live pipe shells, send EOF:
+The CLI exposes the same primitive for environments that share the active
+runtime secret/API URL:
 
-```json
-{
-  "eof": true
-}
+```bash
+fws write <shell_id> '{"jsonrpc":"2.0","id":"probe","method":"ping","params":{}}' --newline
+cat payload.json | fws write <shell_id> - --newline
+cat pretty-payload.json | fws write <shell_id> - --json --newline
 ```
+
+Without `--json`, stdin data is written literally, including embedded newlines.
+With `--json`, the CLI parses the input JSON and writes a compact single-line
+fragment.
 
 ## Self-hosted UI (FWS)
 
@@ -322,6 +354,9 @@ When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboa
 - `GET /fws/` dashboard (live-updating via `WS /ws/fws`)
 - shell logs open in a full-page in-dashboard drawer backed by `WS /ws/fws/logs/{shell_id}`
 - `GET /fws/logs/{shell_id}` redirects into the dashboard drawer for compatibility
+- the log drawer includes a guarded STDIN injector when the selected shell reports live input capability
+- the STDIN injector has a `Minify JSON` helper that converts prettified JSON into a compact single-line payload before sending
+- the log drawer exposes an `IO overlay` checkbox only for shells with `debug.io_metadata: true`; when enabled, stdin sidecar records render as muted observability rows without changing raw logs
 - both websocket surfaces now use JSON-RPC envelopes rather than ad-hoc `{type: ...}` payloads
   - dashboard and log opening, plus UI actions like terminate/purge/shutdown, are JSON-RPC requests with JSON-RPC responses
   - shell/dashboard/log update pushes are JSON-RPC notifications
@@ -330,7 +365,7 @@ When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboa
   - logs open request: `fws.logs.open`
   - server notifications:
     - dashboard lifecycle: `fws.shell.created`, `fws.shell.spawned`, `fws.shell.updated`, `fws.shell.exited`, `fws.shell.removed`
-    - log streaming: `fws.logs.initial`, `fws.logs.chunk`, `fws.logs.reset`
+    - log streaming: `fws.logs.initial`, `fws.logs.chunk`, `fws.logs.io_metadata`, `fws.logs.reset`
     - errors: `fws.error`
 - the typed protocol contract for those websocket request/response and notification lanes now lives in:
   - `framework_shells.protocols.fws_ui` on the Python/backend side

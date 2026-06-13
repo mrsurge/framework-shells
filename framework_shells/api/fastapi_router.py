@@ -147,6 +147,7 @@ async def find_or_create_shell(
     label = _json_str(payload.get("label"))
     subgroups = _json_str_list(payload.get("subgroups"))
     ui = _json_dict(payload.get("ui")) if isinstance(payload.get("ui"), dict) else None
+    debug = _json_dict(payload.get("debug")) if isinstance(payload.get("debug"), dict) else None
     pty_mode = _json_str(payload.get("pty_mode"))
     autostart = _json_bool(payload.get("autostart"), default=True)
 
@@ -161,7 +162,7 @@ async def find_or_create_shell(
 
     record = await mgr.spawn_shell_pty(
         command, cwd=cwd, env=env, label=label,
-        subgroups=subgroups, ui=ui, pty_mode=pty_mode, autostart=autostart
+        subgroups=subgroups, ui=ui, debug=debug, pty_mode=pty_mode, autostart=autostart
     )
     return {"ok": True, "data": await _payload_with_capabilities(mgr, record)}
 
@@ -195,12 +196,13 @@ async def shell_action(
 async def shell_input(
     shell_id: str,
     payload: Annotated[JsonDict, Body(...)],
-    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
-    _: Annotated[None, Depends(require_auth)],
+    _mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    _auth: Annotated[None, Depends(require_auth)],
 ):
     data = payload.get("data")
     append_newline = _json_bool(payload.get("append_newline"))
     eof = _json_bool(payload.get("eof"))
+    source = _json_str(payload.get("source")) or "api"
 
     if eof and data not in (None, ""):
         raise HTTPException(400, "Provide either data or eof=true, not both")
@@ -208,14 +210,15 @@ async def shell_input(
         raise HTTPException(400, "data is required unless eof=true")
 
     try:
-        if eof:
-            result = await mgr.send_shell_eof(shell_id)
-        else:
-            result = await mgr.write_to_shell(
-                shell_id,
-                str(data),
-                append_newline=append_newline,
-            )
+        from .socketio_backend import write_shell_input_control
+
+        result = await write_shell_input_control(
+            shell_id,
+            str(data) if data is not None else None,
+            append_newline=append_newline,
+            eof=eof,
+            source=source,
+        )
     except KeyError:
         raise HTTPException(404, "Shell not found")
     except RuntimeError as exc:
@@ -327,6 +330,10 @@ async def inspect_logs(
     format: Annotated[str | None, Query()] = None,
     signature: Annotated[str | None, Query()] = None,
     exclude_signature: Annotated[str | None, Query()] = None,
+    include_io_metadata: Annotated[bool, Query()] = False,
+    include_stdin: Annotated[bool, Query()] = False,
+    include_timestamps: Annotated[bool, Query()] = False,
+    include_output_metadata: Annotated[bool, Query()] = False,
 ):
     try:
         data = await mgr.inspect_logs(
@@ -340,6 +347,10 @@ async def inspect_logs(
             format=format,
             signature=signature,
             exclude_signature=exclude_signature,
+            include_io_metadata=include_io_metadata,
+            include_stdin=include_stdin,
+            include_timestamps=include_timestamps,
+            include_output_metadata=include_output_metadata,
         )
     except KeyError:
         raise HTTPException(404, "Shell not found")

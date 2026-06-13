@@ -257,12 +257,12 @@ def _build_and_stage_pipe_pump() -> None:
 
     mode = _pipe_pump_mode()
     if _skips_native_build(mode):
-        _log(f"skipping native pipe pump build ({PIPE_PUMP_MODE_ENV}={mode})")
+        _log(f"skipping native pipe extension build ({PIPE_PUMP_MODE_ENV}={mode})")
         return
     if not PIPE_PUMP_SOURCE_MANIFEST.is_file():
         if _requires_native_build(mode):
-            raise FileNotFoundError(f"Missing pipe pump Cargo manifest: {PIPE_PUMP_SOURCE_MANIFEST}")
-        _log("native pipe pump source is unavailable; continuing with a pure-Python wheel")
+            raise FileNotFoundError(f"Missing native pipe Cargo manifest: {PIPE_PUMP_SOURCE_MANIFEST}")
+        _log("native pipe extension source is unavailable; continuing with a pure-Python wheel")
         return
 
     try:
@@ -274,17 +274,17 @@ def _build_and_stage_pipe_pump() -> None:
         subprocess.run(command, cwd=str(ROOT), check=True, text=True)
         artifact = next((path for path in _pipe_pump_artifact_candidates() if path.is_file()), None)
         if artifact is None:
-            raise FileNotFoundError("Built pipe pump artifact not found")
+            raise FileNotFoundError("Built native pipe artifact not found")
         destination = ROOT / _pipe_pump_package_path()
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(artifact, destination)
         _ensure_executable(destination)
         _staged_pipe_pump = True
-        _log(f"bundled native pipe pump from source build: {destination}")
+        _log(f"bundled native pipe extension from source build: {destination}")
     except Exception as exc:
         if _requires_native_build(mode):
-            raise RuntimeError(f"Failed to build native pipe pump: {exc}") from exc
-        _log(f"native pipe pump build failed; continuing with a pure-Python wheel: {exc}")
+            raise RuntimeError(f"Failed to build native pipe extension: {exc}") from exc
+        _log(f"native pipe extension build failed; continuing with a pure-Python wheel: {exc}")
 
 
 def _prepare_pipe_pump() -> None:

@@ -16,6 +16,7 @@ import {
   type DashboardShellPayload,
   type DashboardStatePayload,
   type IncomingJsonRpcMessage,
+  type IoMetadataRecord,
   type LogStreamName,
   type RequestResultMap,
   type ServerNotification,
@@ -33,7 +34,7 @@ type FilterMode = 'regex' | 'exact';
 
 interface StreamState {
   container: HTMLElement | null;
-  lines: string[];
+  entries: LogEntry[];
   partial: string;
   pendingCount: number;
   ansiStyle: AnsiStyle;
@@ -44,6 +45,7 @@ interface LogState {
   shellId: string;
   shellLabel: string;
   paused: boolean;
+  ioOverlayEnabled: boolean;
   streams: Record<LogStreamName, StreamState>;
 }
 
@@ -65,6 +67,7 @@ interface StreamRenderOptions {
 interface StoredShellLogRenderOptions {
   stdout?: StreamRenderOptions;
   stderr?: StreamRenderOptions;
+  ioOverlay?: boolean;
 }
 
 interface SubgroupStyle {
@@ -77,6 +80,7 @@ type Matcher = (line: string) => boolean;
 type SubgroupStyleMap = Record<string, SubgroupStyle>;
 type DashboardStateResult = RequestResultMap['fws.dashboard.open'] | RequestResultMap['fws.dashboard.refresh'];
 type StoredLogRenderOptions = Record<string, StoredShellLogRenderOptions>;
+type LogEntry = { kind: 'text'; text: string } | { kind: 'io'; record: IoMetadataRecord };
 
 const FWS_SOCKETIO_NAMESPACE = '/fws';
 const FWS_SOCKETIO_PATH = '/fws_ws/socket.io';
@@ -148,7 +152,10 @@ function parseStoredLogRenderOptions(raw: string | null): StoredLogRenderOptions
       if ('stderr' in value) {
         shellOptions.stderr = normalizeStreamRenderOptions(value.stderr);
       }
-      if (shellOptions.stdout || shellOptions.stderr) {
+      if ('ioOverlay' in value) {
+        shellOptions.ioOverlay = normalizeStoredBoolean(value.ioOverlay);
+      }
+      if (shellOptions.stdout || shellOptions.stderr || shellOptions.ioOverlay !== undefined) {
         result[shellId] = shellOptions;
       }
     }
@@ -169,7 +176,7 @@ function getStoredStreamRenderOptions(
 function makeStreamState(containerId: string): StreamState {
   return {
     container: getElementById<HTMLElement>(containerId),
-    lines: [],
+    entries: [],
     partial: '',
     pendingCount: 0,
     ansiStyle: createDefaultAnsiStyle(),
@@ -718,6 +725,14 @@ function renderDashboardContent(state: DashboardStatePayload): string {
   const logSubtitleEl = getElementById<HTMLElement>('fws-log-subtitle');
   const logStatusEl = getElementById<HTMLElement>('fws-log-status');
   const logPauseInput = getElementById<HTMLInputElement>('fws-log-pause');
+  const stdinForm = getElementById<HTMLFormElement>('fws-stdin-form');
+  const stdinInput = getElementById<HTMLTextAreaElement>('fws-stdin-input');
+  const stdinNewlineInput = getElementById<HTMLInputElement>('fws-stdin-newline');
+  const stdinSendButton = getElementById<HTMLButtonElement>('fws-stdin-send');
+  const stdinJsonCompactButton = getElementById<HTMLButtonElement>('fws-stdin-json-compact');
+  const stdinStatusEl = getElementById<HTMLElement>('fws-stdin-status');
+  const ioOverlayInput = getElementById<HTMLInputElement>('fws-io-overlay');
+  const ioOverlayWrap = getElementById<HTMLElement>('fws-io-overlay-wrap');
 
   const collapseState = new Map<string, boolean>();
   let defaultCollapsed = true;
@@ -736,6 +751,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     shellId: '',
     shellLabel: '',
     paused: false,
+    ioOverlayEnabled: false,
     streams: {
       stdout: makeStreamState('stdout-container'),
       stderr: makeStreamState('stderr-container'),
@@ -783,6 +799,91 @@ function renderDashboardContent(state: DashboardStatePayload): string {
   function findShellLabel(shellId: string): string {
     const match = dashboardState.shells.find((shell) => shell.id === shellId);
     return match?.label ?? shellId;
+  }
+
+  function findShell(shellId: string): DashboardShellPayload | undefined {
+    return dashboardState.shells.find((shell) => shell.id === shellId);
+  }
+
+  function shellHasIoMetadata(shellId: string): boolean {
+    const shell = findShell(shellId);
+    if (!shell) {
+      return false;
+    }
+    const debug = shell.debug;
+    const enabled =
+      normalizeStoredBoolean(debug?.io_metadata) ||
+      normalizeStoredBoolean(debug?.ioMetadata);
+    return enabled === true;
+  }
+
+  function syncIoOverlayToggle(): void {
+    const available = Boolean(logState.shellId && shellHasIoMetadata(logState.shellId));
+    if (ioOverlayWrap) {
+      ioOverlayWrap.classList.toggle('is-disabled', !available);
+      ioOverlayWrap.title = available ? 'Show stdin/timing sidecar overlay' : 'Shell debug.io_metadata is not enabled.';
+    }
+    if (ioOverlayInput) {
+      ioOverlayInput.disabled = !available;
+      ioOverlayInput.checked = available && logState.ioOverlayEnabled;
+    }
+  }
+
+  function setStdinInjectorDisabled(disabled: boolean): void {
+    stdinForm?.classList.toggle('is-disabled', disabled);
+    if (stdinInput) {
+      stdinInput.disabled = disabled;
+    }
+    if (stdinNewlineInput) {
+      stdinNewlineInput.disabled = disabled;
+    }
+    if (stdinSendButton) {
+      stdinSendButton.disabled = disabled;
+    }
+    if (stdinJsonCompactButton) {
+      stdinJsonCompactButton.disabled = disabled;
+    }
+  }
+
+  function canAttemptShellInput(shell: DashboardShellPayload | undefined): boolean {
+    if (!shell || !isShellLive(shell)) {
+      return false;
+    }
+    const backend = shellBackend(shell);
+    return backend === 'pty' || backend === 'dtach' || backend.startsWith('pipe');
+  }
+
+  function updateStdinInjectorState(statusOverride?: string): void {
+    const shell = logState.shellId ? findShell(logState.shellId) : undefined;
+    const capabilities = shell?.capabilities;
+    const canWrite = capabilities?.stdin_write === true;
+    const canAttemptWrite = canWrite || canAttemptShellInput(shell);
+    setStdinInjectorDisabled(!canAttemptWrite);
+    if (!stdinStatusEl) {
+      return;
+    }
+    if (statusOverride) {
+      stdinStatusEl.textContent = statusOverride;
+      return;
+    }
+    if (!logState.shellId) {
+      stdinStatusEl.textContent = 'Select a shell with live stdin.';
+      return;
+    }
+    if (!shell) {
+      stdinStatusEl.textContent = 'Shell metadata unavailable.';
+      return;
+    }
+    if (!canAttemptWrite) {
+      stdinStatusEl.textContent = 'Stdin writes are not supported for this shell backend.';
+      return;
+    }
+    const backend = shellBackend(shell);
+    if (!canWrite) {
+      stdinStatusEl.textContent = `Ready to attempt ${backend} stdin; backend will return any write error.`;
+      return;
+    }
+    stdinStatusEl.textContent = `Ready for ${backend} stdin.`;
   }
 
   function compareShells(left: DashboardShellPayload, right: DashboardShellPayload): number {
@@ -887,6 +988,8 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         logTitleEl.textContent = label || 'Shell Logs';
       }
     }
+    updateStdinInjectorState();
+    syncIoOverlayToggle();
   }
 
   function routeDashboardNotification(message: ServerNotification): void {
@@ -1243,15 +1346,18 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     };
   }
 
-  function getFilteredLines(stream: LogStreamName): string[] {
+  function getFilteredEntries(stream: LogStreamName): LogEntry[] {
     const state = logState.streams[stream];
     const cfg = getFilterConfig(stream);
     const includeMatch = compileMatcher(stream, 'include', cfg.includeQuery, cfg.includeMode);
     const excludeMatch = compileMatcher(stream, 'exclude', cfg.excludeQuery, cfg.excludeMode);
-    const allLines = state.partial ? state.lines.concat([state.partial]) : state.lines.slice();
-    return allLines.filter((line) => {
-      const includeOk = cfg.includeQuery ? includeMatch(line) : true;
-      const excludeHit = cfg.excludeQuery ? excludeMatch(line) : false;
+    const allEntries: LogEntry[] = state.partial ? state.entries.concat([{ kind: 'text', text: state.partial }]) : state.entries.slice();
+    return allEntries.filter((entry) => {
+      if (entry.kind === 'io') {
+        return stream === 'stdout' && logState.ioOverlayEnabled;
+      }
+      const includeOk = cfg.includeQuery ? includeMatch(entry.text) : true;
+      const excludeHit = cfg.excludeQuery ? excludeMatch(entry.text) : false;
       return includeOk && !excludeHit;
     });
   }
@@ -1291,21 +1397,68 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     container.setAttribute('data-pending-label', label);
   }
 
-  function buildLineNodes(stream: LogStreamName, lines: string[]): DocumentFragment {
+  function formatMetadataTimestamp(record: IoMetadataRecord): string {
+    if (typeof record.ts !== 'number' || !Number.isFinite(record.ts)) {
+      return '--:--:--.---';
+    }
+    const date = new Date(record.ts * 1000);
+    const pad = (value: number, width = 2): string => String(value).padStart(width, '0');
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+  }
+
+  function metadataPreview(record: IoMetadataRecord): string {
+    if (record.kind === 'stdin_eof') {
+      return '<EOF>';
+    }
+    const text = record.text ?? record.preview ?? '';
+    if (!text) {
+      return '<stdin hidden>';
+    }
+    return record.preview_truncated ? `${text} …` : text;
+  }
+
+  function buildMetadataNode(record: IoMetadataRecord): HTMLElement {
+    const node = document.createElement('div');
+    node.className = 'log-line io-metadata-line';
+    const label = document.createElement('span');
+    label.className = 'io-metadata-label';
+    const source = record.source || 'unknown';
+    const bytes = typeof record.byte_count === 'number' ? `${record.byte_count}B` : '?B';
+    label.textContent = `stdin | ${formatMetadataTimestamp(record)} | ${source} | ${bytes}`;
+    const body = document.createElement('span');
+    body.className = 'io-metadata-body';
+    const rendered = renderLogLine(metadataPreview(record), createDefaultAnsiStyle(), {
+      prettyJson: logState.streams.stdout.prettyJson,
+      highlight: undefined,
+    });
+    body.appendChild(rendered.fragment);
+    node.append(label, body);
+    return node;
+  }
+
+  function buildEntryNode(stream: LogStreamName, entry: LogEntry, renderStyle: AnsiStyle): { node: HTMLElement; finalStyle: AnsiStyle } {
+    if (entry.kind === 'io') {
+      return { node: buildMetadataNode(entry.record), finalStyle: renderStyle };
+    }
+    const node = document.createElement('div');
+    node.className = 'log-line';
+    const rendered = renderLogLine(entry.text, renderStyle, {
+      prettyJson: logState.streams[stream].prettyJson,
+      highlight: getFilterHighlight(stream),
+    });
+    node.appendChild(rendered.fragment);
+    return { node, finalStyle: rendered.finalStyle };
+  }
+
+  function buildLineNodes(stream: LogStreamName, entries: LogEntry[]): DocumentFragment {
     const fragment = document.createDocumentFragment();
     const wrapper = document.createElement('div');
     wrapper.className = 'log-lines';
-    const renderOptions = {
-      prettyJson: logState.streams[stream].prettyJson,
-      highlight: getFilterHighlight(stream),
-    };
     let renderStyle = createDefaultAnsiStyle();
-    for (const line of lines) {
-      const node = document.createElement('div');
-      node.className = 'log-line';
-      const rendered = renderLogLine(line, renderStyle, renderOptions);
-      node.appendChild(rendered.fragment);
+    for (const entry of entries) {
+      const rendered = buildEntryNode(stream, entry, renderStyle);
       renderStyle = rendered.finalStyle;
+      const node = rendered.node;
       wrapper.appendChild(node);
     }
     fragment.appendChild(wrapper);
@@ -1319,15 +1472,15 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       return;
     }
     const pinned = isPinned(container);
-    const lines = getFilteredLines(stream);
+    const entries = getFilteredEntries(stream);
     container.innerHTML = '';
-    if (lines.length === 0) {
+    if (entries.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'loading';
       empty.textContent = logState.shellId ? 'No lines matched.' : 'Select a shell log.';
       container.appendChild(empty);
     } else {
-      container.appendChild(buildLineNodes(stream, lines));
+      container.appendChild(buildLineNodes(stream, entries));
     }
     if (pinned) {
       container.scrollTop = container.scrollHeight;
@@ -1384,10 +1537,12 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     const normalized = String(text || '');
     const parts = normalized.split('\n');
     state.partial = normalized.endsWith('\n') ? '' : parts.pop() || '';
-    state.lines = parts;
+    state.entries = parts.map((line) => ({ kind: 'text', text: line }));
     state.ansiStyle = createDefaultAnsiStyle();
-    for (const line of state.lines) {
-      state.ansiStyle = advanceAnsiStyle(line, state.ansiStyle);
+    for (const entry of state.entries) {
+      if (entry.kind === 'text') {
+        state.ansiStyle = advanceAnsiStyle(entry.text, state.ansiStyle);
+      }
     }
     state.pendingCount = 0;
     setPendingLabel(stream);
@@ -1404,8 +1559,8 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     state.partial = text.endsWith('\n') ? '' : parts.pop() || '';
     const newLines = parts;
     if (newLines.length > 0) {
-      state.lines.push(...newLines);
       for (const line of newLines) {
+        state.entries.push({ kind: 'text', text: line });
         state.ansiStyle = advanceAnsiStyle(line, state.ansiStyle);
       }
     }
@@ -1414,11 +1569,37 @@ function renderDashboardContent(state: DashboardStatePayload): string {
 
   function resetStream(stream: LogStreamName): void {
     const state = logState.streams[stream];
-    state.lines = [];
+    state.entries = [];
     state.partial = '';
     state.pendingCount = 0;
     state.ansiStyle = createDefaultAnsiStyle();
     renderStream(stream);
+  }
+
+  function appendIoMetadataRecord(record: IoMetadataRecord, options: { render: boolean }): void {
+    if (record.kind !== 'stdin_write' && record.kind !== 'stdin_eof') {
+      return;
+    }
+    const state = logState.streams.stdout;
+    state.entries.push({ kind: 'io', record });
+    if (!options.render) {
+      return;
+    }
+    if (logState.paused) {
+      state.pendingCount += 1;
+      setPendingLabel('stdout');
+      return;
+    }
+    if (!logState.ioOverlayEnabled) {
+      return;
+    }
+    renderStream('stdout');
+  }
+
+  function appendInitialIoMetadata(records: IoMetadataRecord[]): void {
+    for (const record of records) {
+      appendIoMetadataRecord(record, { render: false });
+    }
   }
 
   function saveLogRenderOptions(): void {
@@ -1439,6 +1620,16 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     saveLogRenderOptions();
   }
 
+  function setStoredIoOverlay(shellId: string, enabled: boolean): void {
+    if (!shellId) {
+      return;
+    }
+    const shellOptions = logRenderOptions[shellId] ?? {};
+    shellOptions.ioOverlay = enabled;
+    logRenderOptions[shellId] = shellOptions;
+    saveLogRenderOptions();
+  }
+
   function syncPrettyJsonToggle(stream: LogStreamName): void {
     const input = getElementById<HTMLInputElement>(`${stream}-pretty-json`);
     if (input) {
@@ -1452,6 +1643,8 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       logState.streams[stream].prettyJson = options.prettyJson;
       syncPrettyJsonToggle(stream);
     }
+    logState.ioOverlayEnabled = Boolean(logRenderOptions[shellId]?.ioOverlay) && shellHasIoMetadata(shellId);
+    syncIoOverlayToggle();
   }
 
   function renderLogError(message: string): void {
@@ -1476,8 +1669,15 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         }
         parseTextIntoState('stdout', message.params.stdout);
         parseTextIntoState('stderr', message.params.stderr);
+        appendInitialIoMetadata(message.params.io_metadata);
         renderStream('stdout');
         renderStream('stderr');
+        return;
+      case 'fws.logs.io_metadata':
+        if (message.params.shell_id !== currentShellId) {
+          return;
+        }
+        appendIoMetadataRecord(message.params.record, { render: true });
         return;
       case 'fws.logs.reset':
         if (message.params.shell_id !== currentShellId) {
@@ -1569,6 +1769,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     logState.shellId = nextShellId;
     logState.shellLabel = shellLabel || findShellLabel(nextShellId);
     applyStoredLogRenderOptions(nextShellId);
+    updateStdinInjectorState();
     if (logTitleEl) {
       logTitleEl.textContent = logState.shellLabel || 'Shell Logs';
     }
@@ -1600,6 +1801,9 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     const previousShellId = logState.shellId;
     logState.shellId = '';
     logState.shellLabel = '';
+    logState.ioOverlayEnabled = false;
+    updateStdinInjectorState();
+    syncIoOverlayToggle();
     logDrawer.classList.remove('is-open');
     logDrawer.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('has-log-drawer');
@@ -1609,6 +1813,60 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     }
     if (!options.fromPopState) {
       syncLogUrl('', true);
+    }
+  }
+
+  async function submitStdinInjection(): Promise<void> {
+    const shellId = logState.shellId;
+    if (!shellId) {
+      updateStdinInjectorState('Select a shell first.');
+      return;
+    }
+    const data = stdinInput?.value ?? '';
+    const appendNewline = stdinNewlineInput?.checked === true;
+    if (!data && !appendNewline) {
+      updateStdinInjectorState('Nothing to send.');
+      return;
+    }
+    setStdinInjectorDisabled(true);
+    updateStdinInjectorState('Sending stdin...');
+    try {
+      await sendDashboardRequest('fws.shell.input', {
+        shell_id: shellId,
+        data,
+        append_newline: appendNewline,
+      });
+      const bytesHint = new TextEncoder().encode(appendNewline ? `${data}\n` : data).length;
+      updateStdinInjectorState(`Sent ${bytesHint} byte${bytesHint === 1 ? '' : 's'} to stdin.`);
+    } catch (error) {
+      updateStdinInjectorState(error instanceof Error ? error.message : String(error));
+    } finally {
+      updateStdinInjectorState(stdinStatusEl?.textContent || undefined);
+    }
+  }
+
+  function compactStdinJson(): void {
+    const input = stdinInput;
+    if (!input) {
+      return;
+    }
+    const raw = input.value;
+    if (!raw.trim()) {
+      updateStdinInjectorState('Nothing to minify.');
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      const compact = JSON.stringify(parsed);
+      input.value = compact;
+      if (stdinNewlineInput) {
+        stdinNewlineInput.checked = true;
+      }
+      const bytesHint = new TextEncoder().encode(`${compact}\n`).length;
+      updateStdinInjectorState(`Minified JSON to one line (${bytesHint} byte${bytesHint === 1 ? '' : 's'} with newline).`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      updateStdinInjectorState(`Invalid JSON: ${message}`);
     }
   }
 
@@ -1643,6 +1901,20 @@ function renderDashboardContent(state: DashboardStatePayload): string {
   wireFilters('stderr');
   wirePrettyJsonToggle('stdout');
   wirePrettyJsonToggle('stderr');
+  ioOverlayInput?.addEventListener('change', () => {
+    const enabled = ioOverlayInput.checked && shellHasIoMetadata(logState.shellId);
+    logState.ioOverlayEnabled = enabled;
+    setStoredIoOverlay(logState.shellId, enabled);
+    syncIoOverlayToggle();
+    renderStream('stdout');
+  });
+  stdinForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitStdinInjection();
+  });
+  stdinJsonCompactButton?.addEventListener('click', () => {
+    compactStdinJson();
+  });
 
   if (logPauseInput) {
     logPauseInput.addEventListener('change', () => {

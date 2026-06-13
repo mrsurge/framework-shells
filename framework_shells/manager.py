@@ -20,7 +20,7 @@ from asyncio import Lock as AsyncLock
 from asyncio import Queue as AsyncQueue
 from collections.abc import Mapping
 from pathlib import Path
-from typing import AsyncIterator, Dict, Iterable, List, Optional, Protocol, cast
+from typing import AsyncIterator, Dict, Iterable, List, Literal, Optional, Protocol, cast
 
 import aiofiles
 
@@ -49,6 +49,16 @@ from .log_inspection import (
     PLAIN_FORMAT,
     inspect_log_file,
     read_event_window,
+)
+from .io_metadata import (
+    IoMetadataRecord,
+    append_io_metadata,
+    build_output_record,
+    build_stdin_eof_record,
+    build_stdin_write_record,
+    io_metadata_enabled,
+    io_metadata_path,
+    read_io_metadata,
 )
 from .native_pipe import (
     NATIVE_PIPE_TESTING_MODE,
@@ -348,6 +358,27 @@ class FrameworkShellManager:
         )
         await self._event_bus.publish(event)
 
+    def _record_io_metadata_path(self, record: ShellRecord) -> Path:
+        configured = getattr(record, "io_metadata_log", None)
+        if configured:
+            return Path(configured)
+        return io_metadata_path(self.logs_dir, record.id)
+
+    async def _emit_io_metadata(self, record: ShellRecord, metadata: IoMetadataRecord) -> None:
+        if not io_metadata_enabled(record.debug):
+            return
+        path = self._record_io_metadata_path(record)
+        await append_io_metadata(path, metadata)
+        event = ShellEvent(
+            type=EventType.IO_METADATA,
+            shell_id=record.id,
+            data={"record": dict(metadata)},
+            app_id=record.app_id or record.derive_app_id(),
+            parent_shell_id=record.parent_shell_id,
+            is_app_worker=record.is_app_worker,
+        )
+        await self._event_bus.publish(event)
+
     # ------------------------------------------------------------------
     # Adoption and helpers
 
@@ -541,6 +572,7 @@ class FrameworkShellManager:
                 label=get_str("label"),
                 subgroups=get_list("subgroups"),
                 ui=get_dict("ui"),
+                debug=get_dict("debug"),
                 cwd=get_str("cwd", str(HOME_DIR)) or str(HOME_DIR),
                 env_overrides=env_overrides,
                 pid=get_int("pid"),
@@ -550,6 +582,7 @@ class FrameworkShellManager:
                 autostart=bool(data.get("autostart", False)),
                 stdout_log=get_str("stdout_log", str(self.logs_dir / f"{record_id}.stdout.log")) or str(self.logs_dir / f"{record_id}.stdout.log"),
                 stderr_log=get_str("stderr_log", str(self.logs_dir / f"{record_id}.stderr.log")) or str(self.logs_dir / f"{record_id}.stderr.log"),
+                io_metadata_log=get_str("io_metadata_log"),
                 spec_id=get_str("spec_id"),
                 exit_code=get_int("exit_code"),
                 run_id=get_str("run_id"),
@@ -640,6 +673,7 @@ class FrameworkShellManager:
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
         ui: Optional[dict[str, object]] = None,
+        debug: Optional[dict[str, object]] = None,
         autostart: bool,
         uses_pty: bool = False,
         uses_pipes: bool = False,
@@ -667,6 +701,7 @@ class FrameworkShellManager:
             label=label,
             subgroups=normalized_subgroups,
             ui=ui or {},
+            debug=debug or {},
             cwd=cwd_path,
             env_overrides=overrides,
             pid=None,
@@ -676,6 +711,7 @@ class FrameworkShellManager:
             autostart=autostart,
             stdout_log=str(self.logs_dir / f"{shell_id}.stdout.log"),
             stderr_log=str(self.logs_dir / f"{shell_id}.stderr.log"),
+            io_metadata_log=str(io_metadata_path(self.logs_dir, shell_id)),
             spec_id=spec_id,
             exit_code=None,
             run_id=self.run_id,
@@ -904,6 +940,18 @@ class FrameworkShellManager:
                     
                     await log_fh.write(data)
                     await log_fh.flush()
+                    byte_start = state.stdout_bytes_seen
+                    state.stdout_bytes_seen += len(data)
+                    if io_metadata_enabled(record.debug):
+                        await self._emit_io_metadata(
+                            record,
+                            build_output_record(
+                                shell_id=record.id,
+                                stream="stdout",
+                                byte_start=byte_start,
+                                byte_end=state.stdout_bytes_seen,
+                            ),
+                        )
                     
                     text = data.decode("utf-8", errors="replace")
     
@@ -1134,11 +1182,29 @@ class FrameworkShellManager:
         if stream_name == "stderr":
             text_subscribers = list(state.stderr_subscribers)
             bytes_subscribers = list(state.stderr_subscribers_bytes)
+            byte_start = state.stderr_bytes_seen
+            state.stderr_bytes_seen += len(data)
+            byte_end = state.stderr_bytes_seen
         else:
             text_subscribers = list(state.stdout_subscribers)
             bytes_subscribers = list(state.stdout_subscribers_bytes)
+            byte_start = state.stdout_bytes_seen
+            state.stdout_bytes_seen += len(data)
+            byte_end = state.stdout_bytes_seen
         should_publish_log_chunk = self._event_bus.has_subscribers()
         text: str | None = None
+
+        if io_metadata_enabled(record.debug):
+            metadata_stream: Literal["stdout", "stderr"] = "stderr" if stream_name == "stderr" else "stdout"
+            await self._emit_io_metadata(
+                record,
+                build_output_record(
+                    shell_id=record.id,
+                    stream=metadata_stream,
+                    byte_start=byte_start,
+                    byte_end=byte_end,
+                ),
+            )
 
         if should_publish_log_chunk or text_subscribers:
             text = data.decode("utf-8", errors="replace")
@@ -1503,7 +1569,7 @@ class FrameworkShellManager:
             if not native_mode_active:
                 _shell_debug(
                     "native_pipe",
-                    f"shell={record.id} requested native_pipe_testing but using Python pipe pump",
+                    f"shell={record.id} requested native_pipe_testing but using Python pipe reader",
                 )
 
         if not native_mode_active:
@@ -1588,11 +1654,12 @@ class FrameworkShellManager:
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
         ui: Optional[dict[str, object]] = None,
+        debug: Optional[dict[str, object]] = None,
         autostart: bool = True,
     ) -> ShellRecord:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
-            spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
+            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, autostart=autostart,
             backend=BACKEND_PROC
         )
         if autostart:
@@ -1611,13 +1678,14 @@ class FrameworkShellManager:
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
         ui: Optional[dict[str, object]] = None,
+        debug: Optional[dict[str, object]] = None,
         pty_mode: Optional[str] = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
     ) -> ShellRecord:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
-            spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
+            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, autostart=autostart,
             backend=BACKEND_PTY, pty_mode=pty_mode, parent_shell_id=parent_shell_id
         )
         if autostart:
@@ -1636,13 +1704,14 @@ class FrameworkShellManager:
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
         ui: Optional[dict[str, object]] = None,
+        debug: Optional[dict[str, object]] = None,
         pipe_config: dict[str, object] | None = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
     ) -> ShellRecord:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
-            spec_id=spec_id, subgroups=subgroups, ui=ui, autostart=autostart,
+            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, autostart=autostart,
             backend=BACKEND_PIPE,
             parent_shell_id=parent_shell_id
         )
@@ -1662,6 +1731,7 @@ class FrameworkShellManager:
         spec_id: Optional[str] = None,
         subgroups: Optional[List[str]] = None,
         ui: Optional[dict[str, object]] = None,
+        debug: Optional[dict[str, object]] = None,
         pty_mode: Optional[str] = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
@@ -1675,6 +1745,7 @@ class FrameworkShellManager:
             spec_id=spec_id,
             subgroups=subgroups,
             ui=ui,
+            debug=debug,
             pty_mode=pty_mode,
             autostart=autostart,
             parent_shell_id=parent_shell_id,
@@ -1778,7 +1849,9 @@ class FrameworkShellManager:
         
         # Remove logs
         if rec:
-            for log_path in [rec.stdout_log, rec.stderr_log]:
+            for log_path in [rec.stdout_log, rec.stderr_log, rec.io_metadata_log]:
+                if not log_path:
+                    continue
                 p = Path(log_path)
                 if p.exists():
                     try:
@@ -1907,7 +1980,9 @@ class FrameworkShellManager:
             meta_dir = self.metadata_dir / rec.id
             if meta_dir.exists():
                 await asyncio.to_thread(shutil.rmtree, meta_dir, ignore_errors=True)
-            for log_path in [rec.stdout_log, rec.stderr_log]:
+            for log_path in [rec.stdout_log, rec.stderr_log, rec.io_metadata_log]:
+                if not log_path:
+                    continue
                 try:
                     path = Path(log_path)
                     if path.exists():
@@ -1950,7 +2025,9 @@ class FrameworkShellManager:
 
         for rec in to_trim:
             trimmed_any = False
-            for log_path in [rec.stdout_log, rec.stderr_log]:
+            for log_path in [rec.stdout_log, rec.stderr_log, rec.io_metadata_log]:
+                if not log_path:
+                    continue
                 try:
                     path = Path(log_path)
                     if path.exists():
@@ -2151,6 +2228,10 @@ class FrameworkShellManager:
         format: Optional[str] = None,
         signature: Optional[str] = None,
         exclude_signature: Optional[str] = None,
+        include_io_metadata: bool = False,
+        include_stdin: bool = False,
+        include_timestamps: bool = False,
+        include_output_metadata: bool = False,
     ) -> JSONMap:
         rec = await self.get_shell(shell_id)
         if not rec:
@@ -2181,7 +2262,19 @@ class FrameworkShellManager:
             "format": format_name,
             "signature": signature_value,
             "exclude_signature": exclude_signature_value,
+            "io_metadata_enabled": io_metadata_enabled(rec.debug),
         }
+
+        if include_io_metadata:
+            metadata_records = await read_io_metadata(
+                self._record_io_metadata_path(rec),
+                limit=max(1, min(line_count if line_count > 0 else 200, 5000)),
+                max_bytes=self.LOG_TAIL_BYTES * 512,
+                include_output=include_output_metadata,
+                include_stdin=include_stdin,
+                include_timestamps=include_timestamps,
+            )
+            result["io_metadata"] = list(metadata_records)
 
         if stream_name in {"stdout", "both"}:
             stdout_path = Path(rec.stdout_log)
@@ -2471,11 +2564,13 @@ class FrameworkShellManager:
         data: str,
         *,
         append_newline: bool = False,
+        source: str = "manager",
     ) -> JSONMap:
         payload = str(data)
         if append_newline:
             payload = payload + "\n"
         bytes_written = len(payload.encode("utf-8"))
+        record_for_metadata: ShellRecord | None = None
 
         try:
             async with self._get_lock():
@@ -2484,15 +2579,18 @@ class FrameworkShellManager:
 
             if pty_state is not None:
                 backend = str(pty_state.backend or BACKEND_PTY)
+                record_for_metadata = await self.load_shell_record(shell_id)
                 await self._write_live_pty_state(pty_state, payload)
             elif pipe_state is not None:
                 record = await self.load_shell_record(shell_id)
+                record_for_metadata = record
                 backend = self._backend_name(record) if record else BACKEND_PIPE
                 await self.write_to_pipe(shell_id, payload)
             else:
                 record = await self.get_shell(shell_id)
                 if not record:
                     raise KeyError(f"Shell not found: {shell_id}")
+                record_for_metadata = record
                 backend = self._backend_name(record)
                 if backend in {"pty", "dtach"}:
                     await self.write_to_pty(shell_id, payload)
@@ -2503,6 +2601,19 @@ class FrameworkShellManager:
         except KeyError as exc:
             raise RuntimeError(f"Live input unavailable for shell {shell_id}") from exc
 
+        if record_for_metadata is not None and io_metadata_enabled(record_for_metadata.debug):
+            await self._emit_io_metadata(
+                record_for_metadata,
+                build_stdin_write_record(
+                    shell_id=shell_id,
+                    source=source,
+                    backend=backend,
+                    payload=payload,
+                    append_newline=append_newline,
+                    debug=record_for_metadata.debug,
+                ),
+            )
+
         return {
             "shell_id": shell_id,
             "backend": backend,
@@ -2512,7 +2623,7 @@ class FrameworkShellManager:
             "eof_sent": False,
         }
 
-    async def send_shell_eof(self, shell_id: str) -> JSONMap:
+    async def send_shell_eof(self, shell_id: str, *, source: str = "manager") -> JSONMap:
         record = await self.get_shell(shell_id)
         if not record:
             raise KeyError(f"Shell not found: {shell_id}")
@@ -2525,6 +2636,12 @@ class FrameworkShellManager:
                 raise RuntimeError(f"stdin EOF is not supported for backend {backend}")
         except KeyError as exc:
             raise RuntimeError(f"Live input unavailable for shell {shell_id}") from exc
+
+        if io_metadata_enabled(record.debug):
+            await self._emit_io_metadata(
+                record,
+                build_stdin_eof_record(shell_id=shell_id, source=source, backend=backend),
+            )
 
         return {
             "shell_id": shell_id,

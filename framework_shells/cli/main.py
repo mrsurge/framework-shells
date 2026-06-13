@@ -5,15 +5,21 @@ import os
 import sys
 import shutil
 import hashlib
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import cast
 
+from ..auth import derive_api_token, get_secret
 from ..manager import FrameworkShellManager
 from ..process_snapshot import ProcfsProcessProvider, ProcessSnapshot
 from ..record import ShellRecord
 from ..shutdown import ShutdownPolicy, shutdown_snapshot
 from ..shellspec import load_shellspec
 from ..orchestrator import Orchestrator
+
+JSONMap = dict[str, object]
 
 def compute_standalone_fingerprint() -> str:
     """Compute fingerprint based on current working directory (assuming repo root)."""
@@ -147,6 +153,71 @@ def _arg_str_list(args: argparse.Namespace, name: str) -> list[str]:
     value = getattr(args, name, None)
     return [str(item) for item in cast(list[object], value)] if isinstance(value, list) else []
 
+
+def _read_write_data(args: argparse.Namespace) -> str:
+    data_arg = getattr(args, "data", None)
+    if data_arg == "-":
+        return sys.stdin.read()
+    if data_arg is None:
+        if not sys.stdin.isatty():
+            return sys.stdin.read()
+        raise SystemExit("fws write requires DATA or '-' for stdin")
+    return str(data_arg)
+
+
+def _normalize_write_data(data: str, *, compact_json: bool) -> str:
+    if not compact_json:
+        return data
+    try:
+        parsed = cast(object, json.loads(data))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid JSON for --json: {exc}") from exc
+    return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+
+
+def _fws_api_base_url(args: argparse.Namespace) -> str | None:
+    explicit = _arg_str(args, "api_url").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    for name in ("FRAMEWORK_SHELLS_API_URL", "FRAMEWORK_SHELLS_FWS_SOCKETIO_URL", "TE_FRAMEWORK_URL"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value.rstrip("/")
+    return None
+
+
+def _post_shell_input_sync(base_url: str, shell_id: str, payload: JSONMap) -> JSONMap:
+    quoted_shell_id = urllib.parse.quote(shell_id, safe="")
+    url = f"{base_url}/api/framework_shells/{quoted_shell_id}/input"
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Framework-Key": derive_api_token(get_secret()),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        message = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"FWS API write failed ({exc.code}): {message}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"FWS API write failed: {exc}") from exc
+
+    parsed = cast(object, json.loads(raw or "{}"))
+    if not isinstance(parsed, dict):
+        raise RuntimeError("FWS API returned a non-object response")
+    return cast(JSONMap, parsed)
+
+
+async def _post_shell_input(base_url: str, shell_id: str, payload: JSONMap) -> JSONMap:
+    return await asyncio.to_thread(_post_shell_input_sync, base_url, shell_id, payload)
+
+
 async def _resolve_shell_target(
     manager: FrameworkShellManager,
     target: str,
@@ -261,7 +332,20 @@ def main():
     _ = inspect_parser.add_argument("--format", choices=["plain", "json", "jsonrpc"], help="Filter by detected format")
     _ = inspect_parser.add_argument("--signature", help="Filter by event signature (supports * wildcards)")
     _ = inspect_parser.add_argument("--exclude-signature", help="Exclude event signatures (supports * wildcards)")
+    _ = inspect_parser.add_argument("--io-metadata", action="store_true", help="Include sidecar I/O metadata records")
+    _ = inspect_parser.add_argument("--stdin", action="store_true", help="Include stdin sidecar records with --io-metadata")
+    _ = inspect_parser.add_argument("--timestamps", action="store_true", help="Include sidecar timestamps with --io-metadata")
+    _ = inspect_parser.add_argument("--output-metadata", action="store_true", help="Include stdout/stderr chunk sidecar records with --io-metadata")
     _ = inspect_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    # fs write <id|label> [data|-]
+    write_parser = subparsers.add_parser("write", help="Write text to live shell stdin")
+    _ = write_parser.add_argument("target", help="Shell ID, label, or unique ID prefix")
+    _ = write_parser.add_argument("data", nargs="?", help="Text to write, or '-' to read from stdin")
+    _ = write_parser.add_argument("--newline", action="store_true", help="Append a trailing newline")
+    _ = write_parser.add_argument("--json", action="store_true", help="Parse and compact DATA as JSON before writing")
+    _ = write_parser.add_argument("--json-output", action="store_true", help="Emit machine-readable write result")
+    _ = write_parser.add_argument("--api-url", help="FWS API base URL; defaults to FRAMEWORK_SHELLS_API_URL, FRAMEWORK_SHELLS_FWS_SOCKETIO_URL, or TE_FRAMEWORK_URL")
 
     # fs terminate <id|label>
     term_parser = subparsers.add_parser("terminate", help="Terminate a single shell")
@@ -296,6 +380,7 @@ def main():
     _ = run_parser.add_argument("--cwd", default=None, help="Working directory")
     _ = run_parser.add_argument("--env", action="append", default=None, help="Environment override KEY=VALUE (repeatable)")
     _ = run_parser.add_argument("--subgroup", action="append", default=None, help="Subgroup tag (repeatable)")
+    _ = run_parser.add_argument("--debug-io-metadata", action="store_true", help="Record opt-in stdin/output sidecar metadata for this shell")
     _ = run_parser.add_argument("--no-start", action="store_true", help="Create record only (do not start process)")
     _ = run_parser.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run (prefix with --)")
 
@@ -318,8 +403,10 @@ def main():
         pass
 
 async def run_async(args: argparse.Namespace) -> None:
-    manager = FrameworkShellManager()
     command = _arg_str(args, "command")
+    if command != "up":
+        os.environ.setdefault("FRAMEWORK_SHELLS_DISABLE_FWS_SOCKETIO_PEER", "1")
+    manager = FrameworkShellManager()
 
     if command == "run":
         cmd = _arg_str_list(args, "cmd")
@@ -333,16 +420,17 @@ async def run_async(args: argparse.Namespace) -> None:
         autostart = not _arg_bool(args, "no_start", False)
         backend = _arg_str(args, "backend", "proc")
         pty_mode = getattr(args, "pty_mode", None)
+        debug: JSONMap = {"io_metadata": True} if _arg_bool(args, "debug_io_metadata", False) else {}
 
         if backend == "dtach":
             backend = "pty"
 
         if backend == "pty":
-            rec = await manager.spawn_shell_pty(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, pty_mode=pty_mode, autostart=autostart)
+            rec = await manager.spawn_shell_pty(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, debug=debug, pty_mode=pty_mode, autostart=autostart)
         elif backend == "pipe":
-            rec = await manager.spawn_shell_pipe(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, autostart=autostart)
+            rec = await manager.spawn_shell_pipe(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, debug=debug, autostart=autostart)
         else:
-            rec = await manager.spawn_shell(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, autostart=autostart)
+            rec = await manager.spawn_shell(cmd, cwd=getattr(args, "cwd", None), env=env, label=getattr(args, "label", None), subgroups=subgroups, debug=debug, autostart=autostart)
 
         print(rec.id)
         return
@@ -608,6 +696,10 @@ async def run_async(args: argparse.Namespace) -> None:
                 format=getattr(args, "format", None),
                 signature=getattr(args, "signature", None),
                 exclude_signature=getattr(args, "exclude_signature", None),
+                include_io_metadata=_arg_bool(args, "io_metadata", False),
+                include_stdin=_arg_bool(args, "stdin", False),
+                include_timestamps=_arg_bool(args, "timestamps", False),
+                include_output_metadata=_arg_bool(args, "output_metadata", False),
             )
         except KeyError:
             print("Shell not found")
@@ -624,10 +716,10 @@ async def run_async(args: argparse.Namespace) -> None:
             f"format={result.get('format') or '-'} signature={result.get('signature') or '-'}"
         )
         for stream_name in ("stdout", "stderr"):
-            payload = result.get(stream_name)
-            if not isinstance(payload, dict):
+            inspect_payload = cast(object, result.get(stream_name))
+            if not isinstance(inspect_payload, dict):
                 continue
-            payload_map = cast(dict[str, object], payload)
+            payload_map = cast(dict[str, object], inspect_payload)
             records_obj = payload_map.get("records")
             records = cast(list[object], records_obj) if isinstance(records_obj, list) else []
             print(
@@ -644,6 +736,52 @@ async def run_async(args: argparse.Namespace) -> None:
                     print(f"  {item.get('signature')}: {item.get('count')}")
                 except Exception:
                     continue
+        return
+
+    elif command == "write":
+        target = _arg_str(args, "target").strip()
+        if not target:
+            raise SystemExit("Target shell is required.")
+        rec = await _resolve_shell_target(manager, target, allow_exited=False)
+        shell_id = rec.id
+        data = _normalize_write_data(_read_write_data(args), compact_json=_arg_bool(args, "json", False))
+        payload: JSONMap = {
+            "data": data,
+            "append_newline": _arg_bool(args, "newline", False),
+            "source": "cli",
+        }
+
+        explicit_api_base_url = _fws_api_base_url(args)
+        api_base_url = explicit_api_base_url or "http://127.0.0.1:8089"
+        api_error: Exception | None = None
+        try:
+            result = await _post_shell_input(api_base_url, shell_id, payload)
+        except Exception as exc:
+            api_error = exc
+            if explicit_api_base_url:
+                print(str(exc))
+                sys.exit(1)
+            try:
+                result = await manager.write_to_shell(
+                    shell_id,
+                    str(payload.get("data") or ""),
+                    append_newline=bool(payload.get("append_newline", False)),
+                    source="cli",
+                )
+            except Exception as direct_exc:
+                if "Live input unavailable" in str(direct_exc):
+                    print(str(api_error))
+                else:
+                    print(str(direct_exc))
+                sys.exit(1)
+
+        if _arg_bool(args, "json_output", False):
+            print(json.dumps(result, sort_keys=True))
+            return
+        data_obj = result.get("data")
+        result_data = cast(JSONMap, data_obj) if isinstance(data_obj, dict) else result
+        bytes_written = result_data.get("bytes_written")
+        print(f"Wrote {bytes_written if bytes_written is not None else '?'} byte(s) to {shell_id}")
         return
 
     elif command == "attach":

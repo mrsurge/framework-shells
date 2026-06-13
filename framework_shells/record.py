@@ -73,10 +73,12 @@ class ShellRecord:
     autostart: bool
     stdout_log: str
     stderr_log: str
+    io_metadata_log: Optional[str] = None
     spec_id: Optional[str] = None
     exit_code: Optional[int] = None
     subgroups: list[str] = field(default_factory=list)
     ui: JsonMap = field(default_factory=dict)
+    debug: JsonMap = field(default_factory=dict)
     run_id: Optional[str] = None
     launcher_pid: Optional[int] = None
     adopted: bool = False
@@ -150,6 +152,7 @@ class ShellRecord:
             "label": self.label,
             "subgroups": self.subgroups,
             "ui": self.ui,
+            "debug": self.debug,
             "cwd": self.cwd,
             "env_overrides": self.env_overrides,
             "pid": self.pid,
@@ -159,6 +162,7 @@ class ShellRecord:
             "autostart": self.autostart,
             "stdout_log": self.stdout_log,
             "stderr_log": self.stderr_log,
+            "io_metadata_log": self.io_metadata_log,
             "exit_code": self.exit_code,
             "run_id": self.run_id,
             "launcher_pid": self.launcher_pid,
@@ -191,6 +195,7 @@ class ShellRecord:
             "label": self.label,
             "subgroups": list(self.subgroups or []),
             "ui": dict(self.ui or {}),
+            "debug": dict(self.debug or {}),
             "cwd": self.cwd,
             "pid": self.pid,
             "status": self.status,
@@ -199,6 +204,7 @@ class ShellRecord:
             "autostart": self.autostart,
             "stdout_log": self.stdout_log,
             "stderr_log": self.stderr_log,
+            "io_metadata_log": self.io_metadata_log,
             "exit_code": self.exit_code,
             "env_keys": sorted(self.env_overrides.keys()),
             "run_id": self.run_id,

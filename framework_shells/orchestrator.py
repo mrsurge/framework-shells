@@ -145,6 +145,7 @@ class Orchestrator:
 
         subgroups = list(subgroups_overrides) if subgroups_overrides is not None else list(rendered.subgroups or [])
         ui_final = _deep_merge_dict(cast_json_map(rendered.ui), ui or {})
+        debug_final = cast_json_map(rendered.debug)
         label_final = label or rendered.id
         backend = normalize_launch_backend(rendered.backend)
 
@@ -157,6 +158,7 @@ class Orchestrator:
                 spec_id=stored_spec_id,
                 subgroups=subgroups,
                 ui=ui_final,
+                debug=debug_final,
                 pty_mode=rendered.pty_mode,
                 autostart=rendered.autostart,
                 parent_shell_id=parent_shell_id,
@@ -170,6 +172,7 @@ class Orchestrator:
                 spec_id=stored_spec_id,
                 subgroups=subgroups,
                 ui=ui_final,
+                debug=debug_final,
                 pipe_config=dict(rendered.pipe or {}),
                 autostart=rendered.autostart,
                 parent_shell_id=parent_shell_id,
@@ -183,6 +186,7 @@ class Orchestrator:
                 spec_id=stored_spec_id,
                 subgroups=subgroups,
                 ui=ui_final,
+                debug=debug_final,
                 autostart=rendered.autostart,
             )
 

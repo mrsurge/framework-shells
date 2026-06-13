@@ -12,6 +12,8 @@ from .events import EventType, ShellEvent, get_event_bus
 from .fws_socketio_contract import FWS_SOCKETIO_NAMESPACE, FWS_SOCKETIO_SOCKET_PATH
 from .protocols.fws_ui import (
     FwsNotification,
+    IoMetadataPayload,
+    SHELL_INPUT_METHOD,
     SHELL_CREATED_NOTIFICATION_METHOD,
     SHELL_EXITED_NOTIFICATION_METHOD,
     SHELL_REMOVED_NOTIFICATION_METHOD,
@@ -19,6 +21,7 @@ from .protocols.fws_ui import (
     SHELL_UPDATED_NOTIFICATION_METHOD,
     build_error_notification,
     build_logs_chunk_notification,
+    build_logs_io_metadata_notification,
     build_logs_reset_notification,
 )
 
@@ -72,6 +75,7 @@ class FwsSocketIoPeerRelay:
         self._connect_logged = False
 
         self.client.on("fws_peer_subscriptions", self._on_subscriptions, namespace=FWS_SOCKETIO_NAMESPACE)
+        self.client.on("fws_peer_request", self._on_peer_request, namespace=FWS_SOCKETIO_NAMESPACE)
 
     async def _on_subscriptions(self, payload: object) -> None:
         mapping = _as_object_mapping(payload)
@@ -87,6 +91,49 @@ class FwsSocketIoPeerRelay:
             for raw_shell_id in cast(list[object], shell_ids)
             if (shell_id := str(raw_shell_id).strip())
         }
+
+    async def _on_peer_request(self, payload: object) -> Mapping[str, object]:
+        mapping = _as_object_mapping(payload)
+        if mapping is None:
+            return {"ok": False, "code": "invalid_request", "error": "Invalid peer request"}
+        method = mapping.get("method")
+        params = _as_object_mapping(mapping.get("params"))
+        if method != SHELL_INPUT_METHOD or params is None:
+            return {"ok": False, "code": "method_not_found", "error": f"Unsupported peer request: {method}"}
+
+        shell_id = str(params.get("shell_id") or "").strip()
+        if not shell_id:
+            return {"ok": False, "code": "invalid_request", "error": "shell_id is required"}
+
+        source = params.get("source")
+        source_name = source if isinstance(source, str) and source.strip() else "peer"
+        eof = bool(params.get("eof", False))
+        data = params.get("data")
+        append_newline = bool(params.get("append_newline", False))
+
+        try:
+            from .shared_manager import get_manager
+
+            mgr = await get_manager()
+            if eof:
+                result = await mgr.send_shell_eof(shell_id, source=source_name)
+            else:
+                result = await mgr.write_to_shell(
+                    shell_id,
+                    data if isinstance(data, str) else "",
+                    append_newline=append_newline,
+                    source=source_name,
+                )
+        except KeyError:
+            return {"ok": False, "code": "not_found", "error": f"Shell not found: {shell_id}"}
+        except (RuntimeError, ValueError) as exc:
+            message = str(exc)
+            code = "not_owner" if "Live input unavailable" in message else "write_failed"
+            return {"ok": False, "code": code, "error": message}
+        except Exception as exc:
+            return {"ok": False, "code": "write_failed", "error": str(exc)}
+
+        return {"ok": True, "data": result}
 
     async def start(self) -> None:
         if self._started:
@@ -179,6 +226,17 @@ class FwsSocketIoPeerRelay:
             if stream_name in {"stdout", "stderr"}:
                 stream = "stderr" if stream_name == "stderr" else "stdout"
                 notifications.append(build_logs_reset_notification(event.shell_id, stream))
+            return notifications
+
+        if event.type == EventType.IO_METADATA:
+            record_obj = event.data.get("record")
+            if isinstance(record_obj, dict):
+                notifications.append(
+                    build_logs_io_metadata_notification(
+                        event.shell_id,
+                        cast(IoMetadataPayload, dict(cast(dict[object, object], record_obj))),
+                    )
+                )
             return notifications
 
         if event.type == EventType.SHELL_REMOVED:

@@ -20,6 +20,7 @@ class PTYState:
     reader: asyncio.Task[None] | None = None
     writer: asyncio.Task[None] | None = None
     proxy_pid: int | None = None
+    stdout_bytes_seen: int = 0
 
 
 @dataclass
@@ -43,3 +44,5 @@ class PipeState:
     native_reader_fd: int | None = None
     native_chunk_queue: AsyncQueue[bytes | None] | None = None
     stdin_supported: bool = True
+    stdout_bytes_seen: int = 0
+    stderr_bytes_seen: int = 0

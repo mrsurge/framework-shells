@@ -12,6 +12,7 @@ class EventType(Enum):
     SHELL_REMOVED = "shell.removed"
     PTY_CHUNK = "shell.pty_chunk"
     LOG_CHUNK = "shell.log_chunk"
+    IO_METADATA = "shell.io_metadata"
     LOG_RESET = "shell.log_reset"
 
 @dataclass

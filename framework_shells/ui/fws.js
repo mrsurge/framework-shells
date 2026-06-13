@@ -1024,6 +1024,10 @@
     if (ui !== void 0) {
       result.ui = ui;
     }
+    const debug = asObjectRecord(record.debug);
+    if (debug !== void 0) {
+      result.debug = debug;
+    }
     const cwd = asString(record.cwd);
     if (cwd !== void 0) {
       result.cwd = cwd;
@@ -1055,6 +1059,10 @@
     const stderrLog = asString(record.stderr_log);
     if (stderrLog !== void 0) {
       result.stderr_log = stderrLog;
+    }
+    const ioMetadataLog = asNullableString(record.io_metadata_log);
+    if (ioMetadataLog !== void 0) {
+      result.io_metadata_log = ioMetadataLog;
     }
     const exitCode = asNullableNumber(record.exit_code);
     if (exitCode !== void 0) {
@@ -1179,6 +1187,79 @@
     }
     return { shells, processes };
   }
+  function coerceIoMetadataRecord(value) {
+    const record = asObjectRecord(value);
+    if (!record) {
+      return null;
+    }
+    const shellId = asString(record.shell_id);
+    const kind = asString(record.kind);
+    const stream = asString(record.stream);
+    if (!shellId || !["output", "stdin_write", "stdin_eof"].includes(kind ?? "")) {
+      return null;
+    }
+    if (!stream || !["stdout", "stderr", "stdin"].includes(stream)) {
+      return null;
+    }
+    const result = {
+      shell_id: shellId,
+      kind,
+      stream
+    };
+    const schema = asString(record.schema);
+    if (schema !== void 0) {
+      result.schema = schema;
+    }
+    const ts = asNumber(record.ts);
+    if (ts !== void 0) {
+      result.ts = ts;
+    }
+    const source = asString(record.source);
+    if (source !== void 0) {
+      result.source = source;
+    }
+    const backend = asString(record.backend);
+    if (backend !== void 0) {
+      result.backend = backend;
+    }
+    const byteStart = asNumber(record.byte_start);
+    if (byteStart !== void 0) {
+      result.byte_start = byteStart;
+    }
+    const byteEnd = asNumber(record.byte_end);
+    if (byteEnd !== void 0) {
+      result.byte_end = byteEnd;
+    }
+    const byteCount = asNumber(record.byte_count);
+    if (byteCount !== void 0) {
+      result.byte_count = byteCount;
+    }
+    const appendNewline = asBoolean(record.append_newline);
+    if (appendNewline !== void 0) {
+      result.append_newline = appendNewline;
+    }
+    const newlineAppended = asBoolean(record.newline_appended);
+    if (newlineAppended !== void 0) {
+      result.newline_appended = newlineAppended;
+    }
+    const preview = asString(record.preview);
+    if (preview !== void 0) {
+      result.preview = preview;
+    }
+    const text = asString(record.text);
+    if (text !== void 0) {
+      result.text = text;
+    }
+    const previewTruncated = asBoolean(record.preview_truncated);
+    if (previewTruncated !== void 0) {
+      result.preview_truncated = previewTruncated;
+    }
+    const sha256 = asString(record.sha256);
+    if (sha256 !== void 0) {
+      result.sha256 = sha256;
+    }
+    return result;
+  }
   function buildClientRequest(method, id, params) {
     return {
       jsonrpc: "2.0",
@@ -1292,13 +1373,23 @@
         return null;
       case "fws.logs.initial":
         if (typeof parsedParams.shell_id === "string" && typeof parsedParams.stdout === "string" && typeof parsedParams.stderr === "string") {
+          const ioMetadata = [];
+          if (Array.isArray(parsedParams.io_metadata)) {
+            for (const item of parsedParams.io_metadata) {
+              const record = coerceIoMetadataRecord(item);
+              if (record) {
+                ioMetadata.push(record);
+              }
+            }
+          }
           return {
             jsonrpc: "2.0",
             method: parsedMethod,
             params: {
               shell_id: parsedParams.shell_id,
               stdout: parsedParams.stdout,
-              stderr: parsedParams.stderr
+              stderr: parsedParams.stderr,
+              io_metadata: ioMetadata
             }
           };
         }
@@ -1316,6 +1407,20 @@
           };
         }
         return null;
+      case "fws.logs.io_metadata": {
+        const record = coerceIoMetadataRecord(parsedParams.record);
+        if (typeof parsedParams.shell_id === "string" && record) {
+          return {
+            jsonrpc: "2.0",
+            method: parsedMethod,
+            params: {
+              shell_id: parsedParams.shell_id,
+              record
+            }
+          };
+        }
+        return null;
+      }
       case "fws.logs.reset":
         if (typeof parsedParams.shell_id === "string" && isLogStreamName(parsedParams.stream)) {
           return {
@@ -1422,7 +1527,10 @@
         if ("stderr" in value) {
           shellOptions.stderr = normalizeStreamRenderOptions(value.stderr);
         }
-        if (shellOptions.stdout || shellOptions.stderr) {
+        if ("ioOverlay" in value) {
+          shellOptions.ioOverlay = normalizeStoredBoolean(value.ioOverlay);
+        }
+        if (shellOptions.stdout || shellOptions.stderr || shellOptions.ioOverlay !== void 0) {
           result[shellId] = shellOptions;
         }
       }
@@ -1437,7 +1545,7 @@
   function makeStreamState(containerId) {
     return {
       container: getElementById(containerId),
-      lines: [],
+      entries: [],
       partial: "",
       pendingCount: 0,
       ansiStyle: createDefaultAnsiStyle(),
@@ -1932,6 +2040,14 @@
     const logSubtitleEl = getElementById("fws-log-subtitle");
     const logStatusEl = getElementById("fws-log-status");
     const logPauseInput = getElementById("fws-log-pause");
+    const stdinForm = getElementById("fws-stdin-form");
+    const stdinInput = getElementById("fws-stdin-input");
+    const stdinNewlineInput = getElementById("fws-stdin-newline");
+    const stdinSendButton = getElementById("fws-stdin-send");
+    const stdinJsonCompactButton = getElementById("fws-stdin-json-compact");
+    const stdinStatusEl = getElementById("fws-stdin-status");
+    const ioOverlayInput = getElementById("fws-io-overlay");
+    const ioOverlayWrap = getElementById("fws-io-overlay-wrap");
     const collapseState = /* @__PURE__ */ new Map();
     let defaultCollapsed = true;
     let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
@@ -1948,6 +2064,7 @@
       shellId: "",
       shellLabel: "",
       paused: false,
+      ioOverlayEnabled: false,
       streams: {
         stdout: makeStreamState("stdout-container"),
         stderr: makeStreamState("stderr-container")
@@ -1979,6 +2096,83 @@
     function findShellLabel(shellId) {
       const match = dashboardState.shells.find((shell) => shell.id === shellId);
       return match?.label ?? shellId;
+    }
+    function findShell(shellId) {
+      return dashboardState.shells.find((shell) => shell.id === shellId);
+    }
+    function shellHasIoMetadata(shellId) {
+      const shell = findShell(shellId);
+      if (!shell) {
+        return false;
+      }
+      const debug = shell.debug;
+      const enabled = normalizeStoredBoolean(debug?.io_metadata) || normalizeStoredBoolean(debug?.ioMetadata);
+      return enabled === true;
+    }
+    function syncIoOverlayToggle() {
+      const available = Boolean(logState.shellId && shellHasIoMetadata(logState.shellId));
+      if (ioOverlayWrap) {
+        ioOverlayWrap.classList.toggle("is-disabled", !available);
+        ioOverlayWrap.title = available ? "Show stdin/timing sidecar overlay" : "Shell debug.io_metadata is not enabled.";
+      }
+      if (ioOverlayInput) {
+        ioOverlayInput.disabled = !available;
+        ioOverlayInput.checked = available && logState.ioOverlayEnabled;
+      }
+    }
+    function setStdinInjectorDisabled(disabled) {
+      stdinForm?.classList.toggle("is-disabled", disabled);
+      if (stdinInput) {
+        stdinInput.disabled = disabled;
+      }
+      if (stdinNewlineInput) {
+        stdinNewlineInput.disabled = disabled;
+      }
+      if (stdinSendButton) {
+        stdinSendButton.disabled = disabled;
+      }
+      if (stdinJsonCompactButton) {
+        stdinJsonCompactButton.disabled = disabled;
+      }
+    }
+    function canAttemptShellInput(shell) {
+      if (!shell || !isShellLive(shell)) {
+        return false;
+      }
+      const backend = shellBackend(shell);
+      return backend === "pty" || backend === "dtach" || backend.startsWith("pipe");
+    }
+    function updateStdinInjectorState(statusOverride) {
+      const shell = logState.shellId ? findShell(logState.shellId) : void 0;
+      const capabilities = shell?.capabilities;
+      const canWrite = capabilities?.stdin_write === true;
+      const canAttemptWrite = canWrite || canAttemptShellInput(shell);
+      setStdinInjectorDisabled(!canAttemptWrite);
+      if (!stdinStatusEl) {
+        return;
+      }
+      if (statusOverride) {
+        stdinStatusEl.textContent = statusOverride;
+        return;
+      }
+      if (!logState.shellId) {
+        stdinStatusEl.textContent = "Select a shell with live stdin.";
+        return;
+      }
+      if (!shell) {
+        stdinStatusEl.textContent = "Shell metadata unavailable.";
+        return;
+      }
+      if (!canAttemptWrite) {
+        stdinStatusEl.textContent = "Stdin writes are not supported for this shell backend.";
+        return;
+      }
+      const backend = shellBackend(shell);
+      if (!canWrite) {
+        stdinStatusEl.textContent = `Ready to attempt ${backend} stdin; backend will return any write error.`;
+        return;
+      }
+      stdinStatusEl.textContent = `Ready for ${backend} stdin.`;
     }
     function compareShells(left, right) {
       const leftCreated = typeof left.created_at === "number" ? left.created_at : 0;
@@ -2072,6 +2266,8 @@
           logTitleEl.textContent = label || "Shell Logs";
         }
       }
+      updateStdinInjectorState();
+      syncIoOverlayToggle();
     }
     function routeDashboardNotification(message) {
       switch (message.method) {
@@ -2392,15 +2588,18 @@
         excludeMode: excludeMode?.value === "exact" ? "exact" : "regex"
       };
     }
-    function getFilteredLines(stream) {
+    function getFilteredEntries(stream) {
       const state = logState.streams[stream];
       const cfg = getFilterConfig(stream);
       const includeMatch = compileMatcher(stream, "include", cfg.includeQuery, cfg.includeMode);
       const excludeMatch = compileMatcher(stream, "exclude", cfg.excludeQuery, cfg.excludeMode);
-      const allLines = state.partial ? state.lines.concat([state.partial]) : state.lines.slice();
-      return allLines.filter((line) => {
-        const includeOk = cfg.includeQuery ? includeMatch(line) : true;
-        const excludeHit = cfg.excludeQuery ? excludeMatch(line) : false;
+      const allEntries = state.partial ? state.entries.concat([{ kind: "text", text: state.partial }]) : state.entries.slice();
+      return allEntries.filter((entry) => {
+        if (entry.kind === "io") {
+          return stream === "stdout" && logState.ioOverlayEnabled;
+        }
+        const includeOk = cfg.includeQuery ? includeMatch(entry.text) : true;
+        const excludeHit = cfg.excludeQuery ? excludeMatch(entry.text) : false;
         return includeOk && !excludeHit;
       });
     }
@@ -2435,21 +2634,64 @@
       const label = state.pendingCount > 0 ? `${state.pendingCount} new line${state.pendingCount === 1 ? "" : "s"} buffered` : "";
       container.setAttribute("data-pending-label", label);
     }
-    function buildLineNodes(stream, lines) {
+    function formatMetadataTimestamp(record) {
+      if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) {
+        return "--:--:--.---";
+      }
+      const date = new Date(record.ts * 1e3);
+      const pad = (value, width = 2) => String(value).padStart(width, "0");
+      return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+    }
+    function metadataPreview(record) {
+      if (record.kind === "stdin_eof") {
+        return "<EOF>";
+      }
+      const text = record.text ?? record.preview ?? "";
+      if (!text) {
+        return "<stdin hidden>";
+      }
+      return record.preview_truncated ? `${text} \u2026` : text;
+    }
+    function buildMetadataNode(record) {
+      const node = document.createElement("div");
+      node.className = "log-line io-metadata-line";
+      const label = document.createElement("span");
+      label.className = "io-metadata-label";
+      const source = record.source || "unknown";
+      const bytes = typeof record.byte_count === "number" ? `${record.byte_count}B` : "?B";
+      label.textContent = `stdin | ${formatMetadataTimestamp(record)} | ${source} | ${bytes}`;
+      const body = document.createElement("span");
+      body.className = "io-metadata-body";
+      const rendered = renderLogLine(metadataPreview(record), createDefaultAnsiStyle(), {
+        prettyJson: logState.streams.stdout.prettyJson,
+        highlight: void 0
+      });
+      body.appendChild(rendered.fragment);
+      node.append(label, body);
+      return node;
+    }
+    function buildEntryNode(stream, entry, renderStyle) {
+      if (entry.kind === "io") {
+        return { node: buildMetadataNode(entry.record), finalStyle: renderStyle };
+      }
+      const node = document.createElement("div");
+      node.className = "log-line";
+      const rendered = renderLogLine(entry.text, renderStyle, {
+        prettyJson: logState.streams[stream].prettyJson,
+        highlight: getFilterHighlight(stream)
+      });
+      node.appendChild(rendered.fragment);
+      return { node, finalStyle: rendered.finalStyle };
+    }
+    function buildLineNodes(stream, entries) {
       const fragment = document.createDocumentFragment();
       const wrapper = document.createElement("div");
       wrapper.className = "log-lines";
-      const renderOptions = {
-        prettyJson: logState.streams[stream].prettyJson,
-        highlight: getFilterHighlight(stream)
-      };
       let renderStyle = createDefaultAnsiStyle();
-      for (const line of lines) {
-        const node = document.createElement("div");
-        node.className = "log-line";
-        const rendered = renderLogLine(line, renderStyle, renderOptions);
-        node.appendChild(rendered.fragment);
+      for (const entry of entries) {
+        const rendered = buildEntryNode(stream, entry, renderStyle);
         renderStyle = rendered.finalStyle;
+        const node = rendered.node;
         wrapper.appendChild(node);
       }
       fragment.appendChild(wrapper);
@@ -2462,15 +2704,15 @@
         return;
       }
       const pinned = isPinned(container);
-      const lines = getFilteredLines(stream);
+      const entries = getFilteredEntries(stream);
       container.innerHTML = "";
-      if (lines.length === 0) {
+      if (entries.length === 0) {
         const empty = document.createElement("div");
         empty.className = "loading";
         empty.textContent = logState.shellId ? "No lines matched." : "Select a shell log.";
         container.appendChild(empty);
       } else {
-        container.appendChild(buildLineNodes(stream, lines));
+        container.appendChild(buildLineNodes(stream, entries));
       }
       if (pinned) {
         container.scrollTop = container.scrollHeight;
@@ -2521,10 +2763,12 @@
       const normalized = String(text || "");
       const parts = normalized.split("\n");
       state.partial = normalized.endsWith("\n") ? "" : parts.pop() || "";
-      state.lines = parts;
+      state.entries = parts.map((line) => ({ kind: "text", text: line }));
       state.ansiStyle = createDefaultAnsiStyle();
-      for (const line of state.lines) {
-        state.ansiStyle = advanceAnsiStyle(line, state.ansiStyle);
+      for (const entry of state.entries) {
+        if (entry.kind === "text") {
+          state.ansiStyle = advanceAnsiStyle(entry.text, state.ansiStyle);
+        }
       }
       state.pendingCount = 0;
       setPendingLabel(stream);
@@ -2537,8 +2781,8 @@
       state.partial = text.endsWith("\n") ? "" : parts.pop() || "";
       const newLines = parts;
       if (newLines.length > 0) {
-        state.lines.push(...newLines);
         for (const line of newLines) {
+          state.entries.push({ kind: "text", text: line });
           state.ansiStyle = advanceAnsiStyle(line, state.ansiStyle);
         }
       }
@@ -2546,11 +2790,35 @@
     }
     function resetStream(stream) {
       const state = logState.streams[stream];
-      state.lines = [];
+      state.entries = [];
       state.partial = "";
       state.pendingCount = 0;
       state.ansiStyle = createDefaultAnsiStyle();
       renderStream(stream);
+    }
+    function appendIoMetadataRecord(record, options) {
+      if (record.kind !== "stdin_write" && record.kind !== "stdin_eof") {
+        return;
+      }
+      const state = logState.streams.stdout;
+      state.entries.push({ kind: "io", record });
+      if (!options.render) {
+        return;
+      }
+      if (logState.paused) {
+        state.pendingCount += 1;
+        setPendingLabel("stdout");
+        return;
+      }
+      if (!logState.ioOverlayEnabled) {
+        return;
+      }
+      renderStream("stdout");
+    }
+    function appendInitialIoMetadata(records) {
+      for (const record of records) {
+        appendIoMetadataRecord(record, { render: false });
+      }
     }
     function saveLogRenderOptions() {
       try {
@@ -2567,6 +2835,15 @@
       logRenderOptions[shellId] = shellOptions;
       saveLogRenderOptions();
     }
+    function setStoredIoOverlay(shellId, enabled) {
+      if (!shellId) {
+        return;
+      }
+      const shellOptions = logRenderOptions[shellId] ?? {};
+      shellOptions.ioOverlay = enabled;
+      logRenderOptions[shellId] = shellOptions;
+      saveLogRenderOptions();
+    }
     function syncPrettyJsonToggle(stream) {
       const input = getElementById(`${stream}-pretty-json`);
       if (input) {
@@ -2579,6 +2856,8 @@
         logState.streams[stream].prettyJson = options.prettyJson;
         syncPrettyJsonToggle(stream);
       }
+      logState.ioOverlayEnabled = Boolean(logRenderOptions[shellId]?.ioOverlay) && shellHasIoMetadata(shellId);
+      syncIoOverlayToggle();
     }
     function renderLogError(message) {
       for (const stream of LOG_STREAMS) {
@@ -2600,8 +2879,15 @@
           }
           parseTextIntoState("stdout", message.params.stdout);
           parseTextIntoState("stderr", message.params.stderr);
+          appendInitialIoMetadata(message.params.io_metadata);
           renderStream("stdout");
           renderStream("stderr");
+          return;
+        case "fws.logs.io_metadata":
+          if (message.params.shell_id !== currentShellId) {
+            return;
+          }
+          appendIoMetadataRecord(message.params.record, { render: true });
           return;
         case "fws.logs.reset":
           if (message.params.shell_id !== currentShellId) {
@@ -2686,6 +2972,7 @@
       logState.shellId = nextShellId;
       logState.shellLabel = shellLabel || findShellLabel(nextShellId);
       applyStoredLogRenderOptions(nextShellId);
+      updateStdinInjectorState();
       if (logTitleEl) {
         logTitleEl.textContent = logState.shellLabel || "Shell Logs";
       }
@@ -2714,6 +3001,9 @@
       const previousShellId = logState.shellId;
       logState.shellId = "";
       logState.shellLabel = "";
+      logState.ioOverlayEnabled = false;
+      updateStdinInjectorState();
+      syncIoOverlayToggle();
       logDrawer.classList.remove("is-open");
       logDrawer.setAttribute("aria-hidden", "true");
       document.body.classList.remove("has-log-drawer");
@@ -2723,6 +3013,60 @@
       }
       if (!options.fromPopState) {
         syncLogUrl("", true);
+      }
+    }
+    async function submitStdinInjection() {
+      const shellId = logState.shellId;
+      if (!shellId) {
+        updateStdinInjectorState("Select a shell first.");
+        return;
+      }
+      const data = stdinInput?.value ?? "";
+      const appendNewline = stdinNewlineInput?.checked === true;
+      if (!data && !appendNewline) {
+        updateStdinInjectorState("Nothing to send.");
+        return;
+      }
+      setStdinInjectorDisabled(true);
+      updateStdinInjectorState("Sending stdin...");
+      try {
+        await sendDashboardRequest("fws.shell.input", {
+          shell_id: shellId,
+          data,
+          append_newline: appendNewline
+        });
+        const bytesHint = new TextEncoder().encode(appendNewline ? `${data}
+` : data).length;
+        updateStdinInjectorState(`Sent ${bytesHint} byte${bytesHint === 1 ? "" : "s"} to stdin.`);
+      } catch (error) {
+        updateStdinInjectorState(error instanceof Error ? error.message : String(error));
+      } finally {
+        updateStdinInjectorState(stdinStatusEl?.textContent || void 0);
+      }
+    }
+    function compactStdinJson() {
+      const input = stdinInput;
+      if (!input) {
+        return;
+      }
+      const raw = input.value;
+      if (!raw.trim()) {
+        updateStdinInjectorState("Nothing to minify.");
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        const compact = JSON.stringify(parsed);
+        input.value = compact;
+        if (stdinNewlineInput) {
+          stdinNewlineInput.checked = true;
+        }
+        const bytesHint = new TextEncoder().encode(`${compact}
+`).length;
+        updateStdinInjectorState(`Minified JSON to one line (${bytesHint} byte${bytesHint === 1 ? "" : "s"} with newline).`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        updateStdinInjectorState(`Invalid JSON: ${message}`);
       }
     }
     function wireFilters(stream) {
@@ -2754,6 +3098,20 @@
     wireFilters("stderr");
     wirePrettyJsonToggle("stdout");
     wirePrettyJsonToggle("stderr");
+    ioOverlayInput?.addEventListener("change", () => {
+      const enabled = ioOverlayInput.checked && shellHasIoMetadata(logState.shellId);
+      logState.ioOverlayEnabled = enabled;
+      setStoredIoOverlay(logState.shellId, enabled);
+      syncIoOverlayToggle();
+      renderStream("stdout");
+    });
+    stdinForm?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void submitStdinInjection();
+    });
+    stdinJsonCompactButton?.addEventListener("click", () => {
+      compactStdinJson();
+    });
     if (logPauseInput) {
       logPauseInput.addEventListener("change", () => {
         logState.paused = logPauseInput.checked;

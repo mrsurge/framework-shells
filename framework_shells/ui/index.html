@@ -59,9 +59,37 @@
             <input type="checkbox" id="fws-log-pause" />
             <span>Pause</span>
           </label>
+          <label class="log-pause-toggle is-disabled" id="fws-io-overlay-wrap">
+            <input type="checkbox" id="fws-io-overlay" disabled />
+            <span>IO overlay</span>
+          </label>
           <div class="fws-status disconnected" id="fws-log-status">Disconnected</div>
         </div>
       </div>
+
+      <form class="stdin-injector" id="fws-stdin-form">
+        <div class="stdin-injector-header">
+          <div>
+            <div class="stdin-injector-title">STDIN Injection</div>
+            <div class="stdin-injector-subtitle" id="fws-stdin-status">Select a shell with live stdin.</div>
+          </div>
+          <div class="stdin-injector-actions">
+            <label class="stdin-newline-toggle">
+              <input type="checkbox" id="fws-stdin-newline" checked />
+              <span>Append newline</span>
+            </label>
+            <button type="submit" class="btn btn-small btn-secondary" id="fws-stdin-send">Send</button>
+            <button type="button" class="btn btn-small" id="fws-stdin-json-compact">Minify JSON</button>
+          </div>
+        </div>
+        <textarea
+          id="fws-stdin-input"
+          class="stdin-injector-input"
+          rows="3"
+          spellcheck="false"
+          placeholder='{"jsonrpc":"2.0","id":"probe","method":"ping","params":{}}'
+        ></textarea>
+      </form>
 
       <div class="log-drawer-body">
         <div class="log-pane">

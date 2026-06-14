@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
+SUPPORTED_BACKENDS = frozenset({"pipe", "pty", "proc"})
+
 
 class _ShellRecord(Protocol):
     id: object
@@ -29,6 +31,30 @@ class _ByteSubscription(Protocol):
 
 
 class _FrameworkShellManager(Protocol):
+    async def spawn_shell(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: str | None,
+        env: Mapping[str, str],
+        label: str,
+        spec_id: str,
+        subgroups: Sequence[str],
+        autostart: bool,
+    ) -> _ShellRecord: ...
+
+    async def spawn_shell_pty(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: str | None,
+        env: Mapping[str, str],
+        label: str,
+        spec_id: str,
+        subgroups: Sequence[str],
+        autostart: bool,
+    ) -> _ShellRecord: ...
+
     async def spawn_shell_pipe(
         self,
         command: Sequence[str],
@@ -55,7 +81,7 @@ class _FrameworkShellManager(Protocol):
 
 @runtime_checkable
 class _FrameworkShellWriter(Protocol):
-    async def write_to_shell(self, shell_id: str, data: str, *, append_newline: bool) -> None: ...
+    async def write_to_shell(self, shell_id: str, data: str, *, append_newline: bool) -> object: ...
 
 
 class _FrameworkShellsModule(Protocol):
@@ -63,6 +89,7 @@ class _FrameworkShellsModule(Protocol):
 
 
 class _RenderedShellSpec(Protocol):
+    backend: str
     env: Mapping[str, str]
     cwd: str | None
     id: str | None
@@ -84,7 +111,14 @@ class _ShellspecModule(Protocol):
     ) -> _RenderedShellSpec: ...
 
 
-class FerrousFrameworkPipe:
+def _normalize_backend(value: object) -> str:
+    backend = str(value or "pipe").strip().lower()
+    if backend not in SUPPORTED_BACKENDS:
+        raise ValueError(f"unsupported ferrous framework backend: {backend!r}")
+    return backend
+
+
+class FerrousFrameworkShell:
     def __init__(
         self,
         command: Sequence[str],
@@ -95,6 +129,7 @@ class FerrousFrameworkPipe:
         subgroups: Sequence[str],
         shellspec_path: str | None = None,
         shellspec_entry: str | None = None,
+        backend: str = "pipe",
     ) -> None:
         self._command = list(command)
         self._cwd = cwd
@@ -104,6 +139,7 @@ class FerrousFrameworkPipe:
         self._subgroups = list(subgroups)
         self._shellspec_path = shellspec_path
         self._shellspec_entry = shellspec_entry
+        self._backend = _normalize_backend(backend)
         self._lines: "queue.Queue[str | None]" = queue.Queue()
         self._ready = threading.Event()
         self._ready_error: BaseException | None = None
@@ -114,14 +150,14 @@ class FerrousFrameworkPipe:
         self._shell_id = ""
         self._thread = threading.Thread(
             target=self._thread_main,
-            name="ferrous-framework-pipe",
+            name=f"ferrous-framework-{self._backend}",
             daemon=True,
         )
         self._thread.start()
         if not self._ready.wait(timeout=10.0):
-            raise TimeoutError("timed out starting ferrous_framework pipe")
+            raise TimeoutError(f"timed out starting ferrous_framework {self._backend} shell")
         if self._ready_error is not None:
-            raise RuntimeError("failed to start ferrous_framework pipe") from self._ready_error
+            raise RuntimeError(f"failed to start ferrous_framework {self._backend} shell") from self._ready_error
 
     def shell_id(self) -> str:
         return self._shell_id
@@ -148,7 +184,7 @@ class FerrousFrameworkPipe:
         try:
             future.result(timeout=5.0)
         except Exception as exc:
-            raise RuntimeError("failed to terminate ferrous_framework pipe") from exc
+            raise RuntimeError("failed to terminate ferrous_framework shell") from exc
 
     def _thread_main(self) -> None:
         loop = asyncio.new_event_loop()
@@ -181,24 +217,68 @@ class FerrousFrameworkPipe:
             run_id=os.environ.get("FRAMEWORK_SHELLS_RUN_ID", "app-server")
         )
         self._mgr = mgr
-        command, cwd, env, spec_id, subgroups, pipe_config = self._render_shellspec()
-        record = await mgr.spawn_shell_pipe(
+        command, cwd, env, spec_id, subgroups, backend, pipe_config = self._render_shellspec()
+        record = await self._spawn_record(
+            backend=backend,
+            command=command,
+            cwd=cwd,
+            env=env,
+            spec_id=spec_id,
+            subgroups=subgroups,
+            pipe_config=pipe_config,
+        )
+        self._backend = backend
+        self._shell_id = str(record.id)
+        if backend == "pipe":
+            await self._wait_for_pipe_stdin()
+        self._subscription = await mgr.subscribe_output_bytes(self._shell_id)
+        self._ready.set()
+        await self._pump_output()
+
+    async def _spawn_record(
+        self,
+        *,
+        backend: str,
+        command: Sequence[str],
+        cwd: str | None,
+        env: Mapping[str, str],
+        spec_id: str,
+        subgroups: Sequence[str],
+        pipe_config: Mapping[str, object],
+    ) -> _ShellRecord:
+        mgr = self._require_manager()
+        if backend == "pipe":
+            return await mgr.spawn_shell_pipe(
+                command,
+                cwd=cwd,
+                env=env,
+                label=self._label,
+                spec_id=spec_id,
+                subgroups=subgroups,
+                pipe_config=pipe_config,
+                autostart=True,
+            )
+        if backend == "pty":
+            return await mgr.spawn_shell_pty(
+                command,
+                cwd=cwd,
+                env=env,
+                label=self._label,
+                spec_id=spec_id,
+                subgroups=subgroups,
+                autostart=True,
+            )
+        return await mgr.spawn_shell(
             command,
             cwd=cwd,
             env=env,
             label=self._label,
             spec_id=spec_id,
             subgroups=subgroups,
-            pipe_config=pipe_config,
             autostart=True,
         )
-        self._shell_id = str(record.id)
-        await self._wait_for_pipe_state()
-        self._subscription = await mgr.subscribe_output_bytes(self._shell_id)
-        self._ready.set()
-        await self._pump_output()
 
-    async def _wait_for_pipe_state(self) -> None:
+    async def _wait_for_pipe_stdin(self) -> None:
         deadline = time.monotonic() + 5.0
         while True:
             mgr = self._require_manager()
@@ -212,15 +292,17 @@ class FerrousFrameworkPipe:
 
     def _render_shellspec(
         self,
-    ) -> tuple[list[str], str | None, dict[str, str], str, list[str], dict[str, object]]:
+    ) -> tuple[list[str], str | None, dict[str, str], str, list[str], str, dict[str, object]]:
         if not self._shellspec_path:
+            pipe_config: dict[str, object] = {"mode": "native_pipe_testing"} if self._backend == "pipe" else {}
             return (
                 self._command,
                 self._cwd,
                 self._env,
                 self._spec_id,
                 self._subgroups,
-                {"mode": "native_pipe_testing"},
+                self._backend,
+                pipe_config,
             )
         shellspec = cast(
             _ShellspecModule,
@@ -244,13 +326,15 @@ class FerrousFrameworkPipe:
         )
         command = rendered.normalized_command()
         env = {**self._env, **dict(rendered.env)}
+        backend = _normalize_backend(getattr(rendered, "backend", None) or self._backend)
         return (
             command,
             rendered.cwd or self._cwd,
             env,
             rendered.id or self._spec_id,
             list(rendered.subgroups or self._subgroups),
-            dict(rendered.pipe or {"mode": "native_pipe_testing"}),
+            backend,
+            dict[str, object](rendered.pipe or ({"mode": "native_pipe_testing"} if backend == "pipe" else {})),
         )
 
     async def _pump_output(self) -> None:
@@ -282,13 +366,15 @@ class FerrousFrameworkPipe:
     def _process_exited(self) -> bool:
         state = self._require_manager().get_pipe_state(self._shell_id)
         process = state.process if state is not None else None
-        return process is None or process.returncode is not None
+        return process is not None and process.returncode is not None
 
     async def _write_line(self, line: str) -> None:
         mgr = self._require_manager()
         if isinstance(mgr, _FrameworkShellWriter):
             await mgr.write_to_shell(self._shell_id, line, append_newline=True)
             return
+        if self._backend != "pipe":
+            raise RuntimeError(f"stdin write is not available through legacy fallback for backend {self._backend}")
         await mgr.write_to_pipe(self._shell_id, f"{line}\n")
 
     async def _terminate(self) -> None:
@@ -315,5 +401,31 @@ class FerrousFrameworkPipe:
 
     def _require_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is None:
-            raise RuntimeError("ferrous_framework pipe loop is not running")
+            raise RuntimeError("ferrous_framework shell loop is not running")
         return self._loop
+
+
+class FerrousFrameworkPipe(FerrousFrameworkShell):
+    def __init__(
+        self,
+        command: Sequence[str],
+        cwd: str | None,
+        env: dict[str, str],
+        label: str,
+        spec_id: str,
+        subgroups: Sequence[str],
+        shellspec_path: str | None = None,
+        shellspec_entry: str | None = None,
+        backend: str = "pipe",
+    ) -> None:
+        super().__init__(
+            command=command,
+            cwd=cwd,
+            env=env,
+            label=label,
+            spec_id=spec_id,
+            subgroups=subgroups,
+            shellspec_path=shellspec_path,
+            shellspec_entry=shellspec_entry,
+            backend=backend,
+        )

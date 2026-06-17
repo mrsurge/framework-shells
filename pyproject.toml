@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "framework_shells"
-version = "0.0.55"
+version = "0.0.56"
 description = "Framework-agnostic process orchestration with PTY, pipe, and dtach backends."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -14,6 +14,7 @@ dependencies = [
   "aiohttp>=3,<4",
   "pyyaml",
   "python-socketio>=5,<6",
+  "uvicorn>=0.23,<1",
 ]
 
 [project.scripts]

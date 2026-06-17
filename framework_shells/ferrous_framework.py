@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import os
 import queue
 import threading
@@ -88,6 +89,34 @@ class _FrameworkShellsModule(Protocol):
     async def get_manager(self, *, run_id: str) -> _FrameworkShellManager: ...
 
 
+class _FastApiModule(Protocol):
+    def FastAPI(self) -> object: ...
+
+
+class _UvicornServer(Protocol):
+    should_exit: bool
+
+    async def serve(self, sockets: list[socket.socket] | None = None) -> None: ...
+
+
+class _UvicornModule(Protocol):
+    def Config(
+        self,
+        app: object,
+        *,
+        host: str,
+        port: int,
+        log_level: str,
+        lifespan: str,
+    ) -> object: ...
+
+    def Server(self, config: object) -> _UvicornServer: ...
+
+
+class _SocketioBackendModule(Protocol):
+    def mount_fws_dashboard_runtime(self, app: object) -> None: ...
+
+
 class _RenderedShellSpec(Protocol):
     backend: str
     env: Mapping[str, str]
@@ -118,6 +147,127 @@ def _normalize_backend(value: object) -> str:
     return backend
 
 
+def _framework_secret() -> str:
+    secret = os.environ.get("FRAMEWORK_SHELLS_SECRET", "").strip()
+    if secret:
+        return secret
+    secret = "ferrous_secret_" + os.urandom(16).hex()
+    os.environ["FRAMEWORK_SHELLS_SECRET"] = secret
+    return secret
+
+
+class FerrousFrameworkHost:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        env: Mapping[str, str] | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        self._host = str(host or "127.0.0.1")
+        self._requested_port = int(port)
+        self._env = {str(key): str(value) for key, value in dict(env or {}).items()}
+        os.environ.update(
+            {
+                key: value
+                for key, value in self._env.items()
+                if key.startswith("FRAMEWORK_SHELLS_") or key == "TE_FRAMEWORK_URL"
+            }
+        )
+        if run_id is not None:
+            os.environ["FRAMEWORK_SHELLS_RUN_ID"] = str(run_id)
+        elif "FRAMEWORK_SHELLS_RUN_ID" not in os.environ:
+            os.environ["FRAMEWORK_SHELLS_RUN_ID"] = "ferrous-framework"
+        self._run_id = os.environ["FRAMEWORK_SHELLS_RUN_ID"]
+        self._secret = _framework_secret()
+        self._ready = threading.Event()
+        self._closed = threading.Event()
+        self._ready_error: BaseException | None = None
+        self._server: _UvicornServer | None = None
+        self._bound_socket = self._bind_socket()
+        bound_port = self._bound_socket.getsockname()[1]
+        self._port = int(bound_port)
+        self._url = f"http://{self._host}:{self._port}"
+        os.environ["FRAMEWORK_SHELLS_FWS_SOCKETIO_URL"] = self._url
+        os.environ["TE_FRAMEWORK_URL"] = self._url
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            name="ferrous-framework-host",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._ready.wait(timeout=10.0):
+            raise TimeoutError("timed out starting ferrous_framework host")
+        if self._ready_error is not None:
+            raise RuntimeError("failed to start ferrous_framework host") from self._ready_error
+
+    def url(self) -> str:
+        return self._url
+
+    def port(self) -> int:
+        return self._port
+
+    def child_env(self) -> dict[str, str]:
+        return {
+            **self._env,
+            "FRAMEWORK_SHELLS_SECRET": self._secret,
+            "FRAMEWORK_SHELLS_RUN_ID": self._run_id,
+            "FRAMEWORK_SHELLS_FWS_SOCKETIO_URL": self._url,
+            "TE_FRAMEWORK_URL": self._url,
+        }
+
+    def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        server = self._server
+        if server is not None:
+            server.should_exit = True
+        self._thread.join(timeout=5.0)
+
+    def _bind_socket(self) -> socket.socket:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self._host, self._requested_port))
+            sock.listen(socket.SOMAXCONN)
+            sock.set_inheritable(False)
+            return sock
+        except Exception:
+            sock.close()
+            raise
+
+    def _thread_main(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._serve())
+        except BaseException as exc:
+            self._ready_error = exc
+            self._ready.set()
+        finally:
+            try:
+                self._bound_socket.close()
+            except Exception:
+                pass
+            loop.close()
+
+    async def _serve(self) -> None:
+        fastapi = cast(_FastApiModule, importlib.import_module("fastapi"))
+        uvicorn = cast(_UvicornModule, importlib.import_module("uvicorn"))
+        socketio_backend = cast(
+            _SocketioBackendModule,
+            importlib.import_module("framework_shells.api.socketio_backend"),
+        )
+        app = fastapi.FastAPI()
+        socketio_backend.mount_fws_dashboard_runtime(app)
+        config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning", lifespan="on")
+        server = uvicorn.Server(config)
+        self._server = server
+        self._ready.set()
+        await server.serve(sockets=[self._bound_socket])
+
+
 class FerrousFrameworkShell:
     def __init__(
         self,
@@ -130,6 +280,7 @@ class FerrousFrameworkShell:
         shellspec_path: str | None = None,
         shellspec_entry: str | None = None,
         backend: str = "pipe",
+        ctx: Mapping[str, str] | None = None,
     ) -> None:
         self._command = list(command)
         self._cwd = cwd
@@ -140,6 +291,7 @@ class FerrousFrameworkShell:
         self._shellspec_path = shellspec_path
         self._shellspec_entry = shellspec_entry
         self._backend = _normalize_backend(backend)
+        self._ctx = {str(key): str(value) for key, value in dict(ctx or {}).items()}
         self._lines: "queue.Queue[str | None]" = queue.Queue()
         self._ready = threading.Event()
         self._ready_error: BaseException | None = None
@@ -318,10 +470,7 @@ class FerrousFrameworkShell:
             spec = next(iter(specs.values()))
         rendered = shellspec.render_shellspec(
             spec,
-            ctx={
-                "PYTHON": self._command[0],
-                "CWD": self._cwd or os.getcwd(),
-            },
+            ctx=self._render_ctx(),
             env=self._env,
         )
         command = rendered.normalized_command()
@@ -336,6 +485,12 @@ class FerrousFrameworkShell:
             backend,
             dict[str, object](rendered.pipe or ({"mode": "native_pipe_testing"} if backend == "pipe" else {})),
         )
+
+    def _render_ctx(self) -> dict[str, str]:
+        ctx = dict(self._ctx)
+        ctx.setdefault("PYTHON", self._command[0] if self._command else "")
+        ctx.setdefault("CWD", self._cwd or os.getcwd())
+        return ctx
 
     async def _pump_output(self) -> None:
         buffer = bytearray()
@@ -417,6 +572,7 @@ class FerrousFrameworkPipe(FerrousFrameworkShell):
         shellspec_path: str | None = None,
         shellspec_entry: str | None = None,
         backend: str = "pipe",
+        ctx: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(
             command=command,
@@ -428,4 +584,5 @@ class FerrousFrameworkPipe(FerrousFrameworkShell):
             shellspec_path=shellspec_path,
             shellspec_entry=shellspec_entry,
             backend=backend,
+            ctx=ctx,
         )

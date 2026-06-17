@@ -32,10 +32,24 @@ Rust application
 
 The PyO3 bridge is an interoperability path, not the final architecture. It exists so Rust consumers can participate in the current Python FWS environment while Ferrous grows the Rust-owned runtime pieces.
 
+Bridge-hosted root state:
+
+```text
+Rust application
+  -> ferrous-framework FerrousFrameworkHost
+  -> PyO3 bridge
+  -> framework-shells FastAPI/FWS Socket.IO runtime
+  -> child processes inherit FWS URL/secret/run-id env
+```
+
+This is the current transitional answer for Rust programs that are the FWS initializer. It preserves the root/peer split while leaving room for a later Rust-owned Axum/socketioxide host behind the same Ferrous host API.
+
 ## Current Contract
 
 - `framework-shells` owns the Python bridge module: `framework_shells.ferrous_framework`.
 - `ferrous-framework` defaults its PyO3 bridge import to `framework_shells.ferrous_framework`.
+- `FerrousFrameworkHost` starts a bridge-backed FWS dashboard/Socket.IO root and returns child env for peer managers.
+- `FerrousFrameworkHost` supports free-port parity through `port = 0`.
 - `FerrousFrameworkPipe` remains the compatibility class name for current ALS-RS usage.
 - ALS-RS consumes `ferrous-framework` as a Rust submodule/crate.
 - ALS-RS runtime must have `framework-shells >= 0.0.54` installed so the bridge import exists.
@@ -158,8 +172,8 @@ TE2 will likely own:
 As of this adoption note:
 
 - FWS bridge module: `framework_shells/ferrous_framework.py`.
-- FWS version containing bridge: `0.0.54`.
-- `ferrous-framework` expected head: `6d78653 Add generic Ferrous shell API`.
+- FWS version containing generic bridge, shellspec ctx passthrough, and bridge-hosted FWS root: `0.0.56`.
+- `ferrous-framework` expected head: `c7e9e75 Add Ferrous FWS host bridge`.
 - Crate default module: `framework_shells.ferrous_framework`.
 - Crate default class: `FerrousFrameworkPipe`.
 - ALS-RS should pass, or inherit, the same module/class defaults.

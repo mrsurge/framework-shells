@@ -55,6 +55,47 @@ This is the current transitional answer for Rust programs that are the FWS initi
 - ALS-RS runtime must have `framework-shells >= 0.0.54` installed so the bridge import exists.
 - The current bridge supports pipe-backed stdio JSON-RPC use cases first.
 
+## Bridge Version Pinning
+
+The transitional PyO3 bridge must fail fast when the Rust crate and installed Python bridge drift.
+
+Immediate direction:
+
+- Keep `framework_shells.ferrous_framework` importable for current consumers.
+- Add bridge metadata/version reporting to the Python module before expanding the bridge surface further.
+- Have `ferrous-framework` check that bridge metadata before selecting the Python bridge path.
+- Preserve explicit `python_module` / `python_class` overrides for debugging and migration.
+
+End-game direction:
+
+- Move the canonical Python compatibility shim into the `ferrous-framework` crate repo.
+- Load that embedded shim when the `pyo3-embed` bridge path is selected.
+- Keep any `framework_shells.ferrous_framework` module as a compatibility export, not the authoritative bridge implementation.
+- Let the Rust crate version own the transitional bridge behavior until the native Rust path no longer needs Python.
+
+This pins adapter behavior to the crate version while still allowing the embedded shim to import installed `framework_shells` runtime APIs during the transition.
+
+## Parity Test Contract
+
+Ferrous and Python FWS must share parity cases for shellspec rendering while the native Rust implementation grows.
+
+Current parity fixture coverage:
+
+- backend rendering surfaces: `proc`, `pipe`, `pty`
+- `${ctx:KEY}`
+- `${env:KEY}`
+- direct `${KEY}` resolution as ctx first, env second
+- missing ctx/env values resolving to empty strings
+- `${free_port}` stability within one rendered shell
+- command, cwd, env, subgroups, pipe config, readiness, and autostart rendering
+
+Current fixture locations:
+
+- Python FWS: `tests/fixtures/shellspec_parity_cases.json`
+- Ferrous crate: `.external/ferrous-framework/testdata/shellspec_parity_cases.json`
+
+The mirrored fixture is acceptable during the ignored-checkout workflow. Once the canonical bridge source moves into `ferrous-framework`, the fixture should become crate-owned and FWS should consume that source or mirror it with an explicit drift check.
+
 Dependency direction today:
 
 ```text
@@ -172,8 +213,8 @@ TE2 will likely own:
 As of this adoption note:
 
 - FWS bridge module: `framework_shells/ferrous_framework.py`.
-- FWS version containing generic bridge, shellspec ctx passthrough, and bridge-hosted FWS root: `0.0.56`.
-- `ferrous-framework` expected head: `c7e9e75 Add Ferrous FWS host bridge`.
+- FWS version containing generic bridge, shellspec ctx passthrough, bridge-hosted FWS root, and shellspec parity tests: `0.0.57`.
+- `ferrous-framework` expected head: `4206d37 Add shellspec parity tests`.
 - Crate default module: `framework_shells.ferrous_framework`.
 - Crate default class: `FerrousFrameworkPipe`.
 - ALS-RS should pass, or inherit, the same module/class defaults.

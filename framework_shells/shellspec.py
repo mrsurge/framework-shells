@@ -33,7 +33,7 @@ class ReadinessProbe:
     pattern: str | None = None
     # tcp_port
     host: str = "127.0.0.1"
-    port: int | None = None
+    port: int | str | None = None
     # http_ok
     url: str | None = None
     status_codes: list[int] = field(default_factory=lambda: [200])
@@ -239,7 +239,7 @@ def render_shellspec(spec: ShellSpec, *, ctx: Mapping[str, object] | None = None
             timeout=_float_or_default(rendered_probe_raw.get("timeout"), readiness.timeout),
             pattern=_string_or_none(rendered_probe_raw.get("pattern")),
             host=str(rendered_probe_raw.get("host") or readiness.host),
-            port=port if isinstance(port, int) else None,
+            port=port if isinstance(port, (int, str)) else None,
             url=_string_or_none(rendered_probe_raw.get("url")),
             status_codes=_int_list(rendered_probe_raw.get("status_codes"), [200]),
         )
@@ -283,8 +283,8 @@ def _parse_readiness(raw: object) -> ReadinessProbe | None:
     if not isinstance(status_codes, list):
         status_codes = [200]
     port_val = raw_map.get("port")
-    if isinstance(port_val, str) and port_val.strip().isdigit():
-        port_val = int(port_val.strip())
+    if isinstance(port_val, str):
+        port_val = int(port_val.strip()) if port_val.strip().isdigit() else port_val
     elif isinstance(port_val, (int, float)):
         port_val = int(port_val)
     else:

@@ -1,0 +1,153 @@
+{
+  "version": 1,
+  "free_port_marker": "__FREE_PORT__",
+  "cases": [
+    {
+      "name": "proc_ctx_env_precedence",
+      "entry": "worker",
+      "ctx": {
+        "APP_ID": "ctx-app",
+        "PROJECT_ROOT": "/ctx/project",
+        "DUPLICATE": "ctx-wins"
+      },
+      "env": {
+        "PROJECT_ROOT": "/env/project",
+        "DUPLICATE": "env-loses",
+        "EXTRA_FLAG": "from-env"
+      },
+      "document": {
+        "version": "1",
+        "shells": {
+          "worker": {
+            "id": "worker-${ctx:APP_ID}",
+            "backend": "proc",
+            "cwd": "${PROJECT_ROOT}",
+            "command": ["python", "-m", "worker", "${DUPLICATE}", "${env:EXTRA_FLAG}"],
+            "env": {
+              "APP_ID": "${ctx:APP_ID}",
+              "PROJECT_ROOT": "${PROJECT_ROOT}",
+              "EXPLICIT_ENV_ROOT": "${env:PROJECT_ROOT}",
+              "DUPLICATE": "${DUPLICATE}"
+            },
+            "subgroups": ["app:${ctx:APP_ID}", "root:${PROJECT_ROOT}"],
+            "autostart": false
+          }
+        }
+      },
+      "expect": {
+        "id": "worker-ctx-app",
+        "backend": "proc",
+        "cwd": "/ctx/project",
+        "command": ["python", "-m", "worker", "ctx-wins", "from-env"],
+        "env": {
+          "APP_ID": "ctx-app",
+          "PROJECT_ROOT": "/ctx/project",
+          "EXPLICIT_ENV_ROOT": "/env/project",
+          "DUPLICATE": "ctx-wins"
+        },
+        "subgroups": ["app:ctx-app", "root:/ctx/project"],
+        "autostart": false
+      }
+    },
+    {
+      "name": "pipe_free_port_stable",
+      "entry": "jsonrpc_pipe",
+      "ctx": {
+        "APP_ID": "pipe-app",
+        "PROJECT_ROOT": "/work/pipe"
+      },
+      "env": {},
+      "document": {
+        "version": "1",
+        "shells": {
+          "jsonrpc_pipe": {
+            "backend": "pipe",
+            "cwd": "${ctx:PROJECT_ROOT}",
+            "command": ["node", "server.mjs", "${free_port}"],
+            "env": {
+              "PORT": "${free_port}",
+              "APP_ID": "${APP_ID}",
+              "MISSING_CTX": "${ctx:NOT_SET}",
+              "MISSING_ENV": "${env:NOT_SET}"
+            },
+            "subgroups": ["pipe", "${APP_ID}"],
+            "pipe": {
+              "mode": "native_pipe_testing"
+            },
+            "readiness": {
+              "type": "tcp_port",
+              "host": "127.0.0.1",
+              "port": "${free_port}",
+              "timeout": "5"
+            }
+          }
+        }
+      },
+      "expect": {
+        "id": "jsonrpc_pipe",
+        "backend": "pipe",
+        "cwd": "/work/pipe",
+        "command": ["node", "server.mjs", "__FREE_PORT__"],
+        "env": {
+          "PORT": "__FREE_PORT__",
+          "APP_ID": "pipe-app",
+          "MISSING_CTX": "",
+          "MISSING_ENV": ""
+        },
+        "subgroups": ["pipe", "pipe-app"],
+        "pipe": {
+          "mode": "native_pipe_testing"
+        },
+        "readiness": {
+          "type": "tcp_port",
+          "host": "127.0.0.1",
+          "port": "__FREE_PORT__",
+          "timeout": 5.0,
+          "status_codes": [200]
+        },
+        "autostart": true
+      }
+    },
+    {
+      "name": "pty_rendering_surface",
+      "entry": "terminal",
+      "ctx": {
+        "APP_ID": "term-app",
+        "PROJECT_ROOT": "/term/root",
+        "SHELL": "/bin/sh"
+      },
+      "env": {
+        "SHELL": "/env/shell"
+      },
+      "document": {
+        "version": "1",
+        "shells": {
+          "terminal": {
+            "backend": "pty",
+            "pty_mode": "interactive",
+            "cwd": "${ctx:PROJECT_ROOT}",
+            "command": ["${SHELL}", "-lc", "printf ${ctx:APP_ID}"],
+            "env": {
+              "TERM_APP": "${APP_ID}",
+              "SHELL_FROM_ENV": "${env:SHELL}"
+            },
+            "subgroups": ["pty", "${APP_ID}"]
+          }
+        }
+      },
+      "expect": {
+        "id": "terminal",
+        "backend": "pty",
+        "pty_mode": "interactive",
+        "cwd": "/term/root",
+        "command": ["/bin/sh", "-lc", "printf term-app"],
+        "env": {
+          "TERM_APP": "term-app",
+          "SHELL_FROM_ENV": "/env/shell"
+        },
+        "subgroups": ["pty", "term-app"],
+        "autostart": true
+      }
+    }
+  ]
+}

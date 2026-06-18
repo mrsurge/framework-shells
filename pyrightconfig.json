@@ -3,6 +3,7 @@
   "include": [
     "framework_shells",
     "scripts/release",
+    "tests",
     "setup.py"
   ],
   "exclude": [

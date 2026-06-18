@@ -50,6 +50,7 @@ This is the current transitional answer for Rust programs that are the FWS initi
 - `ferrous-framework` defaults its PyO3 bridge import to `framework_shells.ferrous_framework`.
 - `FerrousFrameworkHost` starts a bridge-backed FWS dashboard/Socket.IO root and returns child env for peer managers.
 - `FerrousFrameworkHost` supports free-port parity through `port = 0`.
+- `FerrousFrameworkHost` exposes shutdown group/tree hooks that return typed metrics while delegating to the existing FWS shutdown implementation.
 - `FerrousFrameworkPipe` remains the compatibility class name for current ALS-RS usage.
 - ALS-RS consumes `ferrous-framework` as a Rust submodule/crate.
 - ALS-RS runtime must have `framework-shells >= 0.0.54` installed so the bridge import exists.
@@ -62,8 +63,8 @@ The transitional PyO3 bridge must fail fast when the Rust crate and installed Py
 Immediate direction:
 
 - Keep `framework_shells.ferrous_framework` importable for current consumers.
-- Add bridge metadata/version reporting to the Python module before expanding the bridge surface further.
-- Have `ferrous-framework` check that bridge metadata before selecting the Python bridge path.
+- The Python bridge exposes `ferrous_bridge_info()` with bridge API, `framework_shells` version, and support flags.
+- `ferrous-framework` checks that bridge metadata before selecting the Python bridge path.
 - Preserve explicit `python_module` / `python_class` overrides for debugging and migration.
 
 End-game direction:
@@ -95,6 +96,47 @@ Current fixture locations:
 - Ferrous crate: `.external/ferrous-framework/testdata/shellspec_parity_cases.json`
 
 The mirrored fixture is acceptable during the ignored-checkout workflow. Once the canonical bridge source moves into `ferrous-framework`, the fixture should become crate-owned and FWS should consume that source or mirror it with an explicit drift check.
+
+## Shutdown Hook Contract
+
+Ferrous exposes bridge-host shutdown hooks as management calls, not as a replacement shutdown algorithm:
+
+```text
+Rust caller
+  -> FerrousFrameworkHost shutdown call
+  -> PyO3 bridge
+  -> existing framework-shells shutdown_app_group/shutdown_snapshot behavior
+  -> typed shutdown result DTO
+```
+
+Current host methods:
+
+- `shutdown_group(app_id)`: shuts down the running FWS app/group matching `app_id`.
+- `shutdown_tree(root_pids)`: shuts down a process snapshot rooted at the provided root PIDs. An empty root list targets the whole snapshot.
+
+The response shape is stable across both methods:
+
+```json
+{
+  "ok": true,
+  "kind": "shutdown_group",
+  "target": "example-app",
+  "started_at_ms": 1780000000000,
+  "ended_at_ms": 1780000000250,
+  "elapsed_ms": 250,
+  "root_pids": [1234],
+  "stats": {
+    "total": 1,
+    "terminated": 1,
+    "clean_exits": 1,
+    "force_killed": 0,
+    "errors": []
+  },
+  "events": []
+}
+```
+
+The hook may collect shutdown log/event strings from the existing shutdown helper, but it must not change ordering, force-kill behavior, descendant discovery, or group matching semantics.
 
 Dependency direction today:
 
@@ -213,8 +255,8 @@ TE2 will likely own:
 As of this adoption note:
 
 - FWS bridge module: `framework_shells/ferrous_framework.py`.
-- FWS version containing generic bridge, shellspec ctx passthrough, bridge-hosted FWS root, and shellspec parity tests: `0.0.57`.
-- `ferrous-framework` expected head: `4206d37 Add shellspec parity tests`.
+- FWS version containing generic bridge, shellspec ctx passthrough, bridge-hosted FWS root, shellspec parity tests, and bridge metadata: `0.0.57`.
+- `ferrous-framework` expected head: local checkout with bridge metadata validation, shellspec parity tests, and bridge-host shutdown DTO support.
 - Crate default module: `framework_shells.ferrous_framework`.
 - Crate default class: `FerrousFrameworkPipe`.
 - ALS-RS should pass, or inherit, the same module/class defaults.

@@ -18,7 +18,7 @@ import uuid
 import inspect
 from asyncio import Lock as AsyncLock
 from asyncio import Queue as AsyncQueue
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import AsyncIterator, Dict, Iterable, List, Literal, Optional, Protocol, cast
 
@@ -262,7 +262,12 @@ class FrameworkShellManager:
 
         return ProcessSnapshot(captured_at=time.time(), processes=processes)
 
-    async def shutdown_app_group(self, app_id: str) -> dict[str, object]:
+    async def shutdown_app_group(
+        self,
+        app_id: str,
+        *,
+        log: Callable[[str], None] | None = None,
+    ) -> dict[str, object]:
         """UI-equivalent shutdown for an app/group id.
 
         Mirrors `/fws/action/app/{app_id}/shutdown` behavior: find running shells
@@ -289,6 +294,7 @@ class FrameworkShellManager:
             manager=self,
             policy=ShutdownPolicy(types_last=[]),
             root_pids=root_pids,
+            log=log,
         )
         return {"ok": True, "data": {"root_pids": root_pids, "stats": stats}}
 

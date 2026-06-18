@@ -7,11 +7,31 @@ import queue
 import threading
 import time
 import importlib
-from collections.abc import Mapping, Sequence
+import importlib.metadata
+from collections.abc import Coroutine, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
 SUPPORTED_BACKENDS = frozenset({"pipe", "pty", "proc"})
+FERROUS_BRIDGE_API = 1
+FERROUS_BRIDGE_SUPPORTS = {
+    "ctx": True,
+    "host": True,
+    "free_port": True,
+    "shellspec_parity": True,
+}
+
+
+def ferrous_bridge_info() -> dict[str, object]:
+    try:
+        version = importlib.metadata.version("framework_shells")
+    except importlib.metadata.PackageNotFoundError:
+        version = "0.0.0+editable"
+    return {
+        "bridge_api": FERROUS_BRIDGE_API,
+        "framework_shells_version": version,
+        "supports": dict(FERROUS_BRIDGE_SUPPORTS),
+    }
 
 
 class _ShellRecord(Protocol):
@@ -156,6 +176,81 @@ def _framework_secret() -> str:
     return secret
 
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _object_mapping(value: object) -> Mapping[str, object]:
+    return cast(Mapping[str, object], value) if isinstance(value, dict) else {}
+
+
+def _int_list(value: object) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for item in cast(list[object], value):
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, (int, float, str)):
+            try:
+                out.append(int(item))
+            except Exception:
+                pass
+    return out
+
+
+def _int_metric(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float, str)):
+        try:
+            return int(value)
+        except Exception:
+            return 0
+    return 0
+
+
+def _stats_payload(value: object) -> dict[str, object]:
+    mapping = _object_mapping(value)
+    errors_value = mapping.get("errors")
+    errors = cast(list[object], errors_value) if isinstance(errors_value, list) else []
+    return {
+        "total": _int_metric(mapping.get("total")),
+        "terminated": _int_metric(mapping.get("terminated")),
+        "clean_exits": _int_metric(mapping.get("clean_exits")),
+        "force_killed": _int_metric(mapping.get("force_killed")),
+        "errors": [str(item) for item in errors],
+    }
+
+
+def build_shutdown_response(
+    *,
+    kind: str,
+    target: str,
+    started_at_ms: int,
+    ended_at_ms: int,
+    root_pids: Sequence[int],
+    stats: object,
+    events: Sequence[str],
+    note: str | None = None,
+    ok: bool = True,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "ok": ok,
+        "kind": kind,
+        "target": target,
+        "started_at_ms": started_at_ms,
+        "ended_at_ms": ended_at_ms,
+        "elapsed_ms": max(0, ended_at_ms - started_at_ms),
+        "root_pids": [int(pid) for pid in root_pids],
+        "stats": _stats_payload(stats),
+        "events": [str(event) for event in events],
+    }
+    if note:
+        payload["note"] = note
+    return payload
+
+
 class FerrousFrameworkHost:
     def __init__(
         self,
@@ -184,6 +279,7 @@ class FerrousFrameworkHost:
         self._closed = threading.Event()
         self._ready_error: BaseException | None = None
         self._server: _UvicornServer | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._bound_socket = self._bind_socket()
         bound_port = self._bound_socket.getsockname()[1]
         self._port = int(bound_port)
@@ -216,6 +312,13 @@ class FerrousFrameworkHost:
             "TE_FRAMEWORK_URL": self._url,
         }
 
+    def shutdown_group(self, app_id: str) -> dict[str, object]:
+        return self._run_host_coro(self._shutdown_group(str(app_id)))
+
+    def shutdown_tree(self, root_pids: Sequence[int] | None = None) -> dict[str, object]:
+        roots = [int(pid) for pid in (root_pids or [])]
+        return self._run_host_coro(self._shutdown_tree(roots))
+
     def close(self) -> None:
         if self._closed.is_set():
             return
@@ -239,6 +342,7 @@ class FerrousFrameworkHost:
 
     def _thread_main(self) -> None:
         loop = asyncio.new_event_loop()
+        self._loop = loop
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self._serve())
@@ -251,6 +355,16 @@ class FerrousFrameworkHost:
             except Exception:
                 pass
             loop.close()
+
+    def _require_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is None or self._loop.is_closed():
+            raise RuntimeError("ferrous_framework host loop is not running")
+        return self._loop
+
+    def _run_host_coro(self, coro: Coroutine[object, object, dict[str, object]]) -> dict[str, object]:
+        loop = self._require_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
 
     async def _serve(self) -> None:
         fastapi = cast(_FastApiModule, importlib.import_module("fastapi"))
@@ -266,6 +380,55 @@ class FerrousFrameworkHost:
         self._server = server
         self._ready.set()
         await server.serve(sockets=[self._bound_socket])
+
+    async def _shutdown_group(self, app_id: str) -> dict[str, object]:
+        from .shared_manager import get_manager
+
+        started_at_ms = _now_ms()
+        events: list[str] = []
+        mgr = await get_manager()
+        result = await mgr.shutdown_app_group(app_id, log=events.append)
+        ended_at_ms = _now_ms()
+        data = _object_mapping(result.get("data"))
+        return build_shutdown_response(
+            kind="shutdown_group",
+            target=app_id,
+            started_at_ms=started_at_ms,
+            ended_at_ms=ended_at_ms,
+            root_pids=_int_list(data.get("root_pids")),
+            stats=data.get("stats"),
+            events=events,
+            note=str(data.get("note")) if data.get("note") else None,
+            ok=bool(result.get("ok", True)),
+        )
+
+    async def _shutdown_tree(self, root_pids: Sequence[int]) -> dict[str, object]:
+        from .shared_manager import get_manager
+        from .shutdown import ShutdownPolicy, shutdown_snapshot
+
+        started_at_ms = _now_ms()
+        events: list[str] = []
+        mgr = await get_manager()
+        shells = await mgr.list_shells()
+        snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
+        roots = [int(pid) for pid in root_pids]
+        stats = await shutdown_snapshot(
+            snapshot,
+            manager=mgr,
+            policy=ShutdownPolicy(types_last=[]),
+            root_pids=roots or None,
+            log=events.append,
+        )
+        ended_at_ms = _now_ms()
+        return build_shutdown_response(
+            kind="shutdown_tree",
+            target=",".join(str(pid) for pid in roots) if roots else "all",
+            started_at_ms=started_at_ms,
+            ended_at_ms=ended_at_ms,
+            root_pids=roots,
+            stats=stats,
+            events=events,
+        )
 
 
 class FerrousFrameworkShell:

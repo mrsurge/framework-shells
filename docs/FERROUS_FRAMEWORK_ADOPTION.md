@@ -202,6 +202,8 @@ PTY is also a strong Rust-owned target. `rustix`/PTY-capable Rust code should ma
 
 Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, process lifecycle, metadata, readiness, and dashboard visibility, but no stdin control unless a future capability explicitly adds it.
 
+The first native Ferrous baseline is `FerrousNativeManager` with Rust-owned `proc` support. It launches child processes directly from Rust, captures stdout/stderr to log files, tracks typed shell records, lists/gets records, terminates children, and waits for exit status. This path is additive and does not replace the PyO3 bridge path yet.
+
 Backend target set:
 
 ```text

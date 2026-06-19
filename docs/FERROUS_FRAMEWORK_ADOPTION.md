@@ -26,6 +26,7 @@ Python is not part of the Ferrous crate runtime path. Downstream consumers that 
 Current native API:
 
 - `FerrousNativeManager`
+- `FerrousNativeEnv`
 - `FerrousNativeProcConfig`
 - `FerrousNativePipeConfig`
 - `FerrousNativePtyConfig`
@@ -42,6 +43,23 @@ pty: launch, direct PTY writes, direct PTY reads, PTY output log, list/get, term
 ```
 
 The `pipe` and `pty` hot paths are direct fd paths. They do not use a Python bridge, stdout pump queue, or drain worker. Reads are caller-driven and tee output to logs as bytes are read.
+
+Native launches now write a sidecar record at `FerrousNativeShellRecord.record_path`, next to stdout/stderr logs. The sidecar captures command/backend/status/log paths/capabilities/run metadata and env keys, but not env values or secrets.
+
+## FWS Environment Contract
+
+Ferrous owns a native FWS child-env contract so a Rust framework can launch nested workers and extension shells without depending on Python bootstrap code.
+
+Current managed keys:
+
+- `FRAMEWORK_SHELLS_SECRET`
+- `FRAMEWORK_SHELLS_RUN_ID`
+- `FRAMEWORK_SHELLS_FWS_SOCKETIO_URL`
+- `TE_FRAMEWORK_URL`
+
+`FerrousNativeManager::new()` derives those values from the current process. Missing secret/run values are generated natively. URL values remain optional because the Rust-owned host/dashboard runtime is a later slice.
+
+`FerrousNativeManager::with_env(FerrousNativeEnv { ... })` is the explicit host path. Native `proc`, `pipe`, and `pty` launches receive the manager overlay first, then shell-specific config env is applied last. That preserves the FWS inheritance contract while still allowing one shellspec or caller to override a value deliberately.
 
 ## Shellspec Compatibility
 

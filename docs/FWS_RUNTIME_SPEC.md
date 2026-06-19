@@ -66,6 +66,8 @@ Implementations should be able to launch a rendered shellspec entry by dispatchi
 
 Direct launch helpers should honor readiness probes when supported. `tcp_port` and `stdout_regex` are the first portable readiness probes because they only require process/log access. Unsupported readiness probe types should fail explicitly rather than silently reporting ready.
 
+Apply/reconcile helpers operate differently from direct launch helpers. They should skip `autostart: false`, start missing autostart specs, avoid duplicating live running specs with the same `spec_id`, and optionally prune live specs that are no longer present in the desired document.
+
 ## Environment Contract
 
 Managers that launch child workers must preserve the FWS environment contract:

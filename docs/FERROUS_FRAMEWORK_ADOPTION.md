@@ -54,6 +54,8 @@ Ferrous can now launch rendered shellspec entries directly through native `proc`
 
 Native shellspec launch now waits for supported readiness probes. Current Ferrous support covers `tcp_port` and `stdout_regex`; unsupported probe types fail explicitly.
 
+Ferrous now has a native shellspec apply/reconcile path for multi-entry documents. It starts missing autostart specs, skips already-running live records with the same `spec_id`, and can prune live specs no longer present in the desired document.
+
 ## FWS Environment Contract
 
 Ferrous owns a native FWS child-env contract so a Rust framework can launch nested workers and extension shells without depending on Python bootstrap code.

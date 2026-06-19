@@ -75,6 +75,25 @@ If no secret or run id exists, the manager may generate implementation-native de
 
 The manager environment is the base overlay. Shell-specific env from shellspec/caller input is applied after the manager overlay so deliberate shell overrides win.
 
+## Store Layout
+
+Implementations should use the canonical FWS store layout unless explicitly configured otherwise:
+
+```text
+base_dir = FRAMEWORK_SHELLS_BASE_DIR or ~/.cache/framework_shells
+repo_fingerprint = FRAMEWORK_SHELLS_REPO_FINGERPRINT
+  or standalone_debug when FRAMEWORK_SHELLS_ALLOW_NO_FINGERPRINT is truthy
+  or sha256(resolve(cwd))[:16]
+runtime_id = sha256(FRAMEWORK_SHELLS_SECRET)[:16]
+root = <base_dir>/runtimes/<repo_fingerprint>/<runtime_id>
+metadata_dir = <root>/meta
+logs_dir = <root>/logs
+sockets_dir = <root>/sockets
+secret_file = <base_dir>/runtimes/<repo_fingerprint>/secret
+```
+
+If a process has no `FRAMEWORK_SHELLS_SECRET`, CLI-style implementations may load `secret_file`, otherwise generate and persist a new temporary secret. Implementations must avoid persisting full environment values in shell records by default.
+
 ## Records
 
 Each launched shell has a persisted record. The record is the durable runtime metadata that tool, dashboard, and cross-manager consumers can inspect without owning the live process handle.

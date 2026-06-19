@@ -46,6 +46,8 @@ The `pipe` and `pty` hot paths are direct fd paths. They do not use a Python bri
 
 Native launches now write a sidecar record at `FerrousNativeShellRecord.record_path`, next to stdout/stderr logs. The sidecar captures command/backend/status/log paths/capabilities/run metadata and env keys, but not env values or secrets.
 
+Ferrous now mirrors the Python FWS store and secret bootstrap rules. `FerrousNativeManager::new()` resolves `FRAMEWORK_SHELLS_BASE_DIR` or `~/.cache/framework_shells`, computes/uses `FRAMEWORK_SHELLS_REPO_FINGERPRINT`, derives `runtime_id = sha256(secret)[:16]`, creates `meta`, `logs`, and `sockets`, and uses `runtimes/<repo_fingerprint>/secret` when `FRAMEWORK_SHELLS_SECRET` is absent. Native spawn configs use that canonical `logs` dir when `log_dir` is omitted.
+
 ## FWS Environment Contract
 
 Ferrous owns a native FWS child-env contract so a Rust framework can launch nested workers and extension shells without depending on Python bootstrap code.

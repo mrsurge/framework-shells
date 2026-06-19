@@ -56,6 +56,8 @@ Native shellspec launch now waits for supported readiness probes. Current Ferrou
 
 Ferrous now has a native shellspec apply/reconcile path for multi-entry documents. It starts missing autostart specs, skips already-running live records with the same `spec_id`, and can prune live specs no longer present in the desired document.
 
+Native capability records now distinguish stdin write, stdin EOF, output read, log availability, terminate, and resize. Pipe and PTY expose stdin EOF while live; adopted/stale records clear live-only controls.
+
 ## FWS Environment Contract
 
 Ferrous owns a native FWS child-env contract so a Rust framework can launch nested workers and extension shells without depending on Python bootstrap code.

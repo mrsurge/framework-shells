@@ -166,6 +166,8 @@ Common capabilities:
 
 Consumers should check capabilities before presenting controls, but write/control APIs should still return explicit runtime errors when a capability is unavailable.
 
+Persisted/adopted records may retain log capabilities, but they must clear live-only capabilities such as stdin writes, stdin EOF, output reads, terminate, resize, and subscriptions unless a live owner or peer path is actually available.
+
 ## Lifecycle
 
 Every implementation must expose:

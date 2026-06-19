@@ -124,6 +124,8 @@ Records must not require raw stdout/stderr parsing to understand shell identity,
 
 Environment values should not be persisted by default. Persisted records may expose env keys for observability, but secrets and full env values belong in live runtime memory only unless an implementation explicitly opts into unsafe debug output.
 
+Persisted records loaded by a manager that does not own the live process handle must be explicit about that stale/adopted state. Such records may remain inspectable, but live-only capabilities such as stdin writes, raw output reads, resize, and terminate must not be reported as available unless a live owner/peer path exists.
+
 ## Logs
 
 Raw stdout/stderr logs remain raw process output.

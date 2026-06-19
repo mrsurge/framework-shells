@@ -62,6 +62,8 @@ Template rendering must support:
 
 `${free_port}` is stable within one rendered shellspec and independent across separately rendered shellspecs.
 
+Implementations should be able to launch a rendered shellspec entry by dispatching `backend` to the native `proc`, `pipe`, or `pty` runtime. A shellspec entry with `autostart: false` is a declared runtime item, not an immediate launch request, and direct launch helpers should reject it unless they are explicitly operating in a reconciliation/apply mode.
+
 ## Environment Contract
 
 Managers that launch child workers must preserve the FWS environment contract:

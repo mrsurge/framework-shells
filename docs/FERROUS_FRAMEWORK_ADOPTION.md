@@ -50,6 +50,8 @@ Ferrous now mirrors the Python FWS store and secret bootstrap rules. `FerrousNat
 
 Fresh Ferrous managers now load persisted records from the canonical store logs directory. Loaded sidecars are marked `adopted: true` and clear live-only capabilities such as `stdin_write` and `terminate`, while retaining log paths and inspection metadata.
 
+Ferrous can now launch rendered shellspec entries directly through native `proc`, `pipe`, and `pty` dispatch. The current API accepts a shellspec document value plus entry id, renders ctx/env/free-port templates, parses command/env/subgroups/backend, rejects `autostart: false`, and writes records/logs through the canonical FWS store when no explicit log dir is provided.
+
 ## FWS Environment Contract
 
 Ferrous owns a native FWS child-env contract so a Rust framework can launch nested workers and extension shells without depending on Python bootstrap code.

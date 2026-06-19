@@ -44,6 +44,8 @@ pty: launch, direct PTY writes, direct PTY reads, PTY output log, list/get, term
 
 The `pipe` and `pty` hot paths are direct fd paths. They do not use a Python bridge, stdout pump queue, or drain worker. Reads are caller-driven and tee output to logs as bytes are read.
 
+Passive log capture and exit status persistence now run through a single manager-owned native reactor thread instead of one helper thread per stream or shell. Pipe and PTY stdout remain direct caller-driven reads; the reactor handles proc stdout/stderr, pipe stderr, and child exit status.
+
 Native launches now write a sidecar record at `FerrousNativeShellRecord.record_path`, next to stdout/stderr logs. The sidecar captures command/backend/status/log paths/capabilities/run metadata and env keys, but not env values or secrets.
 
 Ferrous now mirrors the Python FWS store and secret bootstrap rules. `FerrousNativeManager::new()` resolves `FRAMEWORK_SHELLS_BASE_DIR` or `~/.cache/framework_shells`, computes/uses `FRAMEWORK_SHELLS_REPO_FINGERPRINT`, derives `runtime_id = sha256(secret)[:16]`, creates `meta`, `logs`, and `sockets`, and uses `runtimes/<repo_fingerprint>/secret` when `FRAMEWORK_SHELLS_SECRET` is absent. Native spawn configs use that canonical `logs` dir when `log_dir` is omitted.
@@ -96,9 +98,9 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 ## Next Slices
 
-1. Replace thread-per-stream with a reactor.
+1. Finish the reactor cutover.
 
-   The current direct fd path is semantically right but still synchronous/blocking. The next performance step is an evented Rust reactor for pipe/PTY reads and process lifecycle.
+   Passive log streams and child exit status now use one manager-owned reactor thread. Remaining work is moving readiness polling and future live subscriptions onto the same runtime model without changing pipe/PTY direct-read semantics.
 
 2. Metadata persistence.
 

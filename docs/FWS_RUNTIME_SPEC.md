@@ -64,6 +64,8 @@ Template rendering must support:
 
 Implementations should be able to launch a rendered shellspec entry by dispatching `backend` to the native `proc`, `pipe`, or `pty` runtime. A shellspec entry with `autostart: false` is a declared runtime item, not an immediate launch request, and direct launch helpers should reject it unless they are explicitly operating in a reconciliation/apply mode.
 
+Direct launch helpers should honor readiness probes when supported. `tcp_port` and `stdout_regex` are the first portable readiness probes because they only require process/log access. Unsupported readiness probe types should fail explicitly rather than silently reporting ready.
+
 ## Environment Contract
 
 Managers that launch child workers must preserve the FWS environment contract:

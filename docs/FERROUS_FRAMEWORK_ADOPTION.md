@@ -52,6 +52,8 @@ Fresh Ferrous managers now load persisted records from the canonical store logs 
 
 Ferrous can now launch rendered shellspec entries directly through native `proc`, `pipe`, and `pty` dispatch. The current API accepts a shellspec document value plus entry id, renders ctx/env/free-port templates, parses command/env/subgroups/backend, rejects `autostart: false`, and writes records/logs through the canonical FWS store when no explicit log dir is provided.
 
+Native shellspec launch now waits for supported readiness probes. Current Ferrous support covers `tcp_port` and `stdout_regex`; unsupported probe types fail explicitly.
+
 ## FWS Environment Contract
 
 Ferrous owns a native FWS child-env contract so a Rust framework can launch nested workers and extension shells without depending on Python bootstrap code.

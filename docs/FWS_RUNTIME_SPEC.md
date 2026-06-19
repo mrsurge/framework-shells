@@ -208,7 +208,7 @@ Rust `ferrous-framework` currently targets:
 
 - native `proc`
 - native direct-fd `pipe`
-- native direct-fd `pty`
+- native direct-fd `pty` with resize
 - manager-owned reactor for passive log capture and child exit status
 - shellspec rendering parity fixtures
 - native environment inheritance

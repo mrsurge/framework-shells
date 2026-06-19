@@ -60,6 +60,8 @@ Ferrous now has a native shellspec apply/reconcile path for multi-entry document
 
 Native capability records now distinguish stdin write, stdin EOF, output read, log availability, terminate, and resize. Pipe and PTY expose stdin EOF while live; adopted/stale records clear live-only controls.
 
+PTY shells now expose native resize through `resize_pty_blocking(...)`, implemented with `TIOCSWINSZ` on a retained PTY master fd.
+
 ## FWS Environment Contract
 
 Ferrous owns a native FWS child-env contract so a Rust framework can launch nested workers and extension shells without depending on Python bootstrap code.
@@ -108,11 +110,11 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 3. Capability expansion.
 
-   Add EOF, raw write, resize, output subscription, and backpressure capabilities.
+   EOF and PTY resize are implemented. Remaining work is raw write naming/API polish, output subscription, and backpressure semantics.
 
 4. PTY terminal semantics.
 
-   Add PTY resize and terminal mode controls.
+   PTY resize is implemented. Remaining work is terminal mode controls.
 
 5. Host/dashboard runtime.
 

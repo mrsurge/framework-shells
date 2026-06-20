@@ -55,7 +55,7 @@ Passive log capture and exit status persistence now run through a single manager
 
 Native output subscriptions now exist through a bounded `subscribe_output(shell_id, stream, capacity)` API. Reactor-owned streams publish chunks as they are logged, while pipe/PTY stdout publish when the direct read path drains bytes. Slow subscribers are disconnected on full queues instead of creating unbounded buffering.
 
-Ferrous now also exposes a Python-FWS-shaped compatibility surface over the native runtime. `FerrousNativeManager` has async manager names for `spawn_shell`, `spawn_shell_pipe`, `spawn_shell_pty`, `write_to_pipe`, `write_to_shell`, `send_shell_eof`, `terminate_shell`, and `subscribe_output_bytes`, plus the live `get_pipe_state(...)` DTO used for pipe readiness checks. These are aliases/adapters over native Rust primitives, not a Python bridge and not an app-level JSON-RPC layer.
+Ferrous now also exposes a Python-FWS-shaped compatibility surface over the native runtime. `FerrousNativeManager` has async manager names for `spawn_shell`, `spawn_shell_pipe`, `spawn_shell_pty`, `write_to_pipe`, `write_to_shell`, `send_shell_eof`, `terminate_shell`, and `subscribe_output_bytes`, plus the live `get_pipe_state(...)` DTO used for pipe readiness checks. These are aliases/adapters over native Rust primitives, not a Python bridge and not an app-level JSON-RPC layer. Async write/EOF compatibility methods stay on the direct native path instead of paying a `tokio::task::spawn_blocking(...)` hop per packet; lifecycle-heavy operations can still use blocking-task boundaries.
 
 The ALS-style `FerrousFrameworkPipe` wrapper is retained as a native compatibility adapter. It accepts `FerrousPipeConfig`, can load YAML/JSON shellspecs, renders ctx/env values including `PYTHON` and `CWD`, merges caller env with rendered shellspec env, waits for live stdin readiness before returning, and exposes `shell_id`, `write_line_blocking`, `read_line_blocking`, and `close_blocking`. The wrapper is deliberately pipe-only so protocol framing and request/response matching stay in downstream applications.
 
@@ -150,6 +150,8 @@ Ferrous checks:
 - `cargo test`
 - `cargo test pipe_ -- --nocapture` for timing output
 - `cargo test pty_terminal -- --nocapture` for PTY terminal timing output
+- `cargo test --release pipe_async_facade_reports_rtt_overhead_against_blocking_direct -- --ignored --nocapture` for opt-in direct-vs-async facade pipe overhead timing
+- `cargo test --release pipe_async_facade_reports_concurrent_inflight_metrics -- --ignored --nocapture` for opt-in concurrent Tokio caller timing
 - shellspec parity fixture test
 - native proc/pipe/PTY lifecycle tests
 

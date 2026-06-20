@@ -26,6 +26,7 @@ Python is not part of the Ferrous crate runtime path. Downstream consumers that 
 Current native API:
 
 - `FerrousNativeManager`
+- `FerrousNativeHost`
 - `FerrousNativeEnv`
 - `FerrousNativeProcConfig`
 - `FerrousNativePipeConfig`
@@ -66,6 +67,8 @@ Native capability records now distinguish stdin write, stdin EOF, output read, o
 
 PTY shells now expose native resize through `resize_pty_blocking(...)`, implemented with `TIOCSWINSZ` on a retained PTY master fd.
 
+Ferrous now has a Rust-owned host/control-plane MVP. `FerrousNativeHost` wraps `FerrousNativeManager` with an Axum/Tokio HTTP server, exposes `/fws`, runtime info, shell list/detail/create, shellspec apply, stdin write/EOF, log tail, terminate, action alias, and group shutdown routes, and uses the same `HMAC(secret, "api")` token shape as Python FWS for mutating routes. This host reports `socketio: false`; no Socket.IO-compatible peer lane is claimed yet.
+
 ## FWS Environment Contract
 
 Ferrous owns a native FWS child-env contract so a Rust framework can launch nested workers and extension shells without depending on Python bootstrap code.
@@ -77,7 +80,7 @@ Current managed keys:
 - `FRAMEWORK_SHELLS_FWS_SOCKETIO_URL`
 - `TE_FRAMEWORK_URL`
 
-`FerrousNativeManager::new()` derives those values from the current process. Missing secret/run values are generated natively. URL values remain optional because the Rust-owned host/dashboard runtime is a later slice.
+`FerrousNativeManager::new()` derives those values from the current process. Missing secret/run values are generated natively. URL values remain optional unless a host/control plane is attached. `FerrousNativeHost::spawn(...)` sets `TE_FRAMEWORK_URL` to the bound host URL when absent and intentionally does not set `FRAMEWORK_SHELLS_FWS_SOCKETIO_URL` until a real Socket.IO-compatible lane exists.
 
 `FerrousNativeManager::with_env(FerrousNativeEnv { ... })` is the explicit host path. Native `proc`, `pipe`, and `pty` launches receive the manager overlay first, then shell-specific config env is applied last. That preserves the FWS inheritance contract while still allowing one shellspec or caller to override a value deliberately.
 
@@ -106,29 +109,29 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 ## Next Slices
 
-1. Finish the reactor cutover.
+1. Host/dashboard runtime follow-through.
+
+   The Rust-owned HTTP host/control-plane MVP exists. Remaining host work is downstream integration, live notification transport, richer dashboard UI, and a real Socket.IO-compatible or UDS peer lane when needed.
+
+2. Finish the reactor cutover.
 
    Passive log streams and child exit status now use one manager-owned reactor thread. Remaining work is moving readiness polling and future live subscriptions onto the same runtime model without changing pipe/PTY direct-read semantics.
 
-2. Metadata persistence.
+3. Metadata persistence.
 
    FWS-compatible record fields now exist for core shell/dashboard metadata. Remaining work is IO metadata sidecar writers and any future signing/verification parity.
 
-3. Capability expansion.
+4. Capability expansion.
 
    EOF, PTY resize, output subscription, and bounded slow-subscriber disconnection are implemented. Remaining work is raw write naming/API polish and deeper backpressure metrics/policy.
 
-4. PTY terminal semantics.
+5. PTY terminal semantics.
 
    PTY resize and raw/interactive terminal mode controls are implemented. Remaining work is deeper terminal semantics only if a concrete consumer needs them.
 
-5. Framed terminal-stream protocol.
+6. Framed terminal-stream protocol.
 
    Deferred. Add JSONL-out / JSON-RPC-in terminal broker semantics only as an explicit higher-level PTY protocol mode/backend when a consumer needs it.
-
-6. Host/dashboard runtime.
-
-   Add Rust-owned host/dashboard/socket runtime after backend parity is stable.
 
 ## Test Matrix
 

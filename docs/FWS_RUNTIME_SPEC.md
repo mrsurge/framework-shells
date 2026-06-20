@@ -214,6 +214,8 @@ The control plane is implementation-defined, but the semantics should be portabl
 
 Current Python FWS uses HTTP/WebSocket/Socket.IO surfaces. Future Rust-native implementations may use HTTP, Socket.IO, UDS, or another local transport as long as the same runtime semantics remain available.
 
+A Rust-native host/control-plane MVP may start with HTTP request/response endpoints for runtime info, shell list/detail/create, shellspec apply, stdin input, log tail, terminate, and group shutdown. It must report unsupported transports honestly; for example, an HTTP-only host should not publish a `FRAMEWORK_SHELLS_FWS_SOCKETIO_URL` or claim Socket.IO compatibility until a real Socket.IO-compatible lane exists.
+
 ## Implementation Status
 
 Python `framework-shells` is the reference implementation for the current dashboard/API/tooling surface.
@@ -228,3 +230,4 @@ Rust `ferrous-framework` currently targets:
 - shellspec rendering parity fixtures
 - native environment inheritance
 - native record/log persistence with FWS-compatible metadata fields
+- native HTTP host/control-plane MVP through `FerrousNativeHost`

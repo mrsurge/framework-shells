@@ -44,6 +44,8 @@ pty: launch, direct PTY writes, direct PTY reads, PTY output log, list/get, term
 
 The `pipe` and `pty` hot paths are direct fd paths. They do not use a Python bridge, stdout pump queue, or drain worker. Reads are caller-driven and tee output to logs as bytes are read.
 
+PTY launch now supports explicit native terminal modes. `FerrousNativePtyMode::Raw` applies raw termios to the PTY slave before child spawn, `Interactive` preserves the cooked/default behavior, and native shellspec launch honors `pty_mode`.
+
 Passive log capture and exit status persistence now run through a single manager-owned native reactor thread instead of one helper thread per stream or shell. Pipe and PTY stdout remain direct caller-driven reads; the reactor handles proc stdout/stderr, pipe stderr, and child exit status.
 
 Native output subscriptions now exist through a bounded `subscribe_output(shell_id, stream, capacity)` API. Reactor-owned streams publish chunks as they are logged, while pipe/PTY stdout publish when the direct read path drains bytes. Slow subscribers are disconnected on full queues instead of creating unbounded buffering.
@@ -116,7 +118,7 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 4. PTY terminal semantics.
 
-   PTY resize is implemented. Remaining work is terminal mode controls.
+   PTY resize and raw/interactive terminal mode controls are implemented. Remaining work is deeper terminal semantics only if a concrete consumer needs them.
 
 5. Host/dashboard runtime.
 

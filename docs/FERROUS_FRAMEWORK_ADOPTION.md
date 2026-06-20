@@ -128,6 +128,7 @@ Ferrous checks:
 
 - `cargo test`
 - `cargo test pipe_ -- --nocapture` for timing output
+- `cargo test pty_terminal -- --nocapture` for PTY terminal timing output
 - shellspec parity fixture test
 - native proc/pipe/PTY lifecycle tests
 

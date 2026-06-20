@@ -120,15 +120,25 @@ Portable record fields:
 - `stdout_log`
 - `stderr_log`
 - `io_metadata_log`
+- `autostart`
+- `ui`
+- `debug`
 - `created_at`
 - `updated_at`
 - `run_id`
 - `launcher_pid`
+- `runtime_id`
+- `app_id`
+- `parent_shell_id`
+- `is_app_worker`
+- backend compatibility flags such as `uses_pty`, `uses_pipes`, and `uses_dtach`
 - `capabilities`
 
 Records must not require raw stdout/stderr parsing to understand shell identity, status, backend, log paths, or capabilities.
 
 Environment values should not be persisted by default. Persisted records may expose env keys for observability, but secrets and full env values belong in live runtime memory only unless an implementation explicitly opts into unsafe debug output.
+
+`io_metadata_log` is a stable sidecar path declaration. Its presence does not imply that the implementation is already writing IO metadata records; consumers should treat the file as optional until records exist.
 
 Persisted records loaded by a manager that does not own the live process handle must be explicit about that stale/adopted state. Such records may remain inspectable, but live-only capabilities such as stdin writes, raw output reads, resize, and terminate must not be reported as available unless a live owner/peer path exists.
 
@@ -217,4 +227,4 @@ Rust `ferrous-framework` currently targets:
 - bounded native output subscriptions
 - shellspec rendering parity fixtures
 - native environment inheritance
-- native record/log persistence
+- native record/log persistence with FWS-compatible metadata fields

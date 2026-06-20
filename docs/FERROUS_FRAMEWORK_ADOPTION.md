@@ -50,7 +50,7 @@ Passive log capture and exit status persistence now run through a single manager
 
 Native output subscriptions now exist through a bounded `subscribe_output(shell_id, stream, capacity)` API. Reactor-owned streams publish chunks as they are logged, while pipe/PTY stdout publish when the direct read path drains bytes. Slow subscribers are disconnected on full queues instead of creating unbounded buffering.
 
-Native launches now write a sidecar record at `FerrousNativeShellRecord.record_path`, next to stdout/stderr logs. The sidecar captures command/backend/status/log paths/capabilities/run metadata and env keys, but not env values or secrets.
+Native launches now write a sidecar record at `FerrousNativeShellRecord.record_path`, next to stdout/stderr logs. The sidecar captures command/backend/status/log paths/capabilities/run metadata and env keys, but not env values or secrets. It now includes FWS-compatible metadata keys for `created_at`, `updated_at`, `autostart`, `ui`, `debug`, `io_metadata_log`, backend flags, `runtime_id`, and derived app context. `io_metadata_log` is a stable path only until Ferrous grows IO sidecar writers.
 
 Ferrous now mirrors the Python FWS store and secret bootstrap rules. `FerrousNativeManager::new()` resolves `FRAMEWORK_SHELLS_BASE_DIR` or `~/.cache/framework_shells`, computes/uses `FRAMEWORK_SHELLS_REPO_FINGERPRINT`, derives `runtime_id = sha256(secret)[:16]`, creates `meta`, `logs`, and `sockets`, and uses `runtimes/<repo_fingerprint>/secret` when `FRAMEWORK_SHELLS_SECRET` is absent. Native spawn configs use that canonical `logs` dir when `log_dir` is omitted.
 
@@ -112,7 +112,7 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 2. Metadata persistence.
 
-   Write FWS-compatible records/log metadata from Rust so dashboards and inspectors can consume native Ferrous shells.
+   FWS-compatible record fields now exist for core shell/dashboard metadata. Remaining work is IO metadata sidecar writers and any future signing/verification parity.
 
 3. Capability expansion.
 

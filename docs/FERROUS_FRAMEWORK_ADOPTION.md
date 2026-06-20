@@ -100,6 +100,8 @@ Pipe is an ideal Rust-owned target. The receiving side of the pipe is part of th
 
 PTY is also a strong Rust-owned target. PTY sessions should be part of the crate runtime while preserving FWS management semantics.
 
+The framed terminal-stream protocol is intentionally deferred. Current native `pty` is a raw PTY byte-stream backend, not the JSONL-out / JSON-RPC-in terminal broker shape. If needed later, that should be added as a separate higher-level protocol mode or backend layered over PTY instead of changing base PTY semantics.
+
 Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, process lifecycle, metadata, readiness, and dashboard visibility, but no stdin control unless a future capability explicitly adds it.
 
 ## Next Slices
@@ -120,7 +122,11 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
    PTY resize and raw/interactive terminal mode controls are implemented. Remaining work is deeper terminal semantics only if a concrete consumer needs them.
 
-5. Host/dashboard runtime.
+5. Framed terminal-stream protocol.
+
+   Deferred. Add JSONL-out / JSON-RPC-in terminal broker semantics only as an explicit higher-level PTY protocol mode/backend when a consumer needs it.
+
+6. Host/dashboard runtime.
 
    Add Rust-owned host/dashboard/socket runtime after backend parity is stable.
 

@@ -147,6 +147,8 @@ Per-event metadata is sidecar data, not a mutation of raw logs. Implementations 
 
 Stdin data must not be written into raw stdout/stderr logs.
 
+Base PTY backends are raw PTY byte streams. A JSONL-out / JSON-RPC-in terminal-stream broker protocol is a higher-level PTY protocol mode, not the default PTY backend contract, and should be implemented separately when needed.
+
 ## Capabilities
 
 Capabilities are explicit runtime facts, not assumptions from backend name alone.

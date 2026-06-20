@@ -168,6 +168,8 @@ Consumers should check capabilities before presenting controls, but write/contro
 
 Persisted/adopted records may retain log capabilities, but they must clear live-only capabilities such as stdin writes, stdin EOF, output reads, terminate, resize, and subscriptions unless a live owner or peer path is actually available.
 
+Output subscriptions must have an explicit backpressure policy. A bounded queue with slow-subscriber disconnection is a valid first policy because it prevents manager memory growth without mutating raw logs.
+
 ## Lifecycle
 
 Every implementation must expose:
@@ -210,6 +212,7 @@ Rust `ferrous-framework` currently targets:
 - native direct-fd `pipe`
 - native direct-fd `pty` with resize
 - manager-owned reactor for passive log capture and child exit status
+- bounded native output subscriptions
 - shellspec rendering parity fixtures
 - native environment inheritance
 - native record/log persistence

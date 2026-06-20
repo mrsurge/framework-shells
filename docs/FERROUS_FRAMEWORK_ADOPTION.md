@@ -46,6 +46,8 @@ The `pipe` and `pty` hot paths are direct fd paths. They do not use a Python bri
 
 Passive log capture and exit status persistence now run through a single manager-owned native reactor thread instead of one helper thread per stream or shell. Pipe and PTY stdout remain direct caller-driven reads; the reactor handles proc stdout/stderr, pipe stderr, and child exit status.
 
+Native output subscriptions now exist through a bounded `subscribe_output(shell_id, stream, capacity)` API. Reactor-owned streams publish chunks as they are logged, while pipe/PTY stdout publish when the direct read path drains bytes. Slow subscribers are disconnected on full queues instead of creating unbounded buffering.
+
 Native launches now write a sidecar record at `FerrousNativeShellRecord.record_path`, next to stdout/stderr logs. The sidecar captures command/backend/status/log paths/capabilities/run metadata and env keys, but not env values or secrets.
 
 Ferrous now mirrors the Python FWS store and secret bootstrap rules. `FerrousNativeManager::new()` resolves `FRAMEWORK_SHELLS_BASE_DIR` or `~/.cache/framework_shells`, computes/uses `FRAMEWORK_SHELLS_REPO_FINGERPRINT`, derives `runtime_id = sha256(secret)[:16]`, creates `meta`, `logs`, and `sockets`, and uses `runtimes/<repo_fingerprint>/secret` when `FRAMEWORK_SHELLS_SECRET` is absent. Native spawn configs use that canonical `logs` dir when `log_dir` is omitted.
@@ -58,7 +60,7 @@ Native shellspec launch now waits for supported readiness probes. Current Ferrou
 
 Ferrous now has a native shellspec apply/reconcile path for multi-entry documents. It starts missing autostart specs, skips already-running live records with the same `spec_id`, and can prune live specs no longer present in the desired document.
 
-Native capability records now distinguish stdin write, stdin EOF, output read, log availability, terminate, and resize. Pipe and PTY expose stdin EOF while live; adopted/stale records clear live-only controls.
+Native capability records now distinguish stdin write, stdin EOF, output read, output subscription, log availability, terminate, and resize. Pipe and PTY expose stdin EOF while live; adopted/stale records clear live-only controls.
 
 PTY shells now expose native resize through `resize_pty_blocking(...)`, implemented with `TIOCSWINSZ` on a retained PTY master fd.
 
@@ -110,7 +112,7 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 3. Capability expansion.
 
-   EOF and PTY resize are implemented. Remaining work is raw write naming/API polish, output subscription, and backpressure semantics.
+   EOF, PTY resize, output subscription, and bounded slow-subscriber disconnection are implemented. Remaining work is raw write naming/API polish and deeper backpressure metrics/policy.
 
 4. PTY terminal semantics.
 

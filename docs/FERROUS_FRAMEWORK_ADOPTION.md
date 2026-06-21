@@ -77,7 +77,9 @@ Native capability records now distinguish stdin write, stdin EOF, output read, o
 
 PTY shells now expose native resize through `resize_pty_blocking(...)`, implemented with `TIOCSWINSZ` on a retained PTY master fd.
 
-Ferrous now has a Rust-owned host/control-plane MVP. `FerrousNativeHost` wraps `FerrousNativeManager` with an Axum/Tokio HTTP server, exposes `/fws`, runtime info, shell list/detail/create, shellspec apply, stdin write/EOF, log tail, terminate, action alias, and group shutdown routes, and uses the same `HMAC(secret, "api")` token shape as Python FWS for mutating routes.
+Ferrous now has native framework shutdown hooks. `shutdown_tree_blocking(root_pids)` targets matching Ferrous-owned live shell roots, `shutdown_tree_blocking(Vec::new())` targets all Ferrous-owned live shell roots, and `shutdown_all_blocking()` is the explicit all-live-roots alias. These hooks return `FerrousShutdownResult` with the same metrics/event DTO shape as group shutdown. Current native tree/all shutdown does not yet walk arbitrary procfs descendants outside Ferrous ownership.
+
+Ferrous now has a Rust-owned host/control-plane MVP. `FerrousNativeHost` wraps `FerrousNativeManager` with an Axum/Tokio HTTP server, exposes `/fws`, runtime info, shell list/detail/create, shellspec apply, stdin write/EOF, log tail, terminate, action alias, group shutdown, and framework shutdown routes, and uses the same `HMAC(secret, "api")` token shape as Python FWS for mutating routes.
 
 The host also owns the first Socket.IO-compatible controller lane. It mounts `/fws_ws/socket.io` with namespace `/fws`, accepts shared-secret authenticated peers, sends `fws_peer_subscriptions`, receives `fws_peer_notification`, and routes `fws.shell.input` through `fws_peer_request` when local live input is unavailable. The current controller is websocket-only and intentionally keeps the existing Python FWS event names/DTOs rather than creating a Ferrous-only protocol.
 

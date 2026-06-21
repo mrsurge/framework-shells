@@ -15,6 +15,19 @@ from fastapi import FastAPI
 from ..auth import derive_api_token, derive_runtime_id, get_secret
 from ..events import EventType, ShellEvent, get_event_bus
 from ..fws_socketio_contract import FWS_SOCKETIO_NAMESPACE, FWS_SOCKETIO_SOCKET_PATH
+from ..protocols.fws_peer import (
+    FWS_BROWSER_ROLE,
+    FWS_DASHBOARD_ROOM,
+    FWS_NOTIFICATION_EVENT,
+    FWS_PEER_REQUEST_EVENT,
+    FWS_PEER_ROLE,
+    FWS_PEER_ROOM,
+    FWS_PEER_SUBSCRIPTIONS_EVENT,
+    build_peer_shell_input_request,
+    build_peer_subscriptions,
+    parse_peer_notification,
+    shell_room,
+)
 from ..io_metadata import read_io_metadata
 from ..protocols.fws_ui import (
     APP_SHUTDOWN_METHOD,
@@ -62,10 +75,6 @@ from .fws_ui import (
     _dashboard_state_parts,
 )
 
-_DASHBOARD_ROOM = "fws:dashboard"
-_PEER_ROOM = "fws:peers"
-_BROWSER_ROLE = "browser"
-_PEER_ROLE = "peer"
 _LOCAL_REPLAY_MAX_LINES = 2000
 
 _browser_log_subscriptions: dict[str, str] = {}
@@ -91,7 +100,7 @@ class _SocketIoCallServer(Protocol):
 
 
 def _shell_room(shell_id: str) -> str:
-    return f"shell:{shell_id}"
+    return shell_room(shell_id)
 
 
 def _as_object_mapping(value: object) -> _ObjectMapping | None:
@@ -134,30 +143,6 @@ def _coerce_request_payload(payload: object) -> FwsRequest | None:
     return parse_fws_request(raw)
 
 
-def _coerce_notification_payload(payload: object) -> FwsNotification | None:
-    mapping = _as_object_mapping(payload)
-    if mapping is None:
-        return None
-    method = mapping.get("method")
-    params = _as_object_mapping(mapping.get("params"))
-    if mapping.get("jsonrpc") != "2.0" or not isinstance(method, str) or params is None:
-        return None
-    if method not in {
-        "fws.shell.created",
-        "fws.shell.spawned",
-        "fws.shell.updated",
-        "fws.shell.exited",
-        SHELL_REMOVED_NOTIFICATION_METHOD,
-        LOGS_INITIAL_METHOD,
-        LOGS_CHUNK_METHOD,
-        LOGS_IO_METADATA_METHOD,
-        LOGS_RESET_METHOD,
-        "fws.error",
-    }:
-        return None
-    return cast(FwsNotification, cast(object, {"jsonrpc": "2.0", "method": method, "params": dict(params)}))
-
-
 def _peer_auth_valid(auth: object) -> bool:
     mapping = _as_object_mapping(auth)
     if mapping is None:
@@ -179,10 +164,10 @@ def _active_log_shell_ids() -> list[str]:
 
 async def _broadcast_peer_subscriptions() -> None:
     await FWS_SOCKETIO_SIO.emit(
-        "fws_peer_subscriptions",
-        {"shell_ids": _active_log_shell_ids()},
+        FWS_PEER_SUBSCRIPTIONS_EVENT,
+        build_peer_subscriptions(_active_log_shell_ids()),
         namespace=FWS_SOCKETIO_NAMESPACE,
-        room=_PEER_ROOM,
+        room=FWS_PEER_ROOM,
     )
 
 
@@ -281,22 +266,19 @@ async def _call_peer_shell_input(
     if not peer_sids:
         raise RuntimeError(f"Live input unavailable for shell {shell_id}: no connected FWS peer owns live input")
 
-    payload: Mapping[str, object] = {
-        "method": SHELL_INPUT_METHOD,
-        "params": {
-            "shell_id": shell_id,
-            "data": data or "",
-            "append_newline": append_newline,
-            "eof": eof,
-            "source": source,
-        },
-    }
+    payload: Mapping[str, object] = build_peer_shell_input_request(
+        shell_id=shell_id,
+        data=data,
+        append_newline=append_newline,
+        eof=eof,
+        source=source,
+    )
 
     async def _call_one(sid: str) -> object:
         try:
             sio = cast(_SocketIoCallServer, FWS_SOCKETIO_SIO)
             response = await sio.call(
-                "fws_peer_request",
+                FWS_PEER_REQUEST_EVENT,
                 payload,
                 to=sid,
                 namespace=FWS_SOCKETIO_NAMESPACE,
@@ -366,17 +348,17 @@ async def write_shell_input_control(
 async def _emit_notification(notification: FwsNotification) -> None:
     method = notification["method"]
     if method in {"fws.shell.created", "fws.shell.spawned", "fws.shell.updated", "fws.shell.exited", SHELL_REMOVED_NOTIFICATION_METHOD}:
-        await FWS_SOCKETIO_SIO.emit("fws_notification", notification, namespace=FWS_SOCKETIO_NAMESPACE, room=_DASHBOARD_ROOM)
+        await FWS_SOCKETIO_SIO.emit(FWS_NOTIFICATION_EVENT, notification, namespace=FWS_SOCKETIO_NAMESPACE, room=FWS_DASHBOARD_ROOM)
         return
     shell_id = _notification_shell_id(notification)
     if method in {LOGS_INITIAL_METHOD, LOGS_CHUNK_METHOD, LOGS_IO_METADATA_METHOD, LOGS_RESET_METHOD} and shell_id:
-        await FWS_SOCKETIO_SIO.emit("fws_notification", notification, namespace=FWS_SOCKETIO_NAMESPACE, room=_shell_room(shell_id))
+        await FWS_SOCKETIO_SIO.emit(FWS_NOTIFICATION_EVENT, notification, namespace=FWS_SOCKETIO_NAMESPACE, room=_shell_room(shell_id))
         return
     if method == "fws.error":
         if shell_id:
-            await FWS_SOCKETIO_SIO.emit("fws_notification", notification, namespace=FWS_SOCKETIO_NAMESPACE, room=_shell_room(shell_id))
+            await FWS_SOCKETIO_SIO.emit(FWS_NOTIFICATION_EVENT, notification, namespace=FWS_SOCKETIO_NAMESPACE, room=_shell_room(shell_id))
         else:
-            await FWS_SOCKETIO_SIO.emit("fws_notification", notification, namespace=FWS_SOCKETIO_NAMESPACE, room=_DASHBOARD_ROOM)
+            await FWS_SOCKETIO_SIO.emit(FWS_NOTIFICATION_EVENT, notification, namespace=FWS_SOCKETIO_NAMESPACE, room=FWS_DASHBOARD_ROOM)
 
 
 async def _emit_notifications_for_event(event: ShellEvent) -> None:
@@ -449,15 +431,15 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
     async def on_connect(self, sid: str, environ: Mapping[str, object], auth: object | None = None) -> bool | None:
         await _ensure_local_event_forwarder()
         auth_mapping = _as_object_mapping(auth)
-        if auth_mapping is not None and auth_mapping.get("role") == _PEER_ROLE:
+        if auth_mapping is not None and auth_mapping.get("role") == FWS_PEER_ROLE:
             if not _peer_auth_valid(auth):
                 return False
             _peer_sids.add(sid)
-            await self.enter_room(sid, _PEER_ROOM)
-            await self.save_session(sid, {"role": _PEER_ROLE, "log_shell_id": None})
-            await self.emit("fws_peer_subscriptions", {"shell_ids": _active_log_shell_ids()}, to=sid)
+            await self.enter_room(sid, FWS_PEER_ROOM)
+            await self.save_session(sid, {"role": FWS_PEER_ROLE, "log_shell_id": None})
+            await self.emit(FWS_PEER_SUBSCRIPTIONS_EVENT, build_peer_subscriptions(_active_log_shell_ids()), to=sid)
             return True
-        await self.save_session(sid, {"role": _BROWSER_ROLE, "log_shell_id": None})
+        await self.save_session(sid, {"role": FWS_BROWSER_ROLE, "log_shell_id": None})
         return True
 
     async def on_disconnect(self, sid: str, reason: object | None = None) -> None:
@@ -490,7 +472,7 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
         method = request["method"]
         try:
             if method == DASHBOARD_OPEN_METHOD:
-                await self.enter_room(sid, _DASHBOARD_ROOM)
+                await self.enter_room(sid, FWS_DASHBOARD_ROOM)
                 shells, processes = await _dashboard_state_parts()
                 return build_action_or_state_response(request["id"], method, shells=shells, processes=processes)
 
@@ -504,7 +486,7 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
                 stdout_text, stderr_text, io_metadata_records = await _load_log_backlog(shell_id)
                 await _set_browser_log_shell(self, sid, shell_id)
                 await self.emit(
-                    "fws_notification",
+                    FWS_NOTIFICATION_EVENT,
                     build_logs_initial_notification(shell_id, stdout_text, stderr_text, io_metadata=io_metadata_records),
                     to=sid,
                 )
@@ -597,9 +579,9 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
             session = await self.get_session(sid)
         except Exception:
             session = {}
-        if session.get("role") != _PEER_ROLE:
+        if session.get("role") != FWS_PEER_ROLE:
             return
-        notification = _coerce_notification_payload(payload)
+        notification = parse_peer_notification(payload)
         if notification is None:
             return
         await _emit_notification(notification)

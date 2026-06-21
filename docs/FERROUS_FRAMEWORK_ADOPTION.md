@@ -38,6 +38,8 @@ Current native API:
 - `FerrousNativeShellRecord`
 - `FerrousNativeShellStatus`
 - `FerrousNativeShellCapabilities`
+- `FerrousNativePeer`
+- `FerrousNativePeerConfig`
 
 Backend coverage:
 
@@ -75,7 +77,11 @@ Native capability records now distinguish stdin write, stdin EOF, output read, o
 
 PTY shells now expose native resize through `resize_pty_blocking(...)`, implemented with `TIOCSWINSZ` on a retained PTY master fd.
 
-Ferrous now has a Rust-owned host/control-plane MVP. `FerrousNativeHost` wraps `FerrousNativeManager` with an Axum/Tokio HTTP server, exposes `/fws`, runtime info, shell list/detail/create, shellspec apply, stdin write/EOF, log tail, terminate, action alias, and group shutdown routes, and uses the same `HMAC(secret, "api")` token shape as Python FWS for mutating routes. This host reports `socketio: false`; no Socket.IO-compatible peer lane is claimed yet.
+Ferrous now has a Rust-owned host/control-plane MVP. `FerrousNativeHost` wraps `FerrousNativeManager` with an Axum/Tokio HTTP server, exposes `/fws`, runtime info, shell list/detail/create, shellspec apply, stdin write/EOF, log tail, terminate, action alias, and group shutdown routes, and uses the same `HMAC(secret, "api")` token shape as Python FWS for mutating routes.
+
+The host also owns the first Socket.IO-compatible controller lane. It mounts `/fws_ws/socket.io` with namespace `/fws`, accepts shared-secret authenticated peers, sends `fws_peer_subscriptions`, receives `fws_peer_notification`, and routes `fws.shell.input` through `fws_peer_request` when local live input is unavailable. The current controller is websocket-only and intentionally keeps the existing Python FWS event names/DTOs rather than creating a Ferrous-only protocol.
+
+Ferrous also has the matching peer-client MVP. `FerrousNativePeer` connects to a Python or Ferrous controller, authenticates with the shared-secret `api_token` and `runtime_id`, stores subscription hints, handles `fws_peer_request` for `fws.shell.input`, and returns the required Socket.IO ack response after calling the local native manager write/EOF primitives. It can explicitly emit `fws_peer_notification`; automatic native lifecycle/log relay over the peer client remains a later layer.
 
 ## FWS Environment Contract
 
@@ -88,7 +94,7 @@ Current managed keys:
 - `FRAMEWORK_SHELLS_FWS_SOCKETIO_URL`
 - `TE_FRAMEWORK_URL`
 
-`FerrousNativeManager::new()` derives those values from the current process. Missing secret/run values are generated natively. URL values remain optional unless a host/control plane is attached. `FerrousNativeHost::spawn(...)` sets `TE_FRAMEWORK_URL` to the bound host URL when absent and intentionally does not set `FRAMEWORK_SHELLS_FWS_SOCKETIO_URL` until a real Socket.IO-compatible lane exists.
+`FerrousNativeManager::new()` derives those values from the current process. Missing secret/run values are generated natively. URL values remain optional unless a host/control plane is attached. `FerrousNativeHost::spawn(...)` sets both `TE_FRAMEWORK_URL` and `FRAMEWORK_SHELLS_FWS_SOCKETIO_URL` to the bound host URL when absent so child managers can connect through the standard `/fws_ws/socket.io` path and `/fws` namespace.
 
 `FerrousNativeManager::with_env(FerrousNativeEnv { ... })` is the explicit host path. Native `proc`, `pipe`, and `pty` launches receive the manager overlay first, then shell-specific config env is applied last. That preserves the FWS inheritance contract while still allowing one shellspec or caller to override a value deliberately.
 
@@ -119,9 +125,9 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 ## Next Slices
 
-1. Host/dashboard runtime follow-through.
+1. Peer interoperability follow-through.
 
-   The Rust-owned HTTP host/control-plane MVP exists. Remaining host work is downstream integration, live notification transport, richer dashboard UI, and a real Socket.IO-compatible or UDS peer lane when needed.
+   The Rust-owned HTTP host/control-plane MVP, Socket.IO controller lane, and Ferrous peer-client MVP exist. Remaining peer work is end-to-end Python-FWS-to-Ferrous and Ferrous-to-Python smoke coverage, automatic native lifecycle/log relay, reconnect/backpressure hardening, and a later UDS transport that preserves the same DTO semantics.
 
 2. Finish the reactor cutover.
 

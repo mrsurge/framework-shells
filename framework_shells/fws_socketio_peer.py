@@ -10,6 +10,18 @@ import socketio
 from .auth import derive_api_token, derive_runtime_id, get_secret
 from .events import EventType, ShellEvent, get_event_bus
 from .fws_socketio_contract import FWS_SOCKETIO_NAMESPACE, FWS_SOCKETIO_SOCKET_PATH
+from .protocols.fws_peer import (
+    FWS_PEER_NOTIFICATION_EVENT,
+    FWS_PEER_REQUEST_EVENT,
+    FWS_PEER_SUBSCRIPTIONS_EVENT,
+    build_peer_auth,
+    build_peer_error_response,
+    build_peer_success_response,
+    notification_shell_id,
+    parse_peer_shell_input_request,
+    parse_peer_subscriptions_payload,
+    peer_notification_requires_subscription,
+)
 from .protocols.fws_ui import (
     FwsNotification,
     IoMetadataPayload,
@@ -48,15 +60,12 @@ def _default_framework_url() -> str:
 
 
 def _notification_shell_id(notification: Mapping[str, object]) -> str | None:
-    params = _as_object_mapping(notification.get("params"))
-    if params is None:
-        return None
-    shell_id = params.get("shell_id")
-    return shell_id if isinstance(shell_id, str) else None
+    return notification_shell_id(notification)
 
 
 def _notification_requires_subscription(notification: Mapping[str, object]) -> bool:
-    return notification.get("method") in {"fws.logs.chunk", "fws.logs.reset", "fws.error"}
+    method = notification.get("method")
+    return isinstance(method, str) and peer_notification_requires_subscription(method)
 
 
 class FwsSocketIoPeerRelay:
@@ -74,36 +83,27 @@ class FwsSocketIoPeerRelay:
         self._started = False
         self._connect_logged = False
 
-        self.client.on("fws_peer_subscriptions", self._on_subscriptions, namespace=FWS_SOCKETIO_NAMESPACE)
-        self.client.on("fws_peer_request", self._on_peer_request, namespace=FWS_SOCKETIO_NAMESPACE)
+        self.client.on(FWS_PEER_SUBSCRIPTIONS_EVENT, self._on_subscriptions, namespace=FWS_SOCKETIO_NAMESPACE)
+        self.client.on(FWS_PEER_REQUEST_EVENT, self._on_peer_request, namespace=FWS_SOCKETIO_NAMESPACE)
 
     async def _on_subscriptions(self, payload: object) -> None:
-        mapping = _as_object_mapping(payload)
-        if mapping is None:
+        subscriptions = parse_peer_subscriptions_payload(payload)
+        if subscriptions is None:
             self._subscriptions = set()
             return
-        shell_ids = mapping.get("shell_ids")
-        if not isinstance(shell_ids, list):
-            self._subscriptions = set()
-            return
-        self._subscriptions = {
-            shell_id
-            for raw_shell_id in cast(list[object], shell_ids)
-            if (shell_id := str(raw_shell_id).strip())
-        }
+        self._subscriptions = set(subscriptions["shell_ids"])
 
     async def _on_peer_request(self, payload: object) -> Mapping[str, object]:
-        mapping = _as_object_mapping(payload)
-        if mapping is None:
-            return {"ok": False, "code": "invalid_request", "error": "Invalid peer request"}
-        method = mapping.get("method")
-        params = _as_object_mapping(mapping.get("params"))
-        if method != SHELL_INPUT_METHOD or params is None:
-            return {"ok": False, "code": "method_not_found", "error": f"Unsupported peer request: {method}"}
+        request = parse_peer_shell_input_request(payload)
+        if request is None:
+            mapping = _as_object_mapping(payload)
+            method = mapping.get("method") if mapping is not None else None
+            if method is not None and method != SHELL_INPUT_METHOD:
+                return build_peer_error_response(code="method_not_found", error=f"Unsupported peer request: {method}")
+            return build_peer_error_response(code="invalid_request", error="Invalid peer request")
 
-        shell_id = str(params.get("shell_id") or "").strip()
-        if not shell_id:
-            return {"ok": False, "code": "invalid_request", "error": "shell_id is required"}
+        params = request["params"]
+        shell_id = params["shell_id"]
 
         source = params.get("source")
         source_name = source if isinstance(source, str) and source.strip() else "peer"
@@ -125,15 +125,15 @@ class FwsSocketIoPeerRelay:
                     source=source_name,
                 )
         except KeyError:
-            return {"ok": False, "code": "not_found", "error": f"Shell not found: {shell_id}"}
+            return build_peer_error_response(code="not_found", error=f"Shell not found: {shell_id}")
         except (RuntimeError, ValueError) as exc:
             message = str(exc)
             code = "not_owner" if "Live input unavailable" in message else "write_failed"
-            return {"ok": False, "code": code, "error": message}
+            return build_peer_error_response(code=code, error=message)
         except Exception as exc:
-            return {"ok": False, "code": "write_failed", "error": str(exc)}
+            return build_peer_error_response(code="write_failed", error=str(exc))
 
-        return {"ok": True, "data": result}
+        return build_peer_success_response(result)
 
     async def start(self) -> None:
         if self._started:
@@ -149,12 +149,11 @@ class FwsSocketIoPeerRelay:
             secret = get_secret()
         except Exception:
             return
-        auth = {
-            "role": "peer",
-            "api_token": derive_api_token(secret),
-            "runtime_id": derive_runtime_id(secret),
-            "pid": str(os.getpid()),
-        }
+        auth = build_peer_auth(
+            api_token=derive_api_token(secret),
+            runtime_id=derive_runtime_id(secret),
+            pid=str(os.getpid()),
+        )
 
         while True:
             try:
@@ -192,7 +191,7 @@ class FwsSocketIoPeerRelay:
                     if _notification_requires_subscription(notification) and (not shell_id or shell_id not in self._subscriptions):
                         continue
                     try:
-                        await self.client.emit("fws_peer_notification", notification, namespace=FWS_SOCKETIO_NAMESPACE)
+                        await self.client.emit(FWS_PEER_NOTIFICATION_EVENT, notification, namespace=FWS_SOCKETIO_NAMESPACE)
                     except Exception:
                         break
         except asyncio.CancelledError:

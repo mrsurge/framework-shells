@@ -129,27 +129,35 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 ## Next Slices
 
-1. Peer interoperability follow-through.
+1. Native pipe/PTY output hot-path optimization.
+
+   Phase 1 is a low-risk direct-output pass modeled on `native_pipe_testing`: batch log flushes by threshold/time, add a protocol-neutral raw `read_available(max_chunks, timeout) -> Vec<Vec<u8>>` primitive, keep `read_chunk` and `read_line_blocking` compatibility on top of raw byte batching, and avoid subscription mutex work when no subscribers exist. This targets the mixed burst/drain benchmark without adding Python, a broker process, a pump thread, or line/JSON-RPC parsing to the core transport.
+
+   Phase 2 is the real Tokio-native async-read path: register duplicated pipe/PTY stdout fds with `tokio::io::AsyncFd`, drain raw bytes on readiness, and route bytes through bounded in-memory waiter/subscriber state owned by the manager. Blocking APIs must remain intact, and one fd must not be consumed by blocking and async readers at the same time. Writes should stay direct initially; use a bounded writer lane or blocking-task boundary only if benchmarks show write-side blocking. Stdin `AsyncFd` is deferred until measured.
+
+   The target pressure test is `10k rps` in debug for the async concurrent pipe benchmark. That is a design target, not a guaranteed first-slice result. The mixed benchmark is treated as a read-drain stress test; sequential RTT and async-concurrent benchmarks remain the real workload validation shapes.
+
+2. Peer interoperability follow-through.
 
    The Rust-owned HTTP host/control-plane MVP, Socket.IO controller lane, and Ferrous peer-client MVP exist. Remaining peer work is end-to-end Python-FWS-to-Ferrous and Ferrous-to-Python smoke coverage, automatic native lifecycle/log relay, reconnect/backpressure hardening, and a later UDS transport that preserves the same DTO semantics.
 
-2. Finish the reactor cutover.
+3. Finish the reactor cutover.
 
    Passive log streams and child exit status now use one manager-owned reactor thread. Remaining work is moving readiness polling and future live subscriptions onto the same runtime model without changing pipe/PTY direct-read semantics.
 
-3. Metadata persistence.
+4. Metadata persistence.
 
    FWS-compatible record fields now exist for core shell/dashboard metadata. Remaining work is IO metadata sidecar writers and any future signing/verification parity.
 
-4. Capability expansion.
+5. Capability expansion.
 
    EOF, PTY resize, output subscription, and bounded slow-subscriber disconnection are implemented. Remaining work is raw write naming/API polish and deeper backpressure metrics/policy.
 
-5. PTY terminal semantics.
+6. PTY terminal semantics.
 
    PTY resize and raw/interactive terminal mode controls are implemented. Remaining work is deeper terminal semantics only if a concrete consumer needs them.
 
-6. Framed terminal-stream protocol.
+7. Framed terminal-stream protocol.
 
    Deferred. Add JSONL-out / JSON-RPC-in terminal broker semantics only as an explicit higher-level PTY protocol mode/backend when a consumer needs it.
 

@@ -136,7 +136,7 @@ Portable record fields:
 
 Records must not require raw stdout/stderr parsing to understand shell identity, status, backend, log paths, or capabilities.
 
-Environment values should not be persisted by default. Persisted records may expose env keys for observability, but secrets and full env values belong in live runtime memory only unless an implementation explicitly opts into unsafe debug output.
+Manager/base environment values should not be persisted by default. Persisted records may expose env keys for observability. Explicit per-shell launch overrides may be persisted as `env_overrides` because Python FWS consumers use that field for runtime discovery values such as `TE_APP_WORKER_PORT`; callers must not put unrelated secrets in that explicit override set unless they accept that visibility.
 
 `io_metadata_log` is a stable sidecar path declaration. Its presence does not imply that the implementation is already writing IO metadata records; consumers should treat the file as optional until records exist.
 

@@ -129,7 +129,32 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 ## Next Slices
 
-1. Native pipe/PTY output hot-path optimization.
+1. Shared dashboard and documentation parity cleanup.
+
+   Python FWS and Ferrous share the same dashboard/product surface, so ambiguous
+   or unsafe controls should be fixed as shared semantics instead of per-runtime
+   quirks.
+
+   The dashboard `Stop shells only` action should be removed unless a concrete,
+   non-duplicative semantic contract is found. It is ambiguous from the UI, has
+   no remembered Ferrous-native implementation requirement, and likely overlaps
+   with existing terminate/group/tree shutdown actions.
+
+   `Shutdown tree` needs a safety affordance before it remains a one-click
+   action. It can terminate the active framework shell tree, so the dashboard
+   should require an explicit confirmation step or equivalent guard before
+   invoking it. The same affordance should apply to the Ferrous-hosted dashboard
+   because it serves the same FWS UI assets and action contract.
+
+   The Python FWS and Ferrous READMEs need a product-positioning refresh. They
+   should describe real standalone/library usage, avoid implying MCP is a
+   practical primary use case, and cross-reference each other explicitly:
+   `framework-shells` as the Python implementation of the FWS process-runtime
+   contract, and `ferrous-framework` as the Rust implementation/interoperability
+   path. Draft notes live under `.external/readme-drafts` and should be reviewed
+   before README edits or commits.
+
+2. Native pipe/PTY output hot-path optimization.
 
    Phase 1 is a low-risk direct-output pass modeled on `native_pipe_testing`: batch log flushes by threshold/time, add a protocol-neutral raw `read_available(max_chunks, timeout) -> Vec<Vec<u8>>` primitive, keep `read_chunk` and `read_line_blocking` compatibility on top of raw byte batching, and avoid subscription mutex work when no subscribers exist. This targets the mixed burst/drain benchmark without adding Python, a broker process, a pump thread, or line/JSON-RPC parsing to the core transport.
 
@@ -137,27 +162,27 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
    The target pressure test is `10k rps` in debug for the async concurrent pipe benchmark. That is a design target, not a guaranteed first-slice result. The mixed benchmark is treated as a read-drain stress test; sequential RTT and async-concurrent benchmarks remain the real workload validation shapes.
 
-2. Peer interoperability follow-through.
+3. Peer interoperability follow-through.
 
    The Rust-owned HTTP host/control-plane MVP, Socket.IO controller lane, and Ferrous peer-client MVP exist. Remaining peer work is end-to-end Python-FWS-to-Ferrous and Ferrous-to-Python smoke coverage, automatic native lifecycle/log relay, reconnect/backpressure hardening, and a later UDS transport that preserves the same DTO semantics.
 
-3. Finish the reactor cutover.
+4. Finish the reactor cutover.
 
    Passive log streams and child exit status now use one manager-owned reactor thread. Remaining work is moving readiness polling and future live subscriptions onto the same runtime model without changing pipe/PTY direct-read semantics.
 
-4. Metadata persistence.
+5. Metadata persistence.
 
    FWS-compatible record fields now exist for core shell/dashboard metadata. Remaining work is IO metadata sidecar writers and any future signing/verification parity.
 
-5. Capability expansion.
+6. Capability expansion.
 
    EOF, PTY resize, output subscription, and bounded slow-subscriber disconnection are implemented. Remaining work is raw write naming/API polish and deeper backpressure metrics/policy.
 
-6. PTY terminal semantics.
+7. PTY terminal semantics.
 
    PTY resize and raw/interactive terminal mode controls are implemented. Remaining work is deeper terminal semantics only if a concrete consumer needs them.
 
-7. Framed terminal-stream protocol.
+8. Framed terminal-stream protocol.
 
    Deferred. Add JSONL-out / JSON-RPC-in terminal broker semantics only as an explicit higher-level PTY protocol mode/backend when a consumer needs it.
 

@@ -18,13 +18,15 @@
     </div>
 
     <div class="fws-toolbar">
-      <form method="post" action="/fws/action/shutdown" class="fws-toolbar-form" data-fws-ajax="1">
+      <form
+        method="post"
+        action="/fws/action/shutdown"
+        class="fws-toolbar-form"
+        data-fws-ajax="1"
+        data-confirm="Shutdown the full framework shell tree for this runtime?"
+      >
         <input type="hidden" name="scope" value="tree" />
         <button type="submit" class="btn btn-danger">Shutdown Tree</button>
-      </form>
-      <form method="post" action="/fws/action/shutdown" class="fws-toolbar-form" data-fws-ajax="1">
-        <input type="hidden" name="scope" value="shells" />
-        <button type="submit" class="btn btn-secondary">Stop Shells Only</button>
       </form>
       <form
         method="post"

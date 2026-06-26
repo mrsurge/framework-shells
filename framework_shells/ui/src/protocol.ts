@@ -1,6 +1,6 @@
 export type JsonRpcVersion = '2.0';
 export type LogStreamName = 'stdout' | 'stderr';
-export type ShutdownScope = 'tree' | 'shells';
+export type ShutdownScope = 'tree';
 export type ShellNotificationMethod =
   | 'fws.shell.created'
   | 'fws.shell.spawned'

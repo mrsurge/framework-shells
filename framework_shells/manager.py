@@ -106,6 +106,44 @@ class _HasFileno(Protocol):
     def fileno(self) -> int:
         ...
 
+def _is_unsigned_sibling_record(
+    data: Mapping[str, object],
+    *,
+    shell_id: str,
+    meta_path: Path,
+) -> bool:
+    """Accept current-runtime records written by non-Python FWS implementations.
+
+    Python-owned records stay signed. Ferrous currently writes the same canonical
+    metadata shape plus extra fields, but leaves `signature` unset, so the
+    Python manager must tolerate that shape for list/inspect interoperability.
+    """
+    signature = data.get("signature")
+    if isinstance(signature, str) and signature:
+        return False
+
+    record_id = data.get("id")
+    if not isinstance(record_id, str) or record_id != shell_id:
+        return False
+
+    has_sibling_shape = (
+        record_id.startswith("frs_")
+        or isinstance(data.get("record_path"), str)
+        or isinstance(data.get("capabilities"), dict)
+    )
+    if not has_sibling_shape:
+        return False
+
+    record_path = data.get("record_path")
+    if isinstance(record_path, str) and record_path:
+        try:
+            if Path(record_path).expanduser().resolve(strict=False) != meta_path.resolve(strict=False):
+                return False
+        except Exception:
+            return False
+
+    return True
+
 def _truthy_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -394,6 +432,12 @@ class FrameworkShellManager:
         updated = 0
         async for record in self._aiter_records():
             alive = bool(record.pid) and await self._is_pid_alive(record.pid)
+            foreign_unsigned_record = record.adopted and record.signature is None
+
+            if foreign_unsigned_record:
+                if not alive:
+                    stale_records.append(record)
+                continue
             
             # Special check for dtach: process might be alive even if we aren't attached
             # But record.pid tracks the actual shell inside dtach.
@@ -527,13 +571,23 @@ class FrameworkShellManager:
         except Exception:
             return None
 
-        # Verify signature using on-disk payload (forward-compatible with added fields).
+        unsigned_sibling_record = False
+
+        # Python-owned records are signed. Non-Python FWS sibling runtimes can
+        # write compatible records without that signature, but they must still
+        # live in this runtime and match the expected metadata path shape.
         try:
             from .auth import derive_runtime_id, verify_record
 
             if data.get("runtime_id") != derive_runtime_id(self.store.secret):
                 return None
-            if not verify_record(self.store.secret, data):
+            signature = data.get("signature")
+            if isinstance(signature, str) and signature:
+                if not verify_record(self.store.secret, data):
+                    return None
+            elif _is_unsigned_sibling_record(data, shell_id=shell_id, meta_path=meta_path):
+                unsigned_sibling_record = True
+            else:
                 return None
         except Exception:
             return None
@@ -593,7 +647,7 @@ class FrameworkShellManager:
                 exit_code=get_int("exit_code"),
                 run_id=get_str("run_id"),
                 launcher_pid=get_int("launcher_pid"),
-                adopted=bool(data.get("adopted", False)),
+                adopted=bool(data.get("adopted", False)) or unsigned_sibling_record,
                 backend=normalize_backend(
                     get_str("backend"),
                     uses_pty=bool(data.get("uses_pty", False)),

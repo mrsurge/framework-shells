@@ -595,7 +595,14 @@ async def run_async(args: argparse.Namespace) -> None:
     elif command == "list":
         shells = await manager.list_shells()
         if not _arg_bool(args, "all", False):
-            shells = [s for s in shells if s.status == "running" and s.pid]
+            live_shells: list[ShellRecord] = []
+            for shell in shells:
+                if shell.status != "running" or not shell.pid:
+                    continue
+                if not await manager._is_pid_alive(shell.pid):  # type: ignore[attr-defined]
+                    continue
+                live_shells.append(shell)
+            shells = live_shells
         show_stats = _arg_bool(args, "stats", False)
         if show_stats:
             print(f"{'ID':<20} {'SPEC':<14} {'LABEL':<15} {'STATUS':<10} {'PID':<6} {'CPU':>6} {'RSS':>9} {'BACKEND'}")

@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 import statistics
+import subprocess
 import sys
 import time
 from typing import Any
@@ -112,6 +113,8 @@ async def _run_case(
     force_python_pump: bool,
     manager_module: Any,
     native_pipe_module: Any,
+    server_command: list[str],
+    server_cwd: str,
     request_count: int,
     concurrency: int,
     request_bytes: int,
@@ -119,7 +122,6 @@ async def _run_case(
     push_count: int,
     push_bytes: int,
 ) -> dict[str, Any]:
-    script_path = Path(__file__).resolve().parent / "bench_pipe_jsonrpc_server.py"
     manager = await manager_module.get_manager()
 
     original_native_module = native_pipe_module._NATIVE_MODULE
@@ -131,8 +133,8 @@ async def _run_case(
     router: JsonRpcRouter | None = None
     try:
         shell = await manager.spawn_shell_pipe(
-            [sys.executable, str(script_path)],
-            cwd=str(script_path.parent),
+            server_command,
+            cwd=server_cwd,
             label=f"bench:{label}",
             pipe_config={"mode": "native_pipe_testing"},
         )
@@ -228,15 +230,72 @@ async def _run_case(
         await asyncio.sleep(0.1)
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _rust_bench_server_path(*, release: bool) -> Path:
+    suffix = ".exe" if sys.platform.startswith("win") else ""
+    profile = "release" if release else "debug"
+    return (
+        _repo_root()
+        / "native"
+        / "fws_pipe_pump"
+        / "target"
+        / profile
+        / f"fws-pipe-jsonrpc-bench-server{suffix}"
+    )
+
+
+def _build_rust_bench_server(*, release: bool) -> Path:
+    manifest = _repo_root() / "native" / "fws_pipe_pump" / "Cargo.toml"
+    command = [
+        "cargo",
+        "build",
+        "--manifest-path",
+        str(manifest),
+        "--bin",
+        "fws-pipe-jsonrpc-bench-server",
+    ]
+    if release:
+        command.append("--release")
+    subprocess.run(command, cwd=str(_repo_root()), check=True)
+    binary = _rust_bench_server_path(release=release)
+    if not binary.is_file():
+        raise FileNotFoundError(f"Rust benchmark server did not build: {binary}")
+    return binary
+
+
+def _server_command(args: argparse.Namespace) -> tuple[list[str], str]:
+    if args.server == "python":
+        script_path = Path(__file__).resolve().parent / "bench_pipe_jsonrpc_server.py"
+        return [sys.executable, str(script_path)], str(script_path.parent)
+
+    release = args.rust_server_profile == "release"
+    binary = _rust_bench_server_path(release=release)
+    if args.build_rust_server or not binary.is_file():
+        binary = _build_rust_bench_server(release=release)
+    if not binary.is_file():
+        raise FileNotFoundError(
+            f"Rust benchmark server not found: {binary}. "
+            "Run with --build-rust-server or build it manually."
+        )
+    return [str(binary)], str(binary.parent)
+
+
 async def _main_async(args: argparse.Namespace) -> int:
     import framework_shells as framework_shells_module
     import framework_shells.native_pipe as native_pipe_module
+
+    server_command, server_cwd = _server_command(args)
 
     python_case = await _run_case(
         label="python-reader",
         force_python_pump=True,
         manager_module=framework_shells_module,
         native_pipe_module=native_pipe_module,
+        server_command=server_command,
+        server_cwd=server_cwd,
         request_count=args.requests,
         concurrency=args.concurrency,
         request_bytes=args.request_bytes,
@@ -249,6 +308,8 @@ async def _main_async(args: argparse.Namespace) -> int:
         force_python_pump=False,
         manager_module=framework_shells_module,
         native_pipe_module=native_pipe_module,
+        server_command=server_command,
+        server_cwd=server_cwd,
         request_count=args.requests,
         concurrency=args.concurrency,
         request_bytes=args.request_bytes,
@@ -259,6 +320,8 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     output = {
         "loop": args.loop,
+        "server": args.server,
+        "server_command": server_command,
         "requests": args.requests,
         "concurrency": args.concurrency,
         "request_bytes": args.request_bytes,
@@ -281,6 +344,9 @@ def main() -> int:
     parser.add_argument("--response-bytes", type=int, default=4096)
     parser.add_argument("--push-count", type=int, default=2)
     parser.add_argument("--push-bytes", type=int, default=2048)
+    parser.add_argument("--server", choices=("python", "rust"), default="python")
+    parser.add_argument("--rust-server-profile", choices=("release", "debug"), default="release")
+    parser.add_argument("--build-rust-server", action="store_true")
     args = parser.parse_args()
     if args.loop == "uvloop":
         import uvloop

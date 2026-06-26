@@ -8,6 +8,10 @@ publish = false
 name = "fws_pipe_pump"
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "fws-pipe-jsonrpc-bench-server"
+path = "src/bin/bench_pipe_jsonrpc_server.rs"
+
 [features]
 default = ["abi3"]
 abi3 = ["pyo3/abi3-py39"]
@@ -15,3 +19,4 @@ abi3 = ["pyo3/abi3-py39"]
 [dependencies]
 libc = "0.2"
 pyo3 = { version = "0.28.3", features = ["extension-module"] }
+serde_json = "1"

@@ -1,7 +1,40 @@
-# Framework Shells Module
+# framework-shells
 
-A standalone Python package for process orchestration with PTY and pipe backends, plus legacy dtach compatibility.
-PTY-backed shells support `pty_mode="raw"` (legacy default) and `pty_mode="interactive"` (normal cooked/echoing terminal behavior).
+`framework-shells` is the Python implementation of the FWS process-runtime contract.
+
+FWS supervises long-running runtime components: app workers, language workers, build workers, file-system helpers, git workers, terminal brokers, adapter processes, and any other child process that needs lifecycle control plus observable stdout/stderr.
+
+The boundary is deliberate:
+
+- FWS owns launch, shutdown, shellspec rendering, runtime-scoped metadata, logs, capabilities, dashboard/control surfaces, and peer-manager coordination.
+- The application owns its protocol, request routing, DTOs, and business logic.
+
+Use `framework-shells` when a Python host needs FWS-compatible process supervision, FastAPI/ASGI mounting, shellspec orchestration, or interop with Rust/Ferrous managers.
+
+For Rust-native hosts or hot paths where Python should not own process I/O, use [`ferrous-framework`](https://github.com/mrsurge/ferrous-framework), the Rust implementation of the same runtime contract.
+
+## Runtime Model
+
+A managed process is a shell record with a backend, command, working directory, labels/subgroups, log paths, capabilities, runtime identity, and lifecycle state. Records live in a runtime-scoped store so multiple projects, secrets, or managers can coexist without sharing process state accidentally.
+
+Backends are intentionally simple:
+
+- `proc`: supervised process launch with stdout/stderr logs and lifecycle state, suitable for app workers and services that do not need stdin.
+- `pipe`: supervised stdin/stdout/stderr byte streams, suitable for JSON-RPC servers, protocol adapters, language services, build/file-system workers, and other structured backend components.
+- `pty`: supervised terminal byte stream with resize/input support, suitable for interactive shells and terminal applications.
+
+The `pipe` backend is protocol-neutral. It does not parse JSON-RPC, line protocols, editor control messages, or application DTOs. It owns the child process, stdin writes, stdout/stderr capture, logs, capabilities, and shutdown; the consumer owns framing and semantics.
+
+PTY-backed shells support `pty_mode="raw"` for byte-oriented compatibility and `pty_mode="interactive"` for normal cooked/echoing terminal behavior.
+
+## What This Is Not
+
+- It is not a protocol framework.
+- It is not a terminal emulator.
+- It is not a replacement for the application boundary.
+- It is not tied to a single IDE, web framework, or deployment layout.
+
+FWS is most useful when process supervision, observability, and runtime control need to be shared across tools without moving application-specific protocols into the supervisor.
 
 ## Install
 
@@ -53,20 +86,14 @@ python scripts/release/build_all.py \
 
 ## Overview
 
-`framework_shells/` is a self-contained module that manages long-running background processes ("shells") with:
+`framework_shells/` is a self-contained module that manages supervised runtime components with:
 
-- **Multiple backends**: PTY (interactive terminals), pipes (stdin/stdout), legacy dtach compatibility
-- **Configurable PTY discipline**: `raw` for legacy byte-oriented behavior, `interactive` for normal terminal echo/canonical input
-- **Runtime isolation**: Shells are namespaced by repo fingerprint + secret-derived runtime ID
-- **Event bus**: Real-time notifications for shell lifecycle events
-- **Singleton manager**: One manager instance per process, thread-safe
-- **Integration hooks (optional)**: Host apps can observe shell lifecycle events (e.g., for external process registries)
-
-Texbook use case:
-
-[https://github.com/mrsurge/termux-extensions-2](https://github.com/mrsurge/termux-extensions-2)
-
-(Termux-Extensions-2 is a "Mobile IDE" environment... LSPs, MCP servers, and Agents... on Linux/Termux/macOS ... no user permission orchestration required. All powered by this module)
+- Multiple backends: `proc`, `pipe`, and `pty`, plus legacy compatibility for old records.
+- Configurable PTY discipline: `raw` for byte-oriented behavior, `interactive` for normal terminal echo/canonical input.
+- Runtime isolation: shells are namespaced by repo fingerprint plus secret-derived runtime ID.
+- Event bus: real-time notifications for shell lifecycle and output events.
+- Singleton manager: one manager instance per process, thread-safe.
+- Optional integration hooks: host apps can observe lifecycle events for external registries or UI state.
 
 ## Directory Structure
 

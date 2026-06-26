@@ -1087,8 +1087,10 @@ function renderDashboardContent(state: DashboardStatePayload): string {
 
     if (path === '/fws/action/shutdown') {
       const scopeValue = String(formData.get('scope') ?? 'tree');
-      const scope = scopeValue === 'shells' ? 'shells' : 'tree';
-      await sendDashboardRequest('fws.shutdown', { scope });
+      if (scopeValue !== 'tree') {
+        throw new Error(`Unsupported shutdown scope: ${scopeValue}`);
+      }
+      await sendDashboardRequest('fws.shutdown', { scope: 'tree' });
     }
   }
 

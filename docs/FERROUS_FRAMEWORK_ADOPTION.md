@@ -85,7 +85,7 @@ Ferrous now has a Rust-owned host/control-plane MVP. `FerrousNativeHost` wraps `
 
 The host also owns the first Socket.IO-compatible controller lane. It mounts `/fws_ws/socket.io` with namespace `/fws`, accepts shared-secret authenticated peers, sends `fws_peer_subscriptions`, receives `fws_peer_notification`, and routes `fws.shell.input` through `fws_peer_request` when local live input is unavailable. The current controller is websocket-only and intentionally keeps the existing Python FWS event names/DTOs rather than creating a Ferrous-only protocol.
 
-Ferrous also has the matching peer-client MVP. `FerrousNativePeer` connects to a Python or Ferrous controller, authenticates with the shared-secret `api_token` and `runtime_id`, stores subscription hints, handles `fws_peer_request` for `fws.shell.input`, and returns the required Socket.IO ack response after calling the local native manager write/EOF primitives. It can explicitly emit `fws_peer_notification`; automatic native lifecycle/log relay over the peer client remains a later layer.
+Ferrous also has the matching peer-client. `FerrousNativePeer` connects to a Python or Ferrous controller, authenticates with the shared-secret `api_token` and `runtime_id`, stores subscription hints, handles `fws_peer_request` for `fws.shell.input`, and returns the required Socket.IO ack response after calling the local native manager write/EOF primitives. It can explicitly emit `fws_peer_notification` and now automatically relays native lifecycle events plus subscribed output chunks. The output relay uses native manager subscriptions and does not independently drain direct pipe/PTY stdout.
 
 ## FWS Environment Contract
 
@@ -164,7 +164,7 @@ Proc/app-worker style shells are lifecycle/log workers: stdout/stderr logging, p
 
 3. Peer interoperability follow-through.
 
-   The Rust-owned HTTP host/control-plane MVP, Socket.IO controller lane, and Ferrous peer-client MVP exist. Remaining peer work is end-to-end Python-FWS-to-Ferrous and Ferrous-to-Python smoke coverage, automatic native lifecycle/log relay, reconnect/backpressure hardening, and a later UDS transport that preserves the same DTO semantics.
+   The Rust-owned HTTP host/control-plane MVP, Socket.IO controller lane, and Ferrous peer-client exist. Remaining peer work is end-to-end Python-FWS-to-Ferrous and Ferrous-to-Python smoke coverage, reconnect/backpressure hardening, and a later UDS transport that preserves the same DTO semantics.
 
 4. Finish the reactor cutover.
 

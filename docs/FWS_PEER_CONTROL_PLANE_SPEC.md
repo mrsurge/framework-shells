@@ -187,10 +187,11 @@ Ferrous now implements both sides of the first Socket.IO lane at MVP level.
   manager write/EOF primitives.
 - returns the required Socket.IO ack response DTO.
 - exposes explicit `fws_peer_notification` emission.
+- automatically relays native lifecycle events and subscribed output chunks.
 
-The remaining Ferrous peer gap is automatic lifecycle/log relay from native
-manager events. Today the peer client can emit notifications explicitly, and it
-already honors subscription filtering for log-like notifications.
+Ferrous peer log relay honors controller subscription hints. It subscribes to
+native manager output broadcasts and does not independently drain direct
+pipe/PTY stdout, so protocol readers keep ownership of stdout bytes.
 
 ## Near-Future Peer Requests
 

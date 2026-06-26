@@ -192,9 +192,13 @@ async def _set_browser_log_shell(ns: socketio.AsyncNamespace, sid: str, shell_id
 
 
 async def _load_log_backlog(shell_id: str) -> tuple[str, str, list[IoMetadataPayload]]:
+    if not shell_id:
+        raise LookupError("Shell not found: ")
     mgr = await get_manager()
     record = await mgr.load_shell_record(shell_id)
     if record is None:
+        if _peer_sids:
+            return "", "", []
         raise LookupError(f"Shell not found: {shell_id}")
 
     async def _read_tail(path: Path) -> str:

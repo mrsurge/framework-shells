@@ -697,6 +697,7 @@ class FrameworkShellManager:
     def _prepare_env(self, record: ShellRecord) -> Dict[str, str]:
         env = os.environ.copy()
         env.update(record.env_overrides)
+        env.setdefault("FRAMEWORK_SHELLS_FWS_CHILD", "1")
         return env
 
     def _configure_pty_slave(self, slave_fd: int, *, pty_mode: str) -> None:

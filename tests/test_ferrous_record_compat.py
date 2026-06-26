@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -15,6 +16,50 @@ from framework_shells.store import RuntimeStore
 
 
 class FerrousRecordCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_python_fws_stamps_generic_child_marker_on_managed_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {
+                    "FRAMEWORK_SHELLS_SECRET": "fws-child-marker-secret",
+                    "FRAMEWORK_SHELLS_REPO_FINGERPRINT": "fwschildmarker",
+                    "FRAMEWORK_SHELLS_FWS_SOCKETIO_URL": "http://127.0.0.1:18089",
+                    "TE_FRAMEWORK_URL": "http://127.0.0.1:18089",
+                    "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID": str(os.getpid()),
+                    "FRAMEWORK_SHELLS_DISABLE_FWS_SOCKETIO_PEER": "1",
+                },
+            ):
+                store = RuntimeStore(base_dir=Path(tmp))
+                manager = FrameworkShellManager(
+                    store=store,
+                    enable_dtach_proxy=False,
+                    enable_procfs_process_discovery=False,
+                )
+                await asyncio.sleep(0)
+                now = time.time()
+                record = ShellRecord(
+                    id="fs_child_marker",
+                    command=["sh", "-c", "true"],
+                    label="child-marker",
+                    cwd=str(Path.cwd()),
+                    env_overrides={},
+                    pid=None,
+                    status="created",
+                    created_at=now,
+                    updated_at=now,
+                    autostart=True,
+                    stdout_log=str(store.logs_dir / "fs_child_marker.stdout.log"),
+                    stderr_log=str(store.logs_dir / "fs_child_marker.stderr.log"),
+                    backend="proc",
+                )
+
+                env = manager._prepare_env(record)
+                self.assertEqual(env.get("FRAMEWORK_SHELLS_FWS_CHILD"), "1")
+
+                record.env_overrides["FRAMEWORK_SHELLS_FWS_CHILD"] = "0"
+                env = manager._prepare_env(record)
+                self.assertEqual(env.get("FRAMEWORK_SHELLS_FWS_CHILD"), "0")
+
     async def test_unsigned_ferrous_record_loads_for_log_inspection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(

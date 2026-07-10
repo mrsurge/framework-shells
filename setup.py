@@ -39,7 +39,6 @@ except Exception:  # pragma: no cover - wheel is expected in normal builds
 ROOT = Path(__file__).resolve().parent
 BROKER_RELATIVE_PATH = Path("framework_shells/bin/fws-terminal-stream-broker")
 BROKER_SOURCE_MANIFEST = ROOT / "native" / "fws_terminal_stream_broker" / "Cargo.toml"
-BROKER_SOURCE_BINARY = ROOT / "native" / "fws_terminal_stream_broker" / "target" / "release" / "fws-terminal-stream-broker"
 INSTALL_MODE_ENV = "FRAMEWORK_SHELLS_INSTALL_MODE"
 INSTALL_MODE_ALIAS_ENV = "FWS_INSTALL_MODE"
 PIPE_PUMP_MODE_ENV = "FRAMEWORK_SHELLS_PIPE_PUMP_MODE"
@@ -110,8 +109,21 @@ def _normalize_mode(raw: str) -> str:
     return raw.replace("_", "-")
 
 
+def _cargo_release_dir(manifest_path: Path) -> Path:
+    target_dir = os.environ.get("CARGO_TARGET_DIR")
+    if target_dir:
+        return Path(target_dir).expanduser().resolve() / "release"
+    return manifest_path.parent / "target" / "release"
+
+
 def _is_free_threaded_python() -> bool:
     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+
+
+def _is_android_python() -> bool:
+    platform = sysconfig.get_platform().lower()
+    multiarch = str(sysconfig.get_config_var("MULTIARCH") or "").lower()
+    return "android" in platform or "android" in multiarch
 
 
 def _python_extension_suffix() -> str:
@@ -203,10 +215,11 @@ def _build_and_stage_native_broker() -> None:
             check=True,
             text=True,
         )
-        if not BROKER_SOURCE_BINARY.is_file():
-            raise FileNotFoundError(f"Built broker binary not found: {BROKER_SOURCE_BINARY}")
+        broker_source_binary = _cargo_release_dir(BROKER_SOURCE_MANIFEST) / "fws-terminal-stream-broker"
+        if not broker_source_binary.is_file():
+            raise FileNotFoundError(f"Built broker binary not found: {broker_source_binary}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(BROKER_SOURCE_BINARY, destination)
+        shutil.copy2(broker_source_binary, destination)
         _ensure_executable(destination)
         _staged_native_broker = True
         _log(f"bundled native terminal broker from source build: {destination}")
@@ -238,13 +251,46 @@ def _pipe_pump_mode() -> str:
 
 
 def _pipe_pump_artifact_candidates() -> list[Path]:
-    build_dir = ROOT / "native" / "fws_pipe_pump" / "target" / "release"
+    build_dir = _cargo_release_dir(PIPE_PUMP_SOURCE_MANIFEST)
     return [
         build_dir / f"lib{PIPE_PUMP_MODULE_NAME}.so",
         build_dir / f"lib{PIPE_PUMP_MODULE_NAME}.dylib",
         build_dir / f"{PIPE_PUMP_MODULE_NAME}.dll",
         build_dir / f"{PIPE_PUMP_MODULE_NAME}.so",
     ]
+
+
+def _pipe_pump_pyo3_config_path() -> Path:
+    version = sys.version_info
+    return ROOT / "build" / "pyo3-config" / f"fws-pipe-pump-cp{version.major}{version.minor}t.txt"
+
+
+def _write_pipe_pump_pyo3_config() -> Path:
+    pointer_width = 64 if sys.maxsize > 2**32 else 32
+    path = _pipe_pump_pyo3_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "implementation=CPython",
+        f"version={sys.version_info.major}.{sys.version_info.minor}",
+        "shared=false",
+        "abi3=false",
+        f"executable={sys.executable}",
+        f"pointer_width={pointer_width}",
+        "build_flags=Py_GIL_DISABLED",
+        "suppress_build_script_link_lines=true",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _pipe_pump_cargo_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYO3_BUILD_EXTENSION_MODULE", "1")
+    if _is_free_threaded_python() and _is_android_python() and not env.get("PYO3_CONFIG_FILE"):
+        config_path = _write_pipe_pump_pyo3_config()
+        env["PYO3_CONFIG_FILE"] = str(config_path)
+        _log(f"using PyO3 extension-module config for free-threaded Android Python: {config_path}")
+    return env
 
 
 def _build_and_stage_pipe_pump() -> None:
@@ -268,10 +314,17 @@ def _build_and_stage_pipe_pump() -> None:
     try:
         for artifact_path in [*existing_artifacts, *_pipe_pump_build_artifacts()]:
             artifact_path.unlink()
-        command = ["cargo", "build", "--manifest-path", str(PIPE_PUMP_SOURCE_MANIFEST), "--release"]
+        command = [
+            "cargo",
+            "build",
+            "--manifest-path",
+            str(PIPE_PUMP_SOURCE_MANIFEST),
+            "--release",
+            "--lib",
+        ]
         if _is_free_threaded_python():
             command.append("--no-default-features")
-        subprocess.run(command, cwd=str(ROOT), check=True, text=True)
+        subprocess.run(command, cwd=str(ROOT), env=_pipe_pump_cargo_env(), check=True, text=True)
         artifact = next((path for path in _pipe_pump_artifact_candidates() if path.is_file()), None)
         if artifact is None:
             raise FileNotFoundError("Built native pipe artifact not found")

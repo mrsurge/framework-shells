@@ -1,696 +1,363 @@
 # framework-shells
 
-`framework-shells` is the Python implementation of the FWS process-runtime contract.
+`framework-shells` is the Python implementation of FWS, a small process-runtime layer for apps that need to run child processes and keep them observable.
 
-FWS supervises long-running runtime components: app workers, language workers, build workers, file-system helpers, git workers, terminal brokers, adapter processes, and any other child process that needs lifecycle control plus observable stdout/stderr.
+Use it when your application starts long-lived workers or tools and you want one consistent way to:
 
-The boundary is deliberate:
+- launch them
+- stop them cleanly
+- group them by app/project/purpose
+- capture stdout/stderr logs
+- write to stdin when the backend supports it
+- inspect recent output
+- expose a dashboard or API for runtime control
+- share runtime state with other FWS-compatible managers
 
-- FWS owns launch, shutdown, shellspec rendering, runtime-scoped metadata, logs, capabilities, dashboard/control surfaces, and peer-manager coordination.
-- The application owns its protocol, request routing, DTOs, and business logic.
+Examples of things FWS can supervise:
 
-Use `framework-shells` when a Python host needs FWS-compatible process supervision, FastAPI/ASGI mounting, shellspec orchestration, or interop with Rust/Ferrous managers.
+- app workers
+- language servers
+- build workers
+- file-system or git helpers
+- JSON-RPC stdio services
+- terminal brokers
+- adapter processes
+- any other child process that should not be a hidden `subprocess.Popen(...)`
 
-For Rust-native hosts or hot paths where Python should not own process I/O, use [`ferrous-framework`](https://github.com/mrsurge/ferrous-framework), the Rust implementation of the same runtime contract.
+`framework-shells` is not the application protocol. It does not know what your JSON-RPC methods mean, how your DTOs are shaped, or how your business logic routes requests. It owns process lifecycle and observability. Your application owns protocol semantics.
 
-## Runtime Model
+For Rust-native hosts or paths where Python should not own process I/O, use [`ferrous-framework`](https://github.com/mrsurge/ferrous-framework), the Rust implementation of the same FWS runtime contract.
 
-A managed process is a shell record with a backend, command, working directory, labels/subgroups, log paths, capabilities, runtime identity, and lifecycle state. Records live in a runtime-scoped store so multiple projects, secrets, or managers can coexist without sharing process state accidentally.
+## Mental Model
 
-Backends are intentionally simple:
+An FWS runtime is a process manager plus a small metadata store.
 
-- `proc`: supervised process launch with stdout/stderr logs and lifecycle state, suitable for app workers and services that do not need stdin.
-- `pipe`: supervised stdin/stdout/stderr byte streams, suitable for JSON-RPC servers, protocol adapters, language services, build/file-system workers, and other structured backend components.
-- `pty`: supervised terminal byte stream with resize/input support, suitable for interactive shells and terminal applications.
+When FWS starts a child process, it creates a shell record. A shell record answers questions like:
 
-The `pipe` backend is protocol-neutral. It does not parse JSON-RPC, line protocols, editor control messages, or application DTOs. It owns the child process, stdin writes, stdout/stderr capture, logs, capabilities, and shutdown; the consumer owns framing and semantics.
+- what command was launched?
+- what backend owns it?
+- what PID is currently running?
+- where are stdout/stderr logs?
+- what labels and groups does it belong to?
+- can this manager write to stdin?
+- can this manager stream output live?
+- is the process still running or has it exited?
+
+Those records live under a runtime-specific directory. The runtime is keyed by a repo fingerprint and secret, so different projects or manager roots do not accidentally claim each other's processes.
+
+```text
+~/.cache/framework_shells/runtimes/<repo_fingerprint>/<runtime_id>/
+  meta/<shell_id>/meta.json
+  logs/<shell_id>.stdout.log
+  logs/<shell_id>.stderr.log
+```
+
+## Backends
+
+FWS intentionally keeps the backend model small.
+
+| Backend | Use it for | Shape |
+| --- | --- | --- |
+| `proc` | app workers, services, build jobs, helpers that do not need stdin | supervised process plus stdout/stderr logs |
+| `pipe` | JSON-RPC stdio servers, protocol adapters, language workers, structured backend tools | supervised stdin/stdout/stderr byte streams |
+| `pty` | interactive shells, terminal applications, TUI-like processes | supervised terminal byte stream with input and resize |
+
+The `pipe` backend is protocol-neutral. It does not parse JSON-RPC, line protocols, editor control messages, or application DTOs. It owns the child process, stdin writes, stdout/stderr capture, logs, capabilities, and shutdown. The consumer owns framing and semantics.
 
 PTY-backed shells support `pty_mode="raw"` for byte-oriented compatibility and `pty_mode="interactive"` for normal cooked/echoing terminal behavior.
 
-## What This Is Not
+## Shellspecs
 
-- It is not a protocol framework.
-- It is not a terminal emulator.
-- It is not a replacement for the application boundary.
-- It is not tied to a single IDE, web framework, or deployment layout.
+A shellspec is a YAML launch file.
 
-FWS is most useful when process supervision, observability, and runtime control need to be shared across tools without moving application-specific protocols into the supervisor.
+It is not a new protocol. It is just a declarative way to say: "these are the runtime processes this app may need, and here is how to launch them."
 
-## Install
+A shellspec gives FWS a stable process contract:
 
-```bash
-pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
-```
+- shell id inside the spec
+- backend (`proc`, `pipe`, or `pty`)
+- command and arguments
+- working directory
+- environment variables
+- labels and subgroups
+- optional readiness checks
+- optional dashboard/UI hints
+- optional debug/inspection flags
 
-Git source installs now default to `auto` native packaging:
-
-- if `cargo` is available, the install build attempts to compile and bundle:
-  - the native terminal broker
-  - the native pipe reader extension
-- if that build fails, install falls back to the pure-Python package by default
-
-You can override that behavior with `FRAMEWORK_SHELLS_INSTALL_MODE`:
-
-```bash
-# Force native broker build; fail install if it cannot be built
-FRAMEWORK_SHELLS_INSTALL_MODE=build \
-  pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
-
-# Force a pure-Python install with no native broker build attempt
-FRAMEWORK_SHELLS_INSTALL_MODE=python-only \
-  pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
-```
-
-Release build examples:
-
-```bash
-# Host artifacts only
-python scripts/release/build_all.py
-
-# Supported Unix-family native wheel matrix
-python scripts/release/build_all.py --matrix default --skip-smoke
-
-# Explicit target subset
-python scripts/release/build_all.py \
-  --native-target x86_64-unknown-linux-gnu \
-  --native-target aarch64-linux-android \
-  --skip-smoke
-```
-
-## Dependencies
-
-- Python 3.9+
-- `fastapi`, `uvicorn` (for API)
-- `pyyaml` (for spec files)
-- `dtach` (optional, legacy-only for old dtach sessions)
-
-## Overview
-
-`framework_shells/` is a self-contained module that manages supervised runtime components with:
-
-- Multiple backends: `proc`, `pipe`, and `pty`, plus legacy compatibility for old records.
-- Configurable PTY discipline: `raw` for byte-oriented behavior, `interactive` for normal terminal echo/canonical input.
-- Runtime isolation: shells are namespaced by repo fingerprint plus secret-derived runtime ID.
-- Event bus: real-time notifications for shell lifecycle and output events.
-- Singleton manager: one manager instance per process, thread-safe.
-- Optional integration hooks: host apps can observe lifecycle events for external registries or UI state.
-
-## Directory Structure
-
-```
-framework_shells/
-├── __init__.py          # Package exports and get_manager() singleton
-├── manager.py           # FrameworkShellManager - core orchestration
-├── record.py            # ShellRecord dataclass
-├── store.py             # RuntimeStore - namespaced storage paths
-├── auth.py              # Secret handling and token derivation
-├── events.py            # EventBus for shell lifecycle events
-├── hooks.py             # Optional lifecycle hook dataclasses (host integration)
-├── pty.py               # PTYState and PipeState dataclasses
-├── process_snapshot.py  # Host-agnostic process snapshot types
-├── shutdown.py          # Shutdown planner/executor helpers
-├── shellspec.py         # YAML shellspec loader + template renderer
-├── orchestrator.py      # Shellspec-based orchestration
-├── ui/
-│   ├── index.html          # Dashboard page
-│   ├── fws.css             # Dashboard styles
-│   ├── fws.js              # Minimal dashboard websocket client
-│   └── logs.html           # Legacy standalone log template (dashboard now uses a log drawer)
-├── cli/
-│   └── main.py          # CLI tool (fws list/up/down/tree/shutdown-group/inspect/attach)
-└── api/
-    ├── fastapi_router.py   # REST API endpoints
-    ├── fws_ui.py           # Self-hosted dashboard + logs (/fws, /ws/fws)
-    └── websocket.py        # WebSocket endpoints for shell events
-```
-
-## Core Concepts
-
-### ShellRecord
-
-Metadata for a managed process:
-
-```python
-@dataclass
-class ShellRecord:
-    id: str                    # Unique ID (fs_<timestamp>_<random>)
-    command: List[str]         # Command and arguments
-    label: Optional[str]       # Human-readable label
-    subgroups: List[str]       # Grouping hierarchy (e.g., ["app", "terminal"])
-    cwd: str                   # Working directory
-    pid: Optional[int]         # Process ID (None if not started)
-    status: str                # "pending", "running", "exited"
-    created_at: float          # Unix timestamp
-    backend: str               # Canonical backend: "proc" | "pty" | "pipe" | legacy "dtach"
-    uses_pty: bool             # PTY backend
-    uses_pipes: bool           # Pipe backend
-    uses_dtach: bool           # Legacy dtach record flag
-    pty_mode: str              # "raw" or "interactive" for pty-backed terminals
-    stdout_log: str            # Path to stdout log
-    stderr_log: str            # Path to stderr log
-    exit_code: Optional[int]   # Exit code (if exited)
-    runtime_id: str            # Namespace for this runtime
-```
-
-### Backends
-
-**PTY** (`spawn_shell_pty`):
-- Full terminal emulation
-- Supports resize, input/output streaming
-- Good for interactive shells
-- `pty_mode="raw"` preserves the legacy raw-ish termios behavior
-- `pty_mode="interactive"` keeps a normal cooked tty (echo/canonical input/signals)
-- No current manager-adoption path for resuming live PTY I/O after a manager restart
-
-The compatibility booleans remain in payloads, but `backend` is the canonical backend descriptor going forward.
-
-**Pipes** (`spawn_shell_pipe`):
-- Stdin/stdout/stderr as separate streams
-- Good for LSP servers, daemons
-- FWS now tees pipe `stdout` into the shell's `stdout_log`
-- Supports live stdin write while the current manager process owns the live pipe state
-- The lower-level API can also send explicit stdin EOF for live pipe shells
-- Supports experimental native modes under `pipe.mode`, including:
-  - `native_pipe_testing` for the raw high-traffic pipe reader
-  - `native_terminal_pipe_testing` for the PTY-backed terminal stream broker
-  - `python_terminal_pipe_testing` to force the Python PTY terminal-stream broker
-- No current manager-adoption path for resuming live raw-pipe I/O after a manager restart
-
-### Pipe Migration Notes
-
-- Existing `backend: pipe` shellspecs do not require a schema change.
-- The main change is behavioral: FWS now owns live pipe stdout observability and stdin writes while the current manager process is alive.
-- If an old wrapper mirrored stdout to stderr only so FWS could see it, remove that workaround and let stdout stay on stdout.
-- Review wrappers that use `exec 1>&2`, `2>&1`, or `tee /dev/stderr`; they may now duplicate output or pollute protocol stdout.
-- For stdio protocol servers, keep protocol/data traffic on stdout and human diagnostics on stderr.
-- Pipe output subscriptions are raw stream chunks, not line-framed records. Downstream consumers that assume one callback per line need to reassemble lines or messages themselves.
-- In this repo, `reattach` means manager/runtime-level resumed communication with an adopted shell session.
-- Raw `pipe` currently has no supported adoption path for resuming live I/O in a successor manager process.
-- `pipe.mode: native_terminal_pipe_testing` is now native-first with a built-in Python PTY fallback.
-- `pipe.mode: python_terminal_pipe_testing` explicitly forces the Python PTY broker even if the native broker binary is available.
-- `pipe.terminal_fallback` controls what happens if the native broker binary is unavailable:
-  - `python_pty` (default): launch `python -m framework_shells.terminal_stream_broker`
-  - `command`: use the shellspec `command` as the fallback broker path
-  - `error` / `native_only`: fail instead of falling back
-
-**Dtach** (`spawn_shell_dtach`):
-- Deprecated compatibility alias for `pty` on new launches
-- Legacy dtach-backed records may still exist and can still be recognized
-- CLI attach remains legacy-only for those existing dtach sessions
-
-### Runtime Isolation
-
-Shells are stored under:
-```
-~/.cache/framework_shells/runtimes/<repo_fingerprint>/<runtime_id>/
-├── meta/<shell_id>/meta.json
-├── logs/<shell_id>.stdout.log
-├── logs/<shell_id>.stderr.log
-└── sockets/<shell_id>.sock  (dtach only)
-```
-
-- `repo_fingerprint`: SHA256 of repo root path (first 16 chars)
-- `runtime_id`: Derived from `FRAMEWORK_SHELLS_SECRET`
-
-This ensures different repos and different secrets don't see each other's shells.
-Two instances with different secrets won't see each other's shells, even if running from the same repo. This enables running multiple clones on different ports without interference.
-
-## API
-
-### Manager Methods
-
-```python
-from framework_shells import get_manager
-
-mgr = await get_manager()
-
-# Advanced: configure the singleton once (must be consistent per-process)
-# mgr = await get_manager(process_hooks=..., enable_dtach_proxy=False, default_pty_mode="interactive")
-
-# Spawn shells
-record = await mgr.spawn_shell_pty(["bash", "-l", "-i"], label="terminal", cwd="/home/user", pty_mode="interactive")
-record = await mgr.spawn_shell_pipe(["pyright-langserver", "--stdio"], label="lsp:python")
-record = await mgr.spawn_shell_dtach(["bash", "-l", "-i"], label="legacy-alias", pty_mode="interactive")  # launches as pty
-
-# List and find
-shells = await mgr.list_shells()
-shell = await mgr.get_shell(shell_id)
-shell = await mgr.find_shell_by_label("terminal", status="running")
-
-# Describe (with stats + capabilities)
-info = await mgr.describe(record, include_logs=True, tail_lines=100)
-
-# Live shell I/O
-queue = await mgr.subscribe_output(shell_id)
-bytes_queue = await mgr.subscribe_output_bytes(shell_id)  # Lossless raw bytes
-result = await mgr.write_to_shell(shell_id, "status", append_newline=True)
-eof = await mgr.send_shell_eof(shell_id)  # Supported for live pipe shells
-
-# PTY-only terminal behavior
-await mgr.write_to_pty(shell_id, "ls -la\n")
-await mgr.resize_pty(shell_id, cols=120, rows=40)
-await mgr.unsubscribe_output(shell_id, queue)
-await mgr.unsubscribe_output_bytes(shell_id, bytes_queue)
-
-# Pipe I/O (in-memory only)
-pipe_state = mgr.get_pipe_state(shell_id)
-caps = await mgr.get_shell_capabilities(shell_id)
-
-# Lifecycle
-await mgr.terminate_shell(shell_id, force=True)
-await mgr.remove_shell(shell_id, force=True)  # Also removes logs/metadata
-result = await mgr.shutdown_app_group("demo-app")  # UI-equivalent group shutdown
-
-# Log helpers / retention
-tail = await mgr.get_log_tail(shell_id, stream="both", lines=50)
-matches = await mgr.search_logs(shell_id, stream="stdout", query="ready", limit=20)
-inspection = await mgr.inspect_logs(shell_id, stream="stdout", lines=100, format="jsonrpc")
-inspection = await mgr.inspect_logs(shell_id, stream="stderr", exclude_signature="plain:ipc_chunk")
-inspection = await mgr.inspect_logs(shell_id, include_io_metadata=True, include_stdin=True, include_timestamps=True)
-purged = await mgr.prune_exited_shells(max_count=50)
-
-# Optional: enumerate running PIDs for external monitoring
-pids = await mgr.list_active_pids()
-
-# Optional: provide lightweight aggregated stats (requires psutil for per-process CPU/RSS)
-stats = await mgr.aggregate_resource_stats()
-```
-
-### SIGWINCH on resize (optional)
-
-Some interactive programs (readline, shells, TUIs) cache terminal width and rely
-on `SIGWINCH` to refresh after a PTY resize. Legacy dtach sessions may still
-need the attach proxy to receive the signal.
-
-You can enable best-effort `SIGWINCH` delivery after `resize_pty()` by either:
-
-- Passing `signal_winch_on_resize=True` when creating the singleton manager (must be consistent per-process), or
-- Setting `FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE=1` in the environment.
-
-### PTY mode
-
-PTY-backed shells support two terminal modes:
-
-- `raw`: legacy default; disables canonical input, echo, and signal-generating terminal keys
-- `interactive`: leaves the PTY in a normal cooked terminal mode
-
-You can select the default mode for new PTY shells by either:
-
-- Passing `default_pty_mode="interactive"` when creating the singleton manager, or
-- Setting `FRAMEWORK_SHELLS_PTY_MODE=interactive` in the environment.
-
-### REST API
-
-```
-GET    /api/framework_shells                 # List all shells
-POST   /api/framework_shells                 # Create shell
-GET    /api/framework_shells/{id}            # Get shell details
-POST   /api/framework_shells/{id}/terminate  # Terminate shell
-POST   /api/framework_shells/{id}/action     # Terminate, etc.
-POST   /api/framework_shells/{id}/input      # Generic live stdin write; explicit EOF is a low-level option
-DELETE /api/framework_shells/{id}            # Purge metadata/logs (Exited-shell cleanup)
-POST   /api/framework_shells/purge_exited    # Purge metadata/logs for all exited shells
-POST   /api/framework_shells/app/{app_id}/shutdown      # UI-equivalent group shutdown
-GET    /api/framework_shells/logs/{id}/tail             # Structured stdout/stderr tail + boundary metadata
-GET    /api/framework_shells/logs/{id}/search           # Structured log search + metadata
-GET    /api/framework_shells/logs/{id}/inspect          # Event-first log inspection (`plain`, `json`, `jsonrpc`)
-GET    /api/framework_shells/{id}/replay     # Get stdout log
-```
-
-Shell payloads returned by the REST API include a canonical `backend` field plus compatibility booleans (`uses_pty`, `uses_pipes`, `uses_dtach`). Payloads also include a `capabilities` block describing live input/output support for that shell in the current manager process. `pty_mode` (`raw` or `interactive`) remains relevant for PTY-backed terminals; legacy dtach records may still report it as well.
-
-The inspection surface is intentionally narrow in v1:
-
-- parser/classifier support is limited to `plain`, `json`, and `jsonrpc`
-- raw event text remains primary and parsed fragments are annotations
-- `tail` now includes boundary metadata such as `partial_head`, byte-window offsets, and event count
-- stable bracketed plain-text prefixes are promoted into signatures such as `plain:ipc_chunk`
-- the only negative filters are `exclude_query` and `exclude_signature`
-- sidecar I/O metadata is opt-in with `include_io_metadata`; stdin records require `include_stdin`, timestamps require `include_timestamps`, and output chunk records require `include_output_metadata`
-
-### Debug I/O Metadata
-
-Raw stdout/stderr logs stay unmodified. If a shell opts in with `debug.io_metadata: true`, FWS writes a sibling JSONL sidecar (`io_metadata_log`) with chunk-level output metadata and stdin write records. Explicit stdin EOF, when used through lower-level APIs, is also recorded there. Stdin is never appended to the raw stdout/stderr logs.
-
-Shellspec example:
-
-```yaml
-shells:
-  rpc-worker:
-    backend: pipe
-    command: ["python", "-m", "my_rpc_worker"]
-    debug:
-      io_metadata: true
-      stdin_capture: preview
-      stdin_preview_bytes: 240
-```
-
-CLI example:
-
-```bash
-fws run --backend pipe --debug-io-metadata -- python -m my_rpc_worker
-fws inspect <shell_id> --io-metadata --stdin --timestamps --json
-```
-
-Example input body for the new live input route:
-
-```json
-{
-  "data": "status",
-  "append_newline": true
-}
-```
-
-The CLI exposes the same primitive for environments that share the active
-runtime secret/API URL:
-
-```bash
-fws write <shell_id> '{"jsonrpc":"2.0","id":"probe","method":"ping","params":{}}' --newline
-cat payload.json | fws write <shell_id> - --newline
-cat pretty-payload.json | fws write <shell_id> - --json --newline
-```
-
-Without `--json`, stdin data is written literally, including embedded newlines.
-With `--json`, the CLI parses the input JSON and writes a compact single-line
-fragment.
-
-## Self-hosted UI (FWS)
-
-When mounted in a FastAPI app, `framework_shells` can self-host a simple dashboard:
-
-- `GET /fws/` dashboard (live-updating via `WS /ws/fws`)
-- shell logs open in a full-page in-dashboard drawer backed by `WS /ws/fws/logs/{shell_id}`
-- `GET /fws/logs/{shell_id}` redirects into the dashboard drawer for compatibility
-- the log drawer includes a guarded STDIN injector when the selected shell reports live input capability
-- the STDIN injector has a `Minify JSON` helper that converts prettified JSON into a compact single-line payload before sending
-- the log drawer exposes an `IO overlay` checkbox only for shells with `debug.io_metadata: true`; when enabled, stdin sidecar records render as muted observability rows without changing raw logs
-- both websocket surfaces now use JSON-RPC envelopes rather than ad-hoc `{type: ...}` payloads
-  - dashboard and log opening, plus UI actions like terminate/purge/shutdown, are JSON-RPC requests with JSON-RPC responses
-  - shell/dashboard/log update pushes are JSON-RPC notifications
-  - the websocket text stream is JSONL-framed; each line is one JSON-RPC request, response, or notification envelope
-  - dashboard open request: `fws.dashboard.open`
-  - logs open request: `fws.logs.open`
-  - server notifications:
-    - dashboard lifecycle: `fws.shell.created`, `fws.shell.spawned`, `fws.shell.updated`, `fws.shell.exited`, `fws.shell.removed`
-    - log streaming: `fws.logs.initial`, `fws.logs.chunk`, `fws.logs.io_metadata`, `fws.logs.reset`
-    - errors: `fws.error`
-- the typed protocol contract for those websocket request/response and notification lanes now lives in:
-  - `framework_shells.protocols.fws_ui` on the Python/backend side
-  - `framework_shells/ui/src/protocol.ts` on the TypeScript/frontend side
-
-The dashboard toolbar includes **Truncate Logs**, which truncates all `.stdout.log`/`.stderr.log` files in the current runtime (it does not delete shell records). Exited shells can be fully removed via **Purge Exited** in the Exited section (deletes metadata + logs), and automatic exited-shell retention keeps only the newest 50 exited shell records.
-
-UI styling and grouping metadata is carried on each shell record via `ShellSpec.ui` / `ShellRecord.ui` (see Shellspec below).
-
-## Shellspec Convention (Recommended)
-
-`framework_shells` is framework-agnostic, but the intended integration pattern is:
-
-- Describe host-run processes as `ShellSpec` (YAML).
-- Start shells via `Orchestrator` (from a spec or spec ref).
-- Keep optional UI hints in the shellspec under `ui` (not host-specific code).
-
-### Shellspec Format
-
-A shellspec YAML file is a mapping of **shell type id → shell definition**:
-
-```yaml
-version: "1"
-shells:
-  <shell_type_id>:
-    command: ["bash", "-lc", "echo hello"]
-```
-
-### Shellspec Examples
-
-Minimal “proc” service:
+Minimal example:
 
 ```yaml
 version: "1"
 shells:
   api:
     backend: proc
+    cwd: ${ctx:PROJECT_ROOT}
     command: ["python", "-m", "http.server", "${free_port}"]
     env:
       PORT: ${free_port}
-      LOG_LEVEL: info
-```
-
-Deprecated dtach alias (new launches route to `pty`):
-
-```yaml
-version: "1"
-shells:
-  terminal:
-    backend: dtach
-    pty_mode: interactive
-    cwd: ${ctx:PROJECT_ROOT}
-    subgroups: ["terminal", "project:${ctx:APP_ID}"]
-    command: ["bash", "-l", "-i"]
-```
-
-Experimental native terminal stream over `pipe`:
-
-```yaml
-version: "1"
-shells:
-  terminal-stream:
-    backend: pipe
-    pipe:
-      mode: native_terminal_pipe_testing
-      terminal_fallback: python_pty
-    cwd: ${ctx:PROJECT_ROOT}
-    env:
-      TERMINAL_STREAM_CWD: ${ctx:PROJECT_ROOT}
-      TERMINAL_STREAM_COLS: ${ctx:COLS}
-      TERMINAL_STREAM_ROWS: ${ctx:ROWS}
-      TERMINAL_STREAM_SHELL_CMD_JSON: ${ctx:SHELL_CMD_JSON}
-```
-
-Notes:
-
-- This mode runs a native PTY broker under an outer `pipe` shell.
-- If the native broker binary is unavailable, FWS falls back to the Python PTY broker by default.
-- The terminal stream contract stays asymmetric:
-  - stdin uses JSON-RPC notifications
-  - stdout uses framed JSONL records
-- The typed Python broker contract for that stream now lives in `framework_shells.protocols.terminal_stream`.
-- If no `command` is provided, FWS injects an internal placeholder and resolves either the native broker or the configured fallback automatically.
-- Set `pipe.terminal_fallback: command` if you want the shellspec `command` to be the fallback broker path.
-- Set `pipe.terminal_fallback: error` (or `native_only`) if you want launch to fail when the native broker is unavailable.
-
-Explicit Python PTY terminal stream over `pipe`:
-
-```yaml
-version: "1"
-shells:
-  terminal-stream:
-    backend: pipe
-    pipe:
-      mode: python_terminal_pipe_testing
-    cwd: ${ctx:PROJECT_ROOT}
-    env:
-      TERMINAL_STREAM_CWD: ${ctx:PROJECT_ROOT}
-      TERMINAL_STREAM_COLS: ${ctx:COLS}
-      TERMINAL_STREAM_ROWS: ${ctx:ROWS}
-      TERMINAL_STREAM_SHELL_CMD_JSON: ${ctx:SHELL_CMD_JSON}
-```
-
-Notes:
-
-- This mode always launches `python -m framework_shells.terminal_stream_broker`.
-- It uses the same stdin/stdout terminal-stream contract as the native broker.
-
-### UI Hints (`shellspec.ui`)
-
-Shells can carry optional UI metadata via `ShellSpec.ui` / `ShellRecord.ui`.
-
-The dashboard currently supports `ui.subgroup_styles`: a mapping from subgroup name (or a glob pattern like `project:*` / `lsp:*`) to simple style properties for the subgroup “card”.
-
-Notes:
-- Patterns use `fnmatch` wildcards (`*`, `?`, `[]`).
-- If multiple patterns match a subgroup, the most-specific (longest) pattern wins.
-
-### Per-app Shellspec Layout
-
-A common layout is to keep shellspecs next to an app/module:
-
-```
-app/apps/<app_id>/
-└── shellspec/
-    └── app_worker.yaml
-```
-
-Example shellspec with env, subgroups, and UI styling:
-
-```yaml
-version: "1"
-shells:
-  worker:
-    backend: proc
-    cwd: ${ctx:PROJECT_ROOT}
-    subgroups: ["worker", "project:${ctx:APP_ID}"]
-    ui:
-      subgroup_styles:
-        worker:
-          bg: rgba(68, 45, 47, 0.80)
-          border: rgba(168, 85, 247, 0.60)
-        project:*:
-          bg: rgba(0, 0, 0, 0.88)
-          border: rgba(29, 70, 126, 0.88)
-    command:
-      - python
-      - -m
-      - your_module.worker
-      - --project
-      - ${ctx:PROJECT_ROOT}
-      - --port
-      - ${free_port}
-    env:
       APP_ID: ${ctx:APP_ID}
-      PORT: ${free_port}
-      LOG_LEVEL: info
-      FEATURE_FLAG_X: "1"
-      DATABASE_URL: ${env:DATABASE_URL}
 ```
 
-Then start it from a shellspec ref (`<path>#<id>`) with a render context:
+In that example:
+
+- `api` is the shellspec entry id.
+- `${ctx:PROJECT_ROOT}` and `${ctx:APP_ID}` come from the render context supplied by the host app.
+- `${free_port}` asks FWS to reserve and reuse one free port during rendering.
+- FWS launches the rendered command and stores the resulting shell record.
+
+Starting a shellspec entry from Python:
 
 ```python
+from framework_shells import get_manager
+from framework_shells.orchestrator import Orchestrator
+
+mgr = await get_manager()
 shell = await Orchestrator(mgr).start_from_ref(
-    "shellspec/app_worker.yaml#worker",
+    "shellspec/app_worker.yaml#api",
     base_dir=app_dir,
-    ctx={"APP_ID": app_id, "PROJECT_ROOT": project_root},
-    label=f"worker:{app_id}",
+    ctx={"APP_ID": "demo", "PROJECT_ROOT": str(project_root)},
+    label="app-worker:demo",
 )
 ```
 
-### Events
+A `pipe` shellspec for a stdio JSON-RPC worker:
+
+```yaml
+version: "1"
+shells:
+  rpc_worker:
+    backend: pipe
+    cwd: ${ctx:PROJECT_ROOT}
+    command: ["python", "-m", "my_app.rpc_worker"]
+    subgroups: ["demo", "rpc"]
+    inspect_hints:
+      - json
+      - jsonrpc
+```
+
+FWS will supervise the process and preserve stdout/stderr observability. Your app still owns the JSON-RPC reader, writer, request routing, and DTO validation.
+
+## Quick Python Usage
 
 ```python
-from framework_shells.events import get_event_bus, EventType
+from framework_shells import get_manager
 
-bus = get_event_bus()
-queue = bus.subscribe()
+mgr = await get_manager()
 
-while True:
-    event = await queue.get()
-    # event.type: shell.created, shell.spawned, shell.pty_chunk, shell.exited, ...
-    # event.shell_id, event.data, event.timestamp
+# A normal supervised process.
+proc = await mgr.spawn_shell(
+    ["python", "-m", "http.server", "8080"],
+    label="demo-server",
+)
+
+# A stdio worker with live stdin/stdout while this manager owns it.
+pipe = await mgr.spawn_shell_pipe(
+    ["python", "-m", "my_app.rpc_worker"],
+    label="rpc-worker",
+)
+await mgr.write_to_shell(pipe.id, '{"jsonrpc":"2.0","id":1,"method":"ping"}', append_newline=True)
+
+# An interactive terminal process.
+pty = await mgr.spawn_shell_pty(
+    ["bash", "-l", "-i"],
+    label="terminal",
+    pty_mode="interactive",
+)
+await mgr.resize_pty(pty.id, cols=120, rows=40)
+
+# Inspect and control.
+shells = await mgr.list_shells()
+tail = await mgr.get_log_tail(pipe.id, stream="stdout", lines=100)
+await mgr.terminate_shell(proc.id, force=False)
 ```
 
 ## CLI
 
-```bash
-# List shells
-fws list
+The `fws` CLI uses the same runtime store and secret resolution as the Python manager.
 
-# Include exited shells in the list
+```bash
+# List current runtime shells.
+fws list
 fws list --all
 
-# Apply spec file
+# Start all autostart entries from a shellspec file.
 fws up shells.yaml
 
-# Terminate one shell (ID, label, or unique ID prefix)
-fws terminate <shell_id>
+# Start a one-off process.
+fws run --backend proc --label demo -- python -m http.server 8080
 
-# Remove one shell's metadata/logs (terminates if still running)
-fws rm <shell_id>
-
-# Shutdown all running shells in an app/group (same semantics as UI "Shutdown Group")
-fws shutdown-group <app_id>
-fws shutdown-group <app_id> --json
-
-# Inspect recent log events with optional raw/structured filters
+# Inspect recent output.
 fws inspect <shell_id>
 fws inspect <shell_id> --stream stdout --format jsonrpc --json
-fws inspect <shell_id> --stream stderr --exclude-signature plain:ipc_chunk
 
-# Spawn a one-off shell without a spec
-fws run --backend pty --pty-mode interactive --label demo --env FOO=bar --env PORT=1234 -- bash -l -i
+# Write to live stdin when the owning manager exposes input.
+fws write <shell_id> '{"jsonrpc":"2.0","id":"probe","method":"ping","params":{}}' --newline
+cat payload.json | fws write <shell_id> - --json --newline
 
-# Terminate all shells
-fws down
+# Stop or remove shells.
+fws terminate <shell_id>
+fws rm <shell_id>
+fws shutdown-group <app_id>
 fws down --tree
 
-# Attach to legacy dtach shell
-fws attach <shell_id>
-
-# Show process trees (managed shells + procfs descendants)
+# Show process trees.
 fws tree --depth 4
-
-# Include exited shells in the tree if they still have a PID recorded
-fws tree --all
 ```
 
-The CLI auto-detects the repo fingerprint from cwd and loads the stored secret.
+## Dashboard And API
+
+`framework-shells` can be mounted into a FastAPI/ASGI host. The mounted runtime exposes:
+
+- REST endpoints for shell list/detail/control
+- live dashboard updates
+- live log streaming
+- shell stdin injection for capable live shells
+- log inspection helpers
+- runtime auth derived from `FRAMEWORK_SHELLS_SECRET`
+
+The helper mount is:
+
+```python
+from framework_shells.api.socketio_backend import mount_fws_dashboard_runtime
+
+mount_fws_dashboard_runtime(app)
+```
+
+Important routes:
+
+```text
+GET    /fws/                                      dashboard
+GET    /api/framework_shells                     list shells
+GET    /api/framework_shells/{id}                shell detail
+POST   /api/framework_shells/{id}/terminate      terminate shell
+POST   /api/framework_shells/{id}/input          write stdin / send EOF when supported
+DELETE /api/framework_shells/{id}                remove metadata and logs
+GET    /api/framework_shells/logs/{id}/tail      structured log tail
+GET    /api/framework_shells/logs/{id}/inspect   plain/json/jsonrpc inspection
+POST   /api/framework_shells/app/{app_id}/shutdown  group shutdown
+```
+
+The dashboard is an observability/control surface. It is not required for the supervised process to run.
+
+## Logs And Inspection
+
+Raw stdout and stderr logs stay raw. FWS does not rewrite process output to add timestamps or protocol metadata.
+
+Inspection is a read-side helper over the raw logs. It can classify recent output as:
+
+- `plain`
+- `json`
+- `jsonrpc`
+
+For deeper debugging, a shell can opt into I/O metadata sidecars:
+
+```yaml
+version: "1"
+shells:
+  rpc_worker:
+    backend: pipe
+    command: ["python", "-m", "my_app.rpc_worker"]
+    debug:
+      io_metadata: true
+```
+
+When enabled, FWS writes a sibling JSONL sidecar with output chunk metadata and stdin write records. Stdin is never appended to raw stdout/stderr logs.
+
+CLI example:
+
+```bash
+fws inspect <shell_id> --io-metadata --stdin --timestamps --json
+```
+
+## Runtime Boundaries
+
+FWS owns:
+
+- process launch
+- shutdown and group shutdown
+- process metadata
+- stdout/stderr log paths
+- live input/output capability reporting
+- dashboard/API/control surfaces
+- peer-manager coordination across Python and Ferrous runtimes
+
+Your application owns:
+
+- protocol framing
+- request/response correlation
+- DTOs
+- schema validation
+- business logic
+- user-facing app behavior
+
+This boundary is the reason `pipe` is a byte stream instead of a JSON-RPC framework. FWS should make protocol workers observable and controllable without becoming part of their protocol.
+
+## Native Packaging
+
+Git source installs default to `auto` native packaging.
+
+If Cargo is available, setup attempts to build and bundle:
+
+- the native terminal broker binary
+- the native pipe reader extension
+
+If native build fails in `auto` mode, the install continues with the pure-Python package. To require native artifacts:
+
+```bash
+FRAMEWORK_SHELLS_INSTALL_MODE=build \
+FRAMEWORK_SHELLS_PIPE_PUMP_MODE=build \
+python -m pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
+```
+
+To force Python-only install:
+
+```bash
+FRAMEWORK_SHELLS_INSTALL_MODE=python-only \
+python -m pip install "framework-shells @ git+https://github.com/mrsurge/framework-shells@main"
+```
+
+Free-threaded Termux Python is supported by the source build path. The PyO3 pipe pump is built as a version-specific extension such as:
+
+```text
+fws_pipe_pump.cpython-314t-aarch64-linux-android.so
+```
 
 ## Environment Variables
 
 | Variable | Description |
-|----------|-------------|
+| --- | --- |
 | `FRAMEWORK_SHELLS_SECRET` | Secret for runtime ID derivation and API auth |
 | `FRAMEWORK_SHELLS_REPO_FINGERPRINT` | Override auto-computed repo fingerprint |
-| `FRAMEWORK_SHELLS_BASE_DIR` | Override storage base dir (default `~/.cache/framework_shells`) |
-| `FRAMEWORK_SHELLS_PTY_MODE` | Default PTY discipline for new PTY shells (`raw` or `interactive`) |
+| `FRAMEWORK_SHELLS_BASE_DIR` | Override storage base dir, default `~/.cache/framework_shells` |
+| `FRAMEWORK_SHELLS_PTY_MODE` | Default PTY mode for new PTY shells, `raw` or `interactive` |
+| `FRAMEWORK_SHELLS_INSTALL_MODE` | Native packaging mode, `auto`, `build`, or `python-only` |
+| `FRAMEWORK_SHELLS_PIPE_PUMP_MODE` | Native pipe extension packaging mode, defaults to install mode |
 
-## Secret & Fingerprint Surface
+If `FRAMEWORK_SHELLS_SECRET` is missing, the CLI tries to load or create the runtime secret under the current repo fingerprint. If the secret is set, mutating API endpoints require a derived token via `X-Framework-Key` or `Authorization: Bearer ...`.
 
-`framework_shells` has two key inputs that define where it stores metadata/logs and which shells belong to the current runtime:
+## Directory Layout
 
-- `FRAMEWORK_SHELLS_REPO_FINGERPRINT`: repo-scoped namespace (defaults to a SHA256 of `cwd` if unset)
-- `FRAMEWORK_SHELLS_SECRET`: secret used to derive the `runtime_id` (and API tokens when auth is enabled)
-- `FRAMEWORK_SHELLS_BASE_DIR`: optional override for the on-disk storage root (defaults to `~/.cache/framework_shells`)
-- `FRAMEWORK_SHELLS_PTY_MODE`: optional default PTY mode for newly created PTY shells
-
-### Standalone / CLI
-
-The CLI tries to be usable standalone:
-
-- If `FRAMEWORK_SHELLS_REPO_FINGERPRINT` is missing, it computes one from `cwd` (and sets the env var).
-- If `FRAMEWORK_SHELLS_SECRET` is missing, it tries to load the stored secret file under the computed fingerprint.
-- If no stored secret exists, it creates and stores a new secret for that fingerprint (so subsequent `fws` invocations share the same runtime).
-
-
-## Integration Hooks (Optional)
-
-`FrameworkShellManager` supports optional host-provided lifecycle hooks via `ShellLifecycleHooks`.
-
-This stays intentionally framework-agnostic: the library does not know about IPC, FastAPI, systemd, etc.
-Hooks are best-effort (errors are swallowed) and may be sync or async.
-
-Common uses:
-- Register/unregister shell PIDs in an external process registry
-- Emit metrics/telemetry for shell start/adopt/exit events
-- Maintain parent/child graphs outside of `framework_shells`
-
-Exposed hook points:
-- `on_shell_running(record)`
-- `on_shell_adopted(record)`
-- `on_shell_exited(record, last_pid)`
-
-## Notes on Detach / Process Groups
-
-Shell processes are launched with `start_new_session=True` for isolation. This means:
-- Killing the host process does not necessarily kill the shells it spawned.
-- Host frameworks should call `terminate_shell()` on shutdown.
-- If a host framework uses an external “last resort” killer, it should either:
-    - scan `framework_shells` runtime metadata and terminate shells, or
-    - ensure shell PIDs are registered with that external supervisor.
-
-## Auth
-
-Mutating API endpoints can require authentication via:
-- `X-Framework-Key` header (frontend uses this)
-- `Authorization: Bearer <token>` header
-
-Token is derived from `FRAMEWORK_SHELLS_SECRET`.
-
-- If `FRAMEWORK_SHELLS_SECRET` is unset/empty, auth is disabled (dev mode).
-- If `FRAMEWORK_SHELLS_SECRET` is set, mutating endpoints require a valid token.
+```text
+framework_shells/
+  manager.py              core FrameworkShellManager
+  record.py               ShellRecord metadata model
+  store.py                runtime-scoped storage paths
+  shellspec.py            YAML shellspec loader and renderer
+  orchestrator.py         shellspec start/apply helpers
+  events.py               process-local lifecycle/output event bus
+  shutdown.py             shutdown planner/executor helpers
+  native_pipe.py          optional native pipe extension loader
+  terminal_stream_broker.py  Python terminal-stream fallback broker
+  api/                    REST, dashboard, and Socket.IO runtime
+  cli/                    fws command
+  protocols/              typed JSON-RPC/dashboard/peer contracts
+  ui/                     dashboard frontend assets
+```
 
 ## Screenshots
-Although the dashboard can be rendered as a standalone page and has a corresponding url, it can also be embedded within your app, like in these examples via iframe, fastHTML/HTMX or however your platform does it natively:
-| Dash screen               | Logs screen               |
-|----------------------------|----------------------------|
+
+The dashboard can run as a standalone page or be embedded by a host application.
+
+| Dashboard | Logs |
+| --- | --- |
 | <img width="200" height="444" alt="dash.png" src="https://raw.githubusercontent.com/mrsurge/framework-shells/refs/heads/main/pngs/dash.png" /> | <img width="200" height="400" alt="logs.png" src="https://raw.githubusercontent.com/mrsurge/framework-shells/refs/heads/main/pngs/logs.png" /> |

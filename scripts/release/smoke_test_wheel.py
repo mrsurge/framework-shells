@@ -192,7 +192,7 @@ def smoke_test_wheel(wheel_path: Path, *, expect_native_broker: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="fws-wheel-smoke-") as tmp:
         tmp_path = Path(tmp)
         venv_dir = tmp_path / "venv"
-        venv.EnvBuilder(with_pip=True, system_site_packages=True, clear=True).create(venv_dir)
+        venv.EnvBuilder(with_pip=True, system_site_packages=False, clear=True).create(venv_dir)
         python_bin = venv_python_path(venv_dir)
 
         run(
@@ -202,7 +202,6 @@ def smoke_test_wheel(wheel_path: Path, *, expect_native_broker: bool) -> None:
                 "pip",
                 "install",
                 "--disable-pip-version-check",
-                "--no-deps",
                 "--force-reinstall",
                 str(wheel_path),
             ],
@@ -215,7 +214,13 @@ def smoke_test_wheel(wheel_path: Path, *, expect_native_broker: bool) -> None:
             cwd=tmp_path,
             env={
                 "PYTHONPATH": "",
+                "FRAMEWORK_SHELLS_BASE_DIR": str(tmp_path / "framework-shells"),
+                "FRAMEWORK_SHELLS_SECRET": "fws-release-wheel-smoke-secret",
+                "FRAMEWORK_SHELLS_REPO_FINGERPRINT": "release-wheel-smoke",
+                "FRAMEWORK_SHELLS_SECRET_FINGERPRINT": "release-wheel-smoke",
+                "FRAMEWORK_SHELLS_RUN_ID": "release-wheel-smoke",
                 "FRAMEWORK_SHELLS_NATIVE_TERMINAL_BROKER": "",
+                "FRAMEWORK_SHELLS_DISABLE_FWS_SOCKETIO_PEER": "1",
                 "PATH": os.pathsep.join(
                     part
                     for part in ("/system/bin", "/bin", "/usr/bin")

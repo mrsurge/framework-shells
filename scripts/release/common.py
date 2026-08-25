@@ -74,15 +74,12 @@ def default_plat_name_for_target(target: str) -> str | None:
 
 
 def terminal_broker_binary_path(*, target: str, profile: str) -> Path:
-    return (
-        ROOT
-        / "native"
-        / "fws_terminal_stream_broker"
-        / "target"
-        / target
-        / profile
-        / TERMINAL_BROKER_BIN_NAME
-    )
+    configured_target_dir = os.environ.get("CARGO_TARGET_DIR")
+    if configured_target_dir:
+        target_dir = Path(configured_target_dir).expanduser()
+    else:
+        target_dir = ROOT / "native" / "fws_terminal_stream_broker" / "target"
+    return target_dir / target / profile / TERMINAL_BROKER_BIN_NAME
 
 
 def ensure_executable(path: Path) -> None:

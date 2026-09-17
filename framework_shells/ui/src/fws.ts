@@ -1,3 +1,4 @@
+import { loadWindow, loadRawPage, type LogWindow, type ProjectedRecord, type WindowAction } from './log_projection_client';
 import { connectSocketIo, type SocketIoSocket } from './socketio_client';
 import { initFwsConsoleBridge } from './te2_console_bridge';
 import {
@@ -80,7 +81,7 @@ type Matcher = (line: string) => boolean;
 type SubgroupStyleMap = Record<string, SubgroupStyle>;
 type DashboardStateResult = RequestResultMap['fws.dashboard.open'] | RequestResultMap['fws.dashboard.refresh'];
 type StoredLogRenderOptions = Record<string, StoredShellLogRenderOptions>;
-type LogEntry = { kind: 'text'; text: string } | { kind: 'io'; record: IoMetadataRecord };
+type LogEntry = { kind: 'text'; text: string; projection?: ProjectedRecord } | { kind: 'io'; record: IoMetadataRecord };
 
 const FWS_SOCKETIO_NAMESPACE = '/fws';
 const FWS_SOCKETIO_PATH = '/fws_ws/socket.io';
@@ -757,6 +758,69 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       stderr: makeStreamState('stderr-container'),
     },
   };
+
+  const projections: Partial<Record<LogStreamName, LogWindow>> = {};
+  const projectionBusy = new Set<LogStreamName>();
+  const projectionPending = new Map<LogStreamName, WindowAction>();
+  const following: Record<LogStreamName, boolean> = {stdout: true, stderr: true};
+  let projectionEpoch = 0;
+  let metadataEntries: IoMetadataRecord[] = [];
+  let originalPageEpoch = 0;
+
+  async function requestProjection(stream: LogStreamName, action: WindowAction = 'tail'): Promise<void> {
+    projectionPending.set(stream, action);
+    if (projectionBusy.has(stream)) return;
+    projectionBusy.add(stream);
+    try {
+      while (projectionPending.has(stream) && logState.shellId) {
+        const next = projectionPending.get(stream) ?? 'tail';
+        projectionPending.delete(stream);
+        const shell = logState.shellId;
+        const epoch = projectionEpoch;
+        let view: LogWindow;
+        try {
+          view = await loadWindow(shell, stream, next, projections[stream]);
+        } catch (error) {
+          if (epoch === projectionEpoch && shell === logState.shellId && !projectionPending.has(stream)) {
+            renderLogError(error instanceof Error ? error.message : String(error));
+          }
+          continue;
+        }
+        if (epoch !== projectionEpoch || shell !== logState.shellId) continue;
+        // A navigation click supersedes an in-flight live-tail request.
+        const queued = projectionPending.get(stream);
+        if (queued !== undefined && queued !== next) continue;
+        if (logState.paused && projections[stream] && next === 'tail') {
+          logState.streams[stream].pendingCount = 1;
+          setPendingLabel(stream);
+          continue;
+        }
+        projections[stream] = view;
+        const state = logState.streams[stream];
+        state.entries = view.records.map(record => ({kind: 'text', text: record.text.replace(/\r?\n$/, ''), projection: record}));
+        if (stream === 'stdout' && view.at_tail) {
+          state.entries.push(...metadataEntries.map(record => ({kind: 'io' as const, record})));
+        }
+        state.partial = '';
+        state.pendingCount = 0;
+        following[stream] = next === 'tail';
+        renderStream(stream);
+      }
+    } catch (error) {
+      renderLogError(error instanceof Error ? error.message : String(error));
+    } finally {
+      projectionBusy.delete(stream);
+    }
+  }
+
+  function projectionChanged(stream: LogStreamName): void {
+    if (logState.paused || !following[stream]) {
+      logState.streams[stream].pendingCount = 1;
+      setPendingLabel(stream);
+    } else {
+      void requestProjection(stream);
+    }
+  }
 
   function nextDashboardRequestId(): string {
     dashboardRequestCounter += 1;
@@ -1449,6 +1513,40 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       highlight: getFilterHighlight(stream),
     });
     node.appendChild(rendered.fragment);
+    if (entry.projection) {
+      const record = entry.projection;
+      node.dataset.byteStart = String(record.raw.byte_start);
+      if (record.diagnostic) {
+        const note = document.createElement('span');
+        note.className = 'log-projection-note';
+        note.textContent = ' [' + record.diagnostic + ']';
+        note.title = record.omissions.map(item => item.pointer + ': ' + item.serialized_bytes + ' bytes').join('\n');
+        node.appendChild(note);
+      }
+      const button = document.createElement('button');
+      button.className = 'log-raw-page';
+      button.textContent = 'Original bytes';
+      let offset = 0;
+      const shell = logState.shellId;
+      const output = document.createElement('pre');
+      output.className = 'log-original-page';
+      button.addEventListener('click', () => {
+        const pageEpoch = ++originalPageEpoch;
+        document.querySelectorAll('.log-original-page').forEach(element => { element.textContent = ''; });
+        button.disabled = true;
+        void loadRawPage(shell, stream, record.raw, offset).then(page => {
+          if (pageEpoch !== originalPageEpoch) { button.disabled = false; return; }
+          output.textContent = 'Bytes ' + offset + '-' + page.next_offset + ' (hex)\n' + page.hex;
+          offset = page.eof ? 0 : page.next_offset;
+          button.textContent = page.eof ? 'Original bytes again' : 'Next 64 KiB';
+          button.disabled = false;
+        }).catch((error: unknown) => {
+          output.textContent = String(error);
+          button.disabled = false;
+        });
+      });
+      node.append(button, output);
+    }
     return { node, finalStyle: rendered.finalStyle };
   }
 
@@ -1475,7 +1573,29 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     }
     const pinned = isPinned(container);
     const entries = getFilteredEntries(stream);
+    const viewportTop = container.getBoundingClientRect().top;
+    const anchor = Array.from(container.querySelectorAll<HTMLElement>('[data-byte-start]'))
+      .find(node => node.getBoundingClientRect().bottom >= viewportTop + 32);
+    const anchorId = anchor?.dataset.byteStart;
+    const anchorTop = anchor?.getBoundingClientRect().top;
+    const scrollBefore = container.scrollTop;
     container.innerHTML = '';
+    const view = projections[stream];
+    if (view) {
+      const navigation = document.createElement('div');
+      navigation.className = 'log-window-controls';
+      for (const action of ['older', 'newer', 'tail'] as const) {
+        const button = document.createElement('button');
+        button.textContent = action === 'tail' ? 'Live tail' : action;
+        button.disabled = action === 'older' ? view.at_start : action === 'newer' ? view.at_tail : false;
+        button.addEventListener('click', () => { following[stream] = action === 'tail'; void requestProjection(stream, action); });
+        navigation.appendChild(button);
+      }
+      const status = document.createElement('span');
+      status.textContent = ' Records ' + view.start + '-' + view.end + ' of ' + view.total + (view.pending_bytes ? ' (partial frame pending)' : '') + ' | Filters: displayed window';
+      navigation.appendChild(status);
+      container.appendChild(navigation);
+    }
     if (entries.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'loading';
@@ -1484,8 +1604,15 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     } else {
       container.appendChild(buildLineNodes(stream, entries));
     }
-    if (pinned) {
+    if (following[stream] && pinned) {
       container.scrollTop = container.scrollHeight;
+    } else if (anchorId) {
+      const anchorNow = container.querySelector<HTMLElement>('[data-byte-start="' + anchorId + '"]');
+      if (anchorNow && anchorTop !== undefined) {
+        container.scrollTop += anchorNow.getBoundingClientRect().top - anchorTop;
+      } else {
+        container.scrollTop = scrollBefore;
+      }
     }
     setPendingLabel(stream);
   }
@@ -1582,8 +1709,15 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     if (record.kind !== 'stdin_write' && record.kind !== 'stdin_eof') {
       return;
     }
+    record = { ...record };
+    if (record.text && record.text.length > 4096) { record.text = record.text.slice(0, 4096); record.preview_truncated = true; }
+    if (record.preview && record.preview.length > 4096) { record.preview = record.preview.slice(0, 4096); record.preview_truncated = true; }
+    metadataEntries.push(record);
+    if (metadataEntries.length > 128) metadataEntries.shift();
     const state = logState.streams.stdout;
+    if (logState.paused) { state.pendingCount = 1; return; }
     state.entries.push({ kind: 'io', record });
+    if (state.entries.length > 1000) state.entries.splice(0, state.entries.length - 1000);
     if (!options.render) {
       return;
     }
@@ -1669,9 +1803,10 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         if (message.params.shell_id !== currentShellId) {
           return;
         }
-        parseTextIntoState('stdout', message.params.stdout);
-        parseTextIntoState('stderr', message.params.stderr);
+
         appendInitialIoMetadata(message.params.io_metadata);
+        projectionChanged('stdout');
+        projectionChanged('stderr');
         renderStream('stdout');
         renderStream('stderr');
         return;
@@ -1685,24 +1820,15 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         if (message.params.shell_id !== currentShellId) {
           return;
         }
+        delete projections[message.params.stream];
         resetStream(message.params.stream);
+        projectionChanged(message.params.stream);
         return;
       case 'fws.logs.chunk': {
         if (message.params.shell_id !== currentShellId) {
           return;
         }
-        const stream = message.params.stream;
-        const appended = appendChunkToState(stream, message.params.chunk);
-        if (logState.paused) {
-          logState.streams[stream].pendingCount += appended.newLines.length;
-          setPendingLabel(stream);
-          return;
-        }
-        if (hasActiveFilters(stream)) {
-          renderStream(stream);
-        } else {
-          appendLines(stream, appended.newLines, appended.partialLine, appended.initialAnsiStyle);
-        }
+        projectionChanged(message.params.stream);
         return;
       }
       case 'fws.error':
@@ -1719,7 +1845,10 @@ function renderDashboardContent(state: DashboardStatePayload): string {
 
   async function openLogSubscription(shellId: string): Promise<void> {
     try {
-      await sendDashboardRequest('fws.logs.open', { shell_id: shellId });
+      await sendDashboardRequest('fws.logs.open', { shell_id: shellId, projection: true });
+      if (logState.shellId === shellId) {
+        await Promise.all(LOG_STREAMS.map(stream => requestProjection(stream)));
+      }
       if (logState.shellId === shellId) {
         setLogStatus('Connected', true);
       }
@@ -1768,6 +1897,9 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     document.body.classList.add('has-log-drawer');
     logDrawer.classList.add('is-open');
     logDrawer.setAttribute('aria-hidden', 'false');
+    projectionEpoch += 1;
+    metadataEntries = [];
+    for (const stream of LOG_STREAMS) { delete projections[stream]; following[stream] = true; }
     logState.shellId = nextShellId;
     logState.shellLabel = shellLabel || findShellLabel(nextShellId);
     applyStoredLogRenderOptions(nextShellId);
@@ -1801,6 +1933,10 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       return;
     }
     const previousShellId = logState.shellId;
+    projectionEpoch += 1;
+    metadataEntries = [];
+    projectionPending.clear();
+    for (const stream of LOG_STREAMS) delete projections[stream];
     logState.shellId = '';
     logState.shellLabel = '';
     logState.ioOverlayEnabled = false;
@@ -1923,8 +2059,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       logState.paused = logPauseInput.checked;
       if (!logState.paused) {
         for (const stream of LOG_STREAMS) {
-          logState.streams[stream].pendingCount = 0;
-          renderStream(stream);
+          projectionChanged(stream);
         }
       } else {
         for (const stream of LOG_STREAMS) {

@@ -59,6 +59,7 @@ def _rendered_payload(spec: ShellSpec) -> dict[str, object]:
         "env": dict(spec.env),
         "subgroups": list(spec.subgroups),
         "pipe": dict(spec.pipe),
+        "log_codecs": dict(spec.log_codecs),
         "pty_mode": spec.pty_mode,
         "readiness": _readiness_payload(spec.readiness),
         "autostart": spec.autostart,

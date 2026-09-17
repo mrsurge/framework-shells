@@ -846,3 +846,21 @@ body.has-log-drawer {
   border-radius: 2px;
   font-size: 0.72rem;
 }
+
+.log-window-controls {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  align-items: center;
+  padding: .4rem;
+  background: #161b22;
+  color: #8b949e;
+  font-size: .75rem;
+}
+.log-projection-note, .log-raw-page { color: #8b949e; font-size: .75rem; }
+.log-raw-page { margin-inline-start: .5rem; }
+.log-original-page { max-height: 16rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #8b949e; }
+.log-original-page:empty { display: none; }

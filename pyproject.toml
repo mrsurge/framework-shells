@@ -12,6 +12,7 @@ dependencies = [
   "fastapi",
   "aiofiles",
   "aiohttp>=3,<4",
+  "msgpack>=1,<2",
   "pyyaml",
   "python-socketio>=5,<6",
   "uvicorn>=0.23,<1",

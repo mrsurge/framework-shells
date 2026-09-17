@@ -112,7 +112,14 @@ def project_record(
     if codec not in ("text", "json", "messagepack"):
         raise ValueError("invalid codec")
     if codec == "messagepack":
-        raise ValueError("MessagePack requires the frame decoder")
+        from .msgpack_observation import decode_frame
+        frame = decode_frame(data, min(parse_bytes, PARSE_BYTES))
+        if frame is None or frame.consumed != len(data):
+            raise ValueError("expected one complete MessagePack frame")
+        normalized = _encoded(frame.value)
+        projected = project_record(normalized, RawReference(raw.generation, 0, len(normalized)),
+                                   codec="json", max_bytes=max_bytes, parse_bytes=parse_bytes)
+        return RecordProjection(projected.text, raw, projected.omissions, projected.diagnostic)
     # Limit preview decoding before attempting any structured parsing.
     text = data[:max_bytes].decode("utf-8", errors="replace")
     if len(data) <= max_bytes and len(text.encode("utf-8")) <= max_bytes:
@@ -145,6 +152,8 @@ def project_record(
         return preview("structured_summary_required")
     omissions: list[Omission] = []
     for size, pointer, kind, parent, key in candidates:
+        if len(omissions) >= 128 or len(pointer.encode("utf-8")) > 1024:
+            return preview("structured_summary_required")
         del parent[key]
         omissions.append(Omission(pointer, kind, size))
         compact = _encoded(value)

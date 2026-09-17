@@ -1,4 +1,4 @@
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -8,9 +8,11 @@ from pathlib import Path
 from ..auth import get_secret, derive_api_token
 from ..manager import FrameworkShellManager
 from ..record import ShellRecord
+from ..log_projection import RawReference, WindowAction
 from ..shared_manager import get_manager as get_shared_manager
 
 router = APIRouter()
+projection_router = APIRouter()
 
 JsonDict = dict[str, object]
 
@@ -273,6 +275,50 @@ async def shutdown_app_group(
     return await mgr.shutdown_app_group(app_id)
 
 
+@projection_router.get("/api/framework_shells/logs/{shell_id}/window")
+async def get_log_window(
+    shell_id: str,
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    stream: Literal["stdout", "stderr"] = "stdout",
+    action: WindowAction = "tail",
+    current: Annotated[int, Query(ge=0)] = 0,
+    count: Annotated[int, Query(ge=1, le=1000)] = 1000,
+    shift: Annotated[int, Query(ge=0)] = 250,
+    generation: str | None = None,
+):
+    try:
+        window = await mgr.get_log_window(shell_id, stream=stream, action=action,
+            current=current, count=count, shift=shift, generation=generation)
+        return {"ok": True, "data": window.to_dict()}
+    except (KeyError, FileNotFoundError):
+        raise HTTPException(404, "Shell or log not found")
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409 if "stale" in str(exc) or "changed" in str(exc) else 400, str(exc))
+
+
+@projection_router.get("/api/framework_shells/logs/{shell_id}/raw")
+async def get_log_raw(
+    shell_id: str,
+    mgr: Annotated[FrameworkShellManager, Depends(get_manager_dep)],
+    generation: str,
+    byte_start: Annotated[int, Query(ge=0)],
+    byte_end: Annotated[int, Query(ge=0)],
+    stream: Literal["stdout", "stderr"] = "stdout",
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=65536)] = 65536,
+):
+    try:
+        data = await mgr.get_log_raw(shell_id, RawReference(generation, byte_start, byte_end),
+            stream=stream, offset=offset, limit=limit)
+        next_offset = min(offset + len(data), byte_end - byte_start)
+        return {"ok": True, "data": {"hex": data.hex(), "next_offset": next_offset,
+                                      "eof": next_offset >= byte_end - byte_start}}
+    except (KeyError, FileNotFoundError):
+        raise HTTPException(404, "Shell or log not found")
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409 if "stale" in str(exc) or "changed" in str(exc) else 400, str(exc))
+
+
 @router.get("/api/framework_shells/logs/{shell_id}/tail")
 async def get_log_tail(
     shell_id: str,
@@ -375,3 +421,6 @@ async def replay_log(
     # Simple FileResponse for now. 
     # Front-end can handle range headers automatically with FileResponse if needed.
     return FileResponse(path, media_type="text/plain")
+
+
+router.include_router(projection_router)

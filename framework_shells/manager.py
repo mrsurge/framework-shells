@@ -25,6 +25,10 @@ from typing import AsyncIterator, Dict, Iterable, List, Literal, Optional, Proto
 import aiofiles
 
 from .store import RuntimeStore
+from .log_codecs import log_codecs as normalize_log_codecs, stream_codec
+from .log_window import IndexCache, LogWindow, mark_log_reset
+from .log_projection import RawReference, WindowAction
+
 from .record import (
     BACKEND_DTACH,
     BACKEND_PIPE,
@@ -214,6 +218,7 @@ class FrameworkShellManager:
         self.started_at = time.time()
         self._pty = {}
         self._pipes = {}
+        self._log_indexes = IndexCache()
         
         self._event_bus = get_event_bus()
         self._lock_instance = None
@@ -392,6 +397,10 @@ class FrameworkShellManager:
 
     async def emit_log_reset(self, shell_id: str, stream_name: str) -> None:
         record = await self._load_record(shell_id)
+        if record is not None:
+            path = Path(record.stdout_log if stream_name == "stdout" else record.stderr_log)
+            await asyncio.to_thread(mark_log_reset, path)
+            await asyncio.to_thread(self._log_indexes.invalidate, path)
         event = ShellEvent(
             type=EventType.LOG_RESET,
             shell_id=shell_id,
@@ -633,6 +642,7 @@ class FrameworkShellManager:
                 subgroups=get_list("subgroups"),
                 ui=get_dict("ui"),
                 debug=get_dict("debug"),
+                log_codecs=normalize_log_codecs(data.get("log_codecs")),
                 cwd=get_str("cwd", str(HOME_DIR)) or str(HOME_DIR),
                 env_overrides=env_overrides,
                 pid=get_int("pid"),
@@ -735,6 +745,7 @@ class FrameworkShellManager:
         subgroups: Optional[List[str]] = None,
         ui: Optional[dict[str, object]] = None,
         debug: Optional[dict[str, object]] = None,
+        log_codecs: Optional[dict[str, str]] = None,
         autostart: bool,
         uses_pty: bool = False,
         uses_pipes: bool = False,
@@ -763,6 +774,7 @@ class FrameworkShellManager:
             subgroups=normalized_subgroups,
             ui=ui or {},
             debug=debug or {},
+            log_codecs=normalize_log_codecs(log_codecs),
             cwd=cwd_path,
             env_overrides=overrides,
             pid=None,
@@ -1203,7 +1215,8 @@ class FrameworkShellManager:
         if stream is None:
             return
 
-        async with aiofiles.open(log_path, "ab") as log_fh:
+        # Publish only bytes already visible to file-backed projection readers.
+        async with aiofiles.open(log_path, "ab", buffering=0) as log_fh:
             pending_flush_bytes = 0
             while not state.stop.is_set():
                 try:
@@ -1214,8 +1227,13 @@ class FrameworkShellManager:
                     if not data:
                         break
 
-                    await log_fh.write(data)
-                    pending_flush_bytes += len(data)
+                    written = 0
+                    while written < len(data):
+                        count = await log_fh.write(data[written:])
+                        if count <= 0:
+                            raise OSError("log write made no progress")
+                        written += count
+                    pending_flush_bytes += written
                     if pending_flush_bytes >= self.PIPE_LOG_FLUSH_BYTES:
                         await log_fh.flush()
                         pending_flush_bytes = 0
@@ -1717,10 +1735,11 @@ class FrameworkShellManager:
         ui: Optional[dict[str, object]] = None,
         debug: Optional[dict[str, object]] = None,
         autostart: bool = True,
+        log_codecs: Optional[dict[str, str]] = None,
     ) -> ShellRecord:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
-            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, autostart=autostart,
+            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, log_codecs=log_codecs, autostart=autostart,
             backend=BACKEND_PROC
         )
         if autostart:
@@ -1743,10 +1762,11 @@ class FrameworkShellManager:
         pty_mode: Optional[str] = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
+        log_codecs: Optional[dict[str, str]] = None,
     ) -> ShellRecord:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
-            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, autostart=autostart,
+            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, log_codecs=log_codecs, autostart=autostart,
             backend=BACKEND_PTY, pty_mode=pty_mode, parent_shell_id=parent_shell_id
         )
         if autostart:
@@ -1769,10 +1789,11 @@ class FrameworkShellManager:
         pipe_config: dict[str, object] | None = None,
         autostart: bool = True,
         parent_shell_id: Optional[str] = None,
+        log_codecs: Optional[dict[str, str]] = None,
     ) -> ShellRecord:
         record = self._create_record(
             command, cwd=cwd, env=env, label=label,
-            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, autostart=autostart,
+            spec_id=spec_id, subgroups=subgroups, ui=ui, debug=debug, log_codecs=log_codecs, autostart=autostart,
             backend=BACKEND_PIPE,
             parent_shell_id=parent_shell_id
         )
@@ -1917,6 +1938,7 @@ class FrameworkShellManager:
                 if p.exists():
                     try:
                         await asyncio.to_thread(p.unlink)
+                        await asyncio.to_thread(p.with_name(p.name + ".fws-reset").unlink, missing_ok=True)
                     except Exception:
                         pass
             # Emit removed event
@@ -2048,6 +2070,7 @@ class FrameworkShellManager:
                     path = Path(log_path)
                     if path.exists():
                         await asyncio.to_thread(path.unlink)
+                        await asyncio.to_thread(path.with_name(path.name + ".fws-reset").unlink, missing_ok=True)
                 except Exception:
                     pass
             removed_ids.append(rec.id)
@@ -2093,6 +2116,7 @@ class FrameworkShellManager:
                     path = Path(log_path)
                     if path.exists():
                         await asyncio.to_thread(path.unlink)
+                        await asyncio.to_thread(path.with_name(path.name + ".fws-reset").unlink, missing_ok=True)
                         trimmed_any = True
                 except Exception:
                     pass
@@ -2276,6 +2300,40 @@ class FrameworkShellManager:
 
         return result
 
+    async def get_log_window(
+        self, shell_id: str, *, stream: str = "stdout",
+        action: WindowAction = "tail", current: int = 0, count: int = 1000,
+        shift: int = 250, generation: str | None = None,
+    ) -> LogWindow:
+        record = await self.load_shell_record(shell_id)
+        if record is None:
+            raise KeyError(f"Shell not found: {shell_id}")
+        codec = stream_codec(record.log_codecs, stream)
+        path = Path(record.stdout_log if stream == "stdout" else record.stderr_log)
+
+        def read() -> LogWindow:
+            with self._log_indexes.borrow(path, codec) as index:
+                return index.window(action=action, current=current, count=count,
+                                    shift=shift, generation=generation, max_bytes=1024 * 1024 - 64)
+
+        return await asyncio.to_thread(read)
+
+    async def get_log_raw(
+        self, shell_id: str, reference: RawReference, *, stream: str = "stdout",
+        offset: int = 0, limit: int = 65536,
+    ) -> bytes:
+        record = await self.load_shell_record(shell_id)
+        if record is None:
+            raise KeyError(f"Shell not found: {shell_id}")
+        codec = stream_codec(record.log_codecs, stream)
+        path = Path(record.stdout_log if stream == "stdout" else record.stderr_log)
+
+        def read() -> bytes:
+            with self._log_indexes.borrow(path, codec) as index:
+                return index.raw(reference, offset=offset, limit=limit)
+
+        return await asyncio.to_thread(read)
+
     async def inspect_logs(
         self,
         shell_id: str,
@@ -2341,6 +2399,7 @@ class FrameworkShellManager:
             stdout_path = Path(rec.stdout_log)
             stdout_inspection = await inspect_log_file(
                 stdout_path,
+                codec=stream_codec(rec.log_codecs, "stdout"),
                 stream="stdout",
                 lines=line_count,
                 max_bytes=self.LOG_TAIL_BYTES,
@@ -2361,6 +2420,7 @@ class FrameworkShellManager:
             stderr_path = Path(rec.stderr_log)
             stderr_inspection = await inspect_log_file(
                 stderr_path,
+                codec=stream_codec(rec.log_codecs, "stderr"),
                 stream="stderr",
                 lines=line_count,
                 max_bytes=self.LOG_TAIL_BYTES,

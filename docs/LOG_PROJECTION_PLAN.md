@@ -1,6 +1,6 @@
 # FWS Log Projection And Codec Plan
 
-Status: shared projection primitives implemented; consumer integration pending.
+Status: paired manager/REST/dashboard integration implemented; acceptance hardening in progress.
 Working branch in both repositories: `feature/log-projection-codecs`.
 
 ## Scope And Paired Delivery
@@ -329,11 +329,11 @@ measured tolerances before using performance as a release gate.
 | --- | --- | --- | --- |
 | Matching branches and mirrored plan | Complete | Complete | Clean baseline; no runtime edits |
 | Typed DTOs, defaults, golden fixture contract | In progress | In progress | Raw reference/omission/record DTOs, window actions, shared initial fixtures pass |
-| Indexed bounded line windows and raw retrieval | Pending | Pending | Seek/reset/limit tests |
+| Indexed bounded line windows and raw retrieval | In progress | In progress | Disk offset index, append/reset/raw/whole-response budget tests pass; bounded manager caches and REST window/raw routes implemented |
 | Oversized structured-value projection | In progress | In progress | Nested field omission, UTF-8 limits, compact JSON and parse-size ceiling tested |
-| Event-driven windows and frontend integration | Pending | Pending | Race/gap/DOM/peer tests |
-| MessagePack metadata, frame index and decoding | Pending | Pending | Cross-codec golden cases |
-| CLI/REST/MCP projection integration | Pending | Pending | Consumer parity |
+| Event-driven windows and frontend integration | In progress | In progress | Shared dashboard uses event-triggered windows, paging and bounded raw pages; DOM/race stress pending |
+| MessagePack metadata, frame index and decoding | In progress | In progress | Shared frame fixtures and indexed-frame tests pass; shellspec/record/peer metadata and Python inspect decoding implemented |
+| CLI/REST/MCP projection integration | In progress | In progress | Matching window/raw REST routes; Python inspect detects codec from either runtime; external consumer smoke pending |
 | Resource/performance and mixed-runtime verification | Pending | Pending | Baseline comparison |
 | UDS peer control transport | Planned, after codecs | Planned, after codecs | Symmetric reconnect/auth/event contract |
 | Persistent shell/survival contract and fixtures | Planned, after codecs | Planned, after codecs | Typed policy, ownership and shutdown intent |
@@ -350,10 +350,9 @@ navigation. Focused Python tests and strict typing pass; Rust integration tests
 pass against the identical fixtures.
 
 These primitives are not wired into managers, the dashboard, CLI, or MCP yet.
-MessagePack is a declared codec with an explicit unsupported-decoder error until
-the frame decoder lands; it is not advertised as a working shellspec option.
-Raw references currently describe bytes supplied by the caller; generation
-validation and original-byte retrieval await the file/index layer.
+MessagePack has a bounded complete-frame decoder and indexed-frame reader.
+It is not yet advertised as a working shellspec option. Both index implementations
+support original-byte retrieval with generation checks.
 
 Structured omission removes the largest candidate nested field values first,
 with byte-size ties ordered by JSON Pointer. It preserves root jsonrpc/id/method
@@ -361,11 +360,141 @@ and error.code, and records omissions outside the projected JSON. Arrays are
 currently whole-value candidates. Input beyond the parser byte ceiling yields an
 explicit preview diagnostic. Preview decoding is bounded before JSON parsing.
 
-Still required before integration: align parser depth/numeric behavior across
-languages, bound omission metadata as part of the full response budget, expand
-golden fixtures for pathological input, implement indexed windows/raw expansion,
-and implement MessagePack framing and normalization. The current record budget
-limits rendered text; it is not yet a total serialized-response budget.
+The new window layer caps the entire serialized response, including omission
+metadata, and returns actual selected bounds. Tail selection retains the newest
+records when the byte budget is tighter than the record budget. A budget too
+small for even one projected record produces an explicit error. Omission count
+is capped at 128 and individual omission pointers at 1,024 UTF-8 bytes.
 
-Next slice: finish strict whole-response/parser contracts, then build matching
-indexed line-window and frame-decoder paths in both repositories.
+### Indexed File Layer
+
+Python `log_window.LineIndex` and Rust `log_window::LineIndex` keep 8-byte record
+end offsets in an owned temporary file, scan source growth in 64 KiB chunks,
+and read only selected records. They expose bounded raw retrieval (64 KiB per
+call), window selection, and a pending-byte count. JSON/text use LF boundaries
+and preserve CRLF bytes. MessagePack indexes complete objects, holding incomplete
+suffixes under a 1 MiB frame ceiling. Corrupt streams fail explicitly; a failed
+scan invalidates partial index state before retry.
+
+These synchronous primitives require an I/O executor in async hosts. Each object
+owns its scratch index and generation; a fresh object requires client resync.
+The host must cap/evict its index cache and close/drop evicted handles. Truncation,
+replacement, and detectable same-size modification reset generation. A truncate
+followed by regrowth beyond the prior length between observations cannot be
+distinguished from append by file metadata alone: controlled writers must call
+invalidate on reset and propagate generation/reset events across managers.
+Arbitrary in-place log editing is outside the append-only writer contract.
+
+Python and Rust now also provide a bounded `IndexCache` with least-recently-used
+eviction, keyed by absolute source path and codec. Eviction closes/drops the
+temporary index, never the source log. Revisiting an evicted entry creates a new
+generation; old cursors and raw references require resync. Explicit path reset
+invalidates all cached codec views, even when source metadata has not changed.
+Python holds a cache lock for the entire context-managed borrow; Rust requires
+an exclusive mutable borrow, with host synchronization still to be wired. These
+operations remain blocking-executor work, not async reactor work. The Python
+default capacity is 32; Rust takes an explicit capacity. Caches are not yet
+attached to managers. Focused paired tests cover eviction ordering, retained
+references, stale references, path-wide reset, invalid capacity, and preservation
+of raw source files.
+
+### MessagePack Representation
+
+Decode concatenated objects with established libraries (Python msgpack; Rust
+rmpv plus rmp-serde strict validation). Preserve original byte references even
+when rendering JSON. Objects with unique string keys display as JSON objects;
+duplicate/non-string keys or a reserved `$fws` key use a tagged entries list.
+Binary/extension payloads display as hex, large integers as tagged decimal
+strings, nonfinite floats as tagged IEEE-754 hex, and timestamps as seconds
+strings plus nanoseconds. These tags are observation data, not child packets.
+
+Shared hex fixtures include every possible split point for complete frames,
+concatenated frames, reserved markers nested inside containers, extension/binary
+data, duplicate/non-string/reserved keys, large integers and alternate timestamp
+encodings. rmpv maps reserved marker 0xc1 to nil by default; strict rmp-serde
+validation prevents that semantic corruption without rejecting legitimate 0xc1
+bytes inside binary values. Paired file tests cover partial-frame append,
+exact original-byte retrieval, and repeated corrupt-stream failure.
+
+Checkpoint pushed without version changes: FWS 7363e34, Ferrous de04789.
+Work after that checkpoint remains uncommitted.
+
+Next slice: acceptance hardening for historical ANSI checkpoints, full-source filtering,
+index recovery races, explicit peer gap/revision handling, and measured resource/performance
+limits. Manager/host/dashboard integration is implemented, not yet live-validated.
+
+### Consumer Integration Checkpoint
+
+- Shellspec/record field: `log_codecs: {stdout: messagepack, stderr: text}`.
+  `text`, `json`, `messagepack` are validated per stream after ctx/env rendering.
+  Missing fields preserve text behavior; empty metadata does not alter old Python signatures.
+- Managers own bounded 32-entry caches. File work runs through Python to_thread or
+  Rust host spawn_blocking. Projection reads never drain a child descriptor.
+- GET `/api/framework_shells/logs/{shell_id}/window` accepts stream, action,
+  current, count, shift, generation. GET `/raw` accepts stream, generation,
+  byte_start, byte_end, offset, limit and returns hex, next_offset, eof.
+  Stale generations return HTTP 409. Paths resolve only from shell metadata.
+  Reserve 64 bytes of the response budget for the REST envelope.
+- Explicit resets write an atomic sibling `<log>.fws-reset` nonce, shared by
+  both runtimes. Other caches detect it even after truncate-and-regrow. These
+  markers are removed with purged logs. Arbitrary external truncation/regrowth
+  without the marker remains outside the coordinated-reset contract.
+- Dashboard opens a projection subscription before requesting initial windows.
+  The internal `projection: true` open parameter suppresses legacy text backlog;
+  ordinary event delivery stays compatible. Incoming log events coalesce behind
+  at most one in-flight window request per stream, with no polling timer.
+  Paused/history views retain their window and mark new output pending.
+- Both dashboards ship identical rebuilt assets: source-record navigation,
+  bounded record state/DOM, byte-offset anchors, explicit omission diagnostics,
+  one visible 64 KiB original-byte page, and bounded recent sidecar overlays.
+  Pretty JSON falls back to compact display when formatting exceeds 8 KiB.
+- Python fallback output writes are unbuffered before publication, matching native
+  File write visibility. A disposable child test checks that a log event's bytes
+  are retrievable before the child exits. Native pipe read/write ownership is unchanged.
+- Python inspect decodes declared MessagePack objects before its existing filters,
+  preserving binary source offsets. Oversized inspection frames/normalized JSON
+  return an explicit budget error directing callers to window/raw retrieval.
+  CLI and downstream tools using manager inspect inherit this behavior.
+
+Remaining limitations: dashboard filters explicitly cover displayed records, not
+hidden/omitted values or all history. Historical ANSI carry-in checkpoints are not
+implemented. Sidecar records lack a reliable cross-stream ordering key and are
+shown as bounded recent metadata in tail views, not fabricated per-line timestamps.
+Window requests have generation/offset identity but not a peer sequence/revision
+protocol; dropped-event recovery and full DOM/reconnect stress remain acceptance
+work. Python and Rust JSON numeric/depth corner parity and performance baselines
+remain open. No live TE2/ALS restart, install, version bump, commit, or push.
+
+Validation for this integration checkpoint: Python unittest discovery 28 passed;
+full Ferrous cargo test 76 passed, 2 ignored benchmark probes; focused strict
+Python checks and UI typecheck clean; 3 frontend request tests passed. Shared
+fixtures, plans, and shipped JS/CSS match. No live browser validation or
+performance baseline was performed.
+
+### Paging And Snapshot Hardening
+
+The indexed window API uses actual record boundaries, not the requested count,
+which is only a ceiling and can be reduced by the response byte budget:
+
+- `tail`: return the newest bounded records.
+- `current`: start at `current`, without clamping back by the requested count.
+- `older`: `current` is the previous window's exclusive start boundary; return
+  preceding records, nearest first during selection and ascending in the response.
+- `newer`: `current` is the previous window's exclusive end boundary; return
+  subsequent records in ascending order.
+- Older/newer select at most `min(count, shift)` records. They are adjacent pages,
+  not overlapping fixed-size shifted windows. Clients must use returned start/end.
+
+Both implementations recheck pathname identity, reset nonce, size and same-size
+mtime after indexing, reads, and window assembly (including empty windows).
+Replacement/reset is rejected rather than returned under an old generation;
+ordinary append beyond the captured size is allowed. This is bounded snapshot
+validation, not an atomic filesystem snapshot or arbitrary rewrite detector.
+The coordinated reset marker remains required for truncate-and-regrow guarantees.
+
+Paired text/MessagePack tests traverse byte-limited history in both directions
+without gaps and retain the current cursor. Mutation coverage checks replacement,
+reset, append, and recovery. Frontend Newer uses the returned end cursor. Late
+request failures from a previous drawer are ignored, and queued navigation takes
+precedence over an in-flight tail response. DOM/deferred-request stress remains
+pending; no live worker was restarted or tested for this slice.

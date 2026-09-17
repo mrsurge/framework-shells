@@ -1,0 +1,159 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "hex": "81a2696407",
+      "expected": {
+        "value": {
+          "id": 7
+        },
+        "consumed": 5
+      }
+    },
+    {
+      "hex": "81a269640781a2696408",
+      "expected": {
+        "value": {
+          "id": 7
+        },
+        "consumed": 5
+      }
+    },
+    {
+      "hex": "c40300ff0a",
+      "expected": {
+        "value": {
+          "$fws": "binary",
+          "hex": "00ff0a"
+        },
+        "consumed": 5
+      }
+    },
+    {
+      "hex": "d405ff",
+      "expected": {
+        "value": {
+          "$fws": "extension",
+          "code": 5,
+          "hex": "ff"
+        },
+        "consumed": 3
+      }
+    },
+    {
+      "hex": "cf0020000000000000",
+      "expected": {
+        "value": {
+          "$fws": "integer",
+          "decimal": "9007199254740992"
+        },
+        "consumed": 9
+      }
+    },
+    {
+      "hex": "8101a178",
+      "expected": {
+        "value": {
+          "$fws": "map",
+          "entries": [
+            [
+              1,
+              "x"
+            ]
+          ]
+        },
+        "consumed": 4
+      }
+    },
+    {
+      "hex": "82a17801a17802",
+      "expected": {
+        "value": {
+          "$fws": "map",
+          "entries": [
+            [
+              "x",
+              1
+            ],
+            [
+              "x",
+              2
+            ]
+          ]
+        },
+        "consumed": 7
+      }
+    },
+    {
+      "hex": "81a42466777301",
+      "expected": {
+        "value": {
+          "$fws": "map",
+          "entries": [
+            [
+              "$fws",
+              1
+            ]
+          ]
+        },
+        "consumed": 7
+      }
+    },
+    {
+      "hex": "c401c1",
+      "expected": {
+        "value": {
+          "$fws": "binary",
+          "hex": "c1"
+        },
+        "consumed": 3
+      }
+    },
+    {
+      "hex": "d6ff00000001",
+      "expected": {
+        "value": {
+          "$fws": "timestamp",
+          "seconds": "1",
+          "nanoseconds": 0
+        },
+        "consumed": 6
+      }
+    },
+    {
+      "hex": "c70cff000000000000000000000001",
+      "expected": {
+        "value": {
+          "$fws": "timestamp",
+          "seconds": "1",
+          "nanoseconds": 0
+        },
+        "consumed": 15
+      }
+    },
+    {
+      "hex": "c1",
+      "error": true
+    },
+    {
+      "hex": "91c1",
+      "error": true
+    },
+    {
+      "hex": "81a178c1",
+      "error": true
+    },
+    {
+      "hex": "a1ff",
+      "error": true
+    },
+    {
+      "hex": "c4",
+      "incomplete": true
+    },
+    {
+      "hex": "81a26964",
+      "incomplete": true
+    }
+  ]
+}

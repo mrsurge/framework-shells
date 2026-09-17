@@ -9,6 +9,10 @@ from typing import Optional, TypedDict, cast
 
 import aiofiles
 
+from .log_projection import Codec, PARSE_BYTES
+from .log_window import LineIndex
+from .msgpack_observation import decode_frame
+
 
 JSON_FORMAT = "json"
 JSONRPC_FORMAT = "jsonrpc"
@@ -34,6 +38,8 @@ class LogRecord(TypedDict, total=False):
     event_signature: str
     fragments: list["JsonFragment"]
     json_payloads: list[JsonValue]
+    codec: str
+    generation: str
 
 
 class JsonFragment(TypedDict):
@@ -429,12 +435,50 @@ async def read_event_window(path: Path, *, lines: int, max_bytes: int) -> EventW
     }
 
 
+def read_messagepack_window(path: Path, lines: int, max_bytes: int) -> EventWindow:
+    index = LineIndex(path, "messagepack")
+    try:
+        window = index.window(count=max(1, min(lines, 1000)))
+        records: list[LogRecord] = []
+        consumed = 0
+        for projected in reversed(window.records if lines > 0 else []):
+            reference = projected.raw
+            size = reference.byte_end - reference.byte_start
+            if size > min(max_bytes, PARSE_BYTES):
+                if not records:
+                    raise ValueError("MessagePack inspection frame exceeds byte budget; use window/raw retrieval")
+                break
+            data = b"".join(index.raw(reference, offset=offset) for offset in range(0, size, 65536))
+            frame = decode_frame(data)
+            if frame is None:
+                raise ValueError("incomplete indexed MessagePack frame")
+            text = json.dumps(frame.value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            consumed += len(text.encode("utf-8"))
+            if consumed > min(max_bytes, PARSE_BYTES):
+                if not records:
+                    raise ValueError("MessagePack inspection JSON exceeds byte budget; use window/raw retrieval")
+                break
+            records.append({"stream": None, "ordinal": window.end - len(records),
+                "line_number": None, "byte_start": reference.byte_start, "byte_end": reference.byte_end,
+                "partial_head": False, "partial_tail": False, "raw_length": size,
+                "text": text, "codec": "messagepack", "generation": reference.generation})
+        records.reverse()
+        return {"records": records,
+            "byte_window_start": records[0].get("byte_start", 0) if records else 0,
+            "byte_window_end": records[-1].get("byte_end", 0) if records else 0,
+            "partial_head": False, "truncated": len(records) < window.total,
+            "event_count": len(records)}
+    finally:
+        index.close()
+
+
 async def inspect_log_file(
     path: Path,
     *,
     stream: str,
     lines: int,
     max_bytes: int,
+    codec: Codec = "text",
     query: Optional[str] = None,
     exclude_query: Optional[str] = None,
     regex: bool = False,
@@ -443,7 +487,10 @@ async def inspect_log_file(
     signature_filter: Optional[str] = None,
     exclude_signature: Optional[str] = None,
 ) -> InspectionResult:
-    window = await read_event_window(path, lines=lines, max_bytes=max_bytes)
+    if codec == "messagepack" and path.exists():
+        window = await asyncio.to_thread(read_messagepack_window, path, lines, max_bytes)
+    else:
+        window = await read_event_window(path, lines=lines, max_bytes=max_bytes)
     inspected: list[LogRecord] = []
     compiled_query: Optional[re.Pattern[str]] = None
     compiled_exclude_query: Optional[re.Pattern[str]] = None

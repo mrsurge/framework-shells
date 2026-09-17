@@ -44,6 +44,7 @@ export interface DashboardOpenParams {
 
 export interface LogsOpenParams {
   shell_id: string;
+  projection?: boolean;
 }
 
 export interface LogsCloseParams {

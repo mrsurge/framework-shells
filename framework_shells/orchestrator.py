@@ -159,6 +159,7 @@ class Orchestrator:
                 subgroups=subgroups,
                 ui=ui_final,
                 debug=debug_final,
+                log_codecs=rendered.log_codecs,
                 pty_mode=rendered.pty_mode,
                 autostart=rendered.autostart,
                 parent_shell_id=parent_shell_id,
@@ -173,6 +174,7 @@ class Orchestrator:
                 subgroups=subgroups,
                 ui=ui_final,
                 debug=debug_final,
+                log_codecs=rendered.log_codecs,
                 pipe_config=dict(rendered.pipe or {}),
                 autostart=rendered.autostart,
                 parent_shell_id=parent_shell_id,
@@ -187,6 +189,7 @@ class Orchestrator:
                 subgroups=subgroups,
                 ui=ui_final,
                 debug=debug_final,
+                log_codecs=rendered.log_codecs,
                 autostart=rendered.autostart,
             )
 

@@ -269,6 +269,32 @@ CLI example:
 fws inspect <shell_id> --io-metadata --stdin --timestamps --json
 ```
 
+### Bounded Log Views And Binary Protocols
+
+The dashboard reads bounded windows of source lines, with Older/Newer/Live tail
+navigation. Live output triggers window reads through the existing event stream;
+paused and historical views do not accumulate the incoming log. Raw files are
+unchanged. Oversized records show explicit omissions, and Original bytes reads
+the source in pages of at most 64 KiB.
+
+Declare how each stream should be observed in its shellspec:
+
+```yaml
+log_codecs:
+  stdout: messagepack
+  stderr: text
+```
+
+Supported values are `text` (default), `json`, and `messagepack`. Templates such
+as `${env:STDOUT_CODEC}` work too. MessagePack means concatenated complete objects,
+not newline-separated binary. It changes observation, not stdin/stdout bytes or
+Socket.IO serialization. `fws inspect` automatically decodes declared MessagePack
+logs, including Ferrous records in the shared runtime.
+
+Window/raw APIs live at `/api/framework_shells/logs/{shell_id}/window` and `/raw`.
+See [the projection plan](docs/LOG_PROJECTION_PLAN.md) for budgets and current
+limits, including display-window filtering and historical ANSI state.
+
 ## Runtime Boundaries
 
 FWS owns:

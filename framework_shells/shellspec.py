@@ -5,6 +5,8 @@ import re
 import shlex
 import socket
 from collections.abc import Mapping
+from .log_codecs import log_codecs
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeAlias, cast
@@ -61,6 +63,7 @@ class ShellSpec:
     restart: RestartPolicy = field(default_factory=RestartPolicy)
     backend: str = "proc"  # "proc" | "pty" | "pipe" (legacy "dtach" aliases to "pty")
     autostart: bool = True
+    log_codecs: dict[str, str] = field(default_factory=dict)
 
     def normalized_command(self) -> list[str]:
         if isinstance(self.command, str):
@@ -194,6 +197,7 @@ def render_shellspec(spec: ShellSpec, *, ctx: Mapping[str, object] | None = None
             "subgroups": list(spec.subgroups or []),
             "ui": dict(spec.ui or {}),
             "debug": dict(spec.debug or {}),
+            "log_codecs": dict(spec.log_codecs),
             "pipe": dict(spec.pipe or {}),
             "pty_mode": spec.pty_mode,
             "readiness": None,
@@ -263,6 +267,7 @@ def render_shellspec(spec: ShellSpec, *, ctx: Mapping[str, object] | None = None
         subgroups=_string_list(rendered.get("subgroups")),
         ui=cast(dict[str, object], _as_spec_map(rendered.get("ui"))),
         debug=cast(dict[str, object], _as_spec_map(rendered.get("debug"))),
+        log_codecs=log_codecs(rendered.get("log_codecs")),
         pipe=cast(dict[str, object], _as_spec_map(rendered.get("pipe"))),
         pty_mode=str(rendered.get("pty_mode") or spec.pty_mode or "raw"),
         readiness=readiness,
@@ -361,6 +366,7 @@ def _spec_from_dict(shell_id: str, raw: SpecMap) -> ShellSpec:
 
     return ShellSpec(
         id=str(raw.get("id") or shell_id),
+        log_codecs=log_codecs(raw.get("log_codecs"), templates=True),
         command=command if isinstance(command, str) else [str(x) for x in command],
         cwd=_string_or_none(raw.get("cwd")),
         env={str(k): str(v) for k, v in cast(dict[object, object], env_raw).items()},

@@ -10,6 +10,19 @@ from framework_shells.log_window import IndexCache, LineIndex, mark_log_reset, s
 
 
 class LogWindowTests(unittest.TestCase):
+    def test_default_viewport_is_200_records_shifted_by_50(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stdout"
+            _ = path.write_bytes(b"line\n" * 500)
+            index = LineIndex(path)
+            try:
+                view = index.window()
+                self.assertEqual((view.start, view.end, len(view.records)), (300, 500, 200))
+                older = index.window(action="older", current=view.start)
+                self.assertEqual((older.start, older.end, len(older.records)), (250, 300, 50))
+            finally:
+                index.close()
+
     def test_source_mutation_before_response_is_rejected(self) -> None:
         for mutation in ("replace", "reset", "append"):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:

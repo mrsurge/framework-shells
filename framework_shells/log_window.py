@@ -243,7 +243,7 @@ class LineIndex:
 
     def window(
         self, *, action: WindowAction = "tail", current: int = 0,
-        count: int = 1000, shift: int = 250, codec: Codec | None = None,
+        count: int = 200, shift: int = 50, codec: Codec | None = None,
         max_bytes: int = RESPONSE_BYTES, generation: str | None = None,
     ) -> LogWindow:
         with self._lock:

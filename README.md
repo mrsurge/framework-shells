@@ -271,11 +271,13 @@ fws inspect <shell_id> --io-metadata --stdin --timestamps --json
 
 ### Bounded Log Views And Binary Protocols
 
-The dashboard reads bounded windows of source lines, with Older/Newer/Live tail
-navigation. Live output triggers window reads through the existing event stream;
-paused and historical views do not accumulate the incoming log. Raw files are
-unchanged. Oversized records show explicit omissions, and Original bytes reads
-the source in pages of at most 64 KiB.
+The dashboard keeps a sliding window of up to 200 source records. Scrolling near
+an edge fetches another slice while retaining overlap and your reading position.
+Scrolling away detaches live following; Jump to live restores the newest window.
+Existing events signal new output without polling or accumulating hidden history.
+Oversized records show explicit omissions; tall previews scroll within a bounded
+row. Raw files are unchanged, and original-byte retrieval remains available
+through the raw API in pages of at most 64 KiB, not as dashboard hex controls.
 
 Declare how each stream should be observed in its shellspec:
 

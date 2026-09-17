@@ -1,14 +1,41 @@
 "use strict";
 (() => {
   // framework_shells/ui/src/log_projection_client.ts
+  var LOG_WINDOW_RECORDS = 200;
+  var LOG_WINDOW_SHIFT = 50;
+  function viewportScroll(view, top, height, viewport, delta, following, busy) {
+    const bottom = Math.max(0, height - top - viewport);
+    if (bottom >= 12) following = false;
+    else if (view.at_tail && delta > 0) return { following: true, action: "tail" };
+    if (busy || following || Math.abs(delta) < 1) return { following, action: null };
+    const runway = Math.max(160, viewport);
+    const action = delta < 0 && !view.at_start && top < runway ? "older" : delta > 0 && !view.at_tail && bottom < runway ? "newer" : null;
+    return { following, action };
+  }
+  function slideWindow(previous, page, action) {
+    if (previous.generation !== page.generation || action !== "older" && action !== "newer") return page;
+    if (action === "older" ? page.end !== previous.start : page.start < previous.start || page.start > previous.end) return page;
+    let records = action === "older" ? [...page.records, ...previous.records] : [...previous.records.slice(0, page.start - previous.start), ...page.records];
+    records = action === "older" ? records.slice(0, LOG_WINDOW_RECORDS) : records.slice(-LOG_WINDOW_RECORDS);
+    const start = action === "older" ? page.start : page.end - records.length;
+    const end = start + records.length;
+    return { ...page, records, start, end, at_start: start === 0, at_tail: end === page.total };
+  }
   function endpoint(shell, operation, params) {
     const path = window.location.pathname;
     const prefix = path.slice(0, path.lastIndexOf("/fws"));
     return `${prefix}/api/framework_shells/logs/${encodeURIComponent(shell)}/${operation}?${params}`;
   }
   async function loadWindow(shell, stream, action, previous, resync = false) {
-    const cursor = action === "newer" ? previous?.end : previous?.start;
-    const params = new URLSearchParams({ stream, action, count: "1000", shift: "250", current: String(cursor ?? 0) });
+    const newer = action === "newer" && previous !== void 0;
+    const cursor = newer ? Math.max(previous.start, previous.end - 1) : previous?.start;
+    const params = new URLSearchParams({
+      stream,
+      action: newer ? "current" : action,
+      count: String(newer ? LOG_WINDOW_SHIFT + 1 : LOG_WINDOW_RECORDS),
+      shift: String(LOG_WINDOW_SHIFT),
+      current: String(cursor ?? 0)
+    });
     if (previous) params.set("generation", previous.generation);
     const response = await fetch(endpoint(shell, "window", params));
     if (response.status === 409 && !resync) return loadWindow(shell, stream, "tail", void 0, true);
@@ -17,20 +44,7 @@
     if (!body.data || !Array.isArray(body.data.records) || body.data.records.length > 1e3) {
       throw new Error("Invalid log window response");
     }
-    return body.data;
-  }
-  async function loadRawPage(shell, stream, raw, offset) {
-    const params = new URLSearchParams({
-      stream,
-      generation: raw.generation,
-      byte_start: String(raw.byte_start),
-      byte_end: String(raw.byte_end),
-      offset: String(offset),
-      limit: "65536"
-    });
-    const response = await fetch(endpoint(shell, "raw", params));
-    if (!response.ok) throw new Error(`Original bytes: ${response.status} ${await response.text()}`);
-    return (await response.json()).data;
+    return previous ? slideWindow(previous, body.data, action) : body.data;
   }
 
   // framework_shells/ui/src/socketio_client.ts
@@ -2116,9 +2130,12 @@
     const projectionBusy = /* @__PURE__ */ new Set();
     const projectionPending = /* @__PURE__ */ new Map();
     const following = { stdout: true, stderr: true };
+    const programmaticScroll = /* @__PURE__ */ new Set();
+    const lastScroll = { stdout: 0, stderr: 0 };
+    const readingAnchors = {};
+    const resetRevision = { stdout: 0, stderr: 0 };
     let projectionEpoch = 0;
     let metadataEntries = [];
-    let originalPageEpoch = 0;
     async function requestProjection(stream, action = "tail") {
       projectionPending.set(stream, action);
       if (projectionBusy.has(stream)) return;
@@ -2129,23 +2146,25 @@
           projectionPending.delete(stream);
           const shell = logState.shellId;
           const epoch = projectionEpoch;
+          const revision = resetRevision[stream];
           let view;
           try {
             view = await loadWindow(shell, stream, next, projections[stream]);
           } catch (error) {
-            if (epoch === projectionEpoch && shell === logState.shellId && !projectionPending.has(stream)) {
+            if (epoch === projectionEpoch && revision === resetRevision[stream] && shell === logState.shellId && !projectionPending.has(stream)) {
               renderLogError(error instanceof Error ? error.message : String(error));
             }
             continue;
           }
-          if (epoch !== projectionEpoch || shell !== logState.shellId) continue;
+          if (epoch !== projectionEpoch || revision !== resetRevision[stream] || shell !== logState.shellId) continue;
           const queued = projectionPending.get(stream);
           if (queued !== void 0 && queued !== next) continue;
-          if (logState.paused && projections[stream] && next === "tail") {
+          if ((logState.paused || !following[stream]) && projections[stream] && next === "tail") {
             logState.streams[stream].pendingCount = 1;
             setPendingLabel(stream);
             continue;
           }
+          if (projections[stream] && projections[stream]?.generation !== view.generation) following[stream] = true;
           projections[stream] = view;
           const state = logState.streams[stream];
           state.entries = view.records.map((record) => ({ kind: "text", text: record.text.replace(/\r?\n$/, ""), projection: record }));
@@ -2153,8 +2172,7 @@
             state.entries.push(...metadataEntries.map((record) => ({ kind: "io", record })));
           }
           state.partial = "";
-          state.pendingCount = 0;
-          following[stream] = next === "tail";
+          if (following[stream]) state.pendingCount = 0;
           renderStream(stream);
         }
       } catch (error) {
@@ -2733,9 +2751,14 @@
       if (!container) {
         return;
       }
-      container.classList.toggle("is-paused", logState.paused && state.pendingCount > 0);
-      const label = state.pendingCount > 0 ? `${state.pendingCount} new line${state.pendingCount === 1 ? "" : "s"} buffered` : "";
+      container.classList.toggle("is-paused", (logState.paused || !following[stream]) && state.pendingCount > 0);
+      const label = state.pendingCount > 0 ? "New output available" : "";
       container.setAttribute("data-pending-label", label);
+      const live = container.parentElement?.querySelector('[data-log-action="tail"]');
+      if (live) {
+        live.textContent = following[stream] ? logState.paused ? "Paused" : "Live" : state.pendingCount ? "Jump to live (new output)" : "Jump to live";
+        live.setAttribute("aria-pressed", String(following[stream] && !logState.paused));
+      }
     }
     function formatMetadataTimestamp(record) {
       if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) {
@@ -2785,6 +2808,9 @@
       });
       node.appendChild(rendered.fragment);
       if (entry.projection) {
+        node.classList.add("log-projected-record");
+        node.tabIndex = 0;
+        node.title = "Record preview; long content scrolls within this row. Full data remains available through inspection.";
         const record = entry.projection;
         node.dataset.byteStart = String(record.raw.byte_start);
         if (record.diagnostic) {
@@ -2794,34 +2820,6 @@
           note.title = record.omissions.map((item) => item.pointer + ": " + item.serialized_bytes + " bytes").join("\n");
           node.appendChild(note);
         }
-        const button = document.createElement("button");
-        button.className = "log-raw-page";
-        button.textContent = "Original bytes";
-        let offset = 0;
-        const shell = logState.shellId;
-        const output = document.createElement("pre");
-        output.className = "log-original-page";
-        button.addEventListener("click", () => {
-          const pageEpoch = ++originalPageEpoch;
-          document.querySelectorAll(".log-original-page").forEach((element) => {
-            element.textContent = "";
-          });
-          button.disabled = true;
-          void loadRawPage(shell, stream, record.raw, offset).then((page) => {
-            if (pageEpoch !== originalPageEpoch) {
-              button.disabled = false;
-              return;
-            }
-            output.textContent = "Bytes " + offset + "-" + page.next_offset + " (hex)\n" + page.hex;
-            offset = page.eof ? 0 : page.next_offset;
-            button.textContent = page.eof ? "Original bytes again" : "Next 64 KiB";
-            button.disabled = false;
-          }).catch((error) => {
-            output.textContent = String(error);
-            button.disabled = false;
-          });
-        });
-        node.append(button, output);
       }
       return { node, finalStyle: rendered.finalStyle };
     }
@@ -2845,7 +2843,6 @@
       if (!container) {
         return;
       }
-      const pinned = isPinned(container);
       const entries = getFilteredEntries(stream);
       const viewportTop = container.getBoundingClientRect().top;
       const anchor = Array.from(container.querySelectorAll("[data-byte-start]")).find((node) => node.getBoundingClientRect().bottom >= viewportTop + 32);
@@ -2853,13 +2850,17 @@
       const anchorTop = anchor?.getBoundingClientRect().top;
       const scrollBefore = container.scrollTop;
       container.innerHTML = "";
+      const header = container.parentElement?.querySelector(".log-pane-header");
+      header?.querySelector(".log-window-controls")?.remove();
       const view = projections[stream];
       if (view) {
         const navigation = document.createElement("div");
         navigation.className = "log-window-controls";
         for (const action of ["older", "newer", "tail"]) {
           const button = document.createElement("button");
-          button.textContent = action === "tail" ? "Live tail" : action;
+          button.className = "btn btn-small";
+          button.dataset.logAction = action;
+          button.textContent = action === "tail" ? following[stream] ? "Live" : "Jump to live" : action === "older" ? "Older" : "Newer";
           button.disabled = action === "older" ? view.at_start : action === "newer" ? view.at_tail : false;
           button.addEventListener("click", () => {
             following[stream] = action === "tail";
@@ -2870,7 +2871,7 @@
         const status = document.createElement("span");
         status.textContent = " Records " + view.start + "-" + view.end + " of " + view.total + (view.pending_bytes ? " (partial frame pending)" : "") + " | Filters: displayed window";
         navigation.appendChild(status);
-        container.appendChild(navigation);
+        header?.appendChild(navigation);
       }
       if (entries.length === 0) {
         const empty = document.createElement("div");
@@ -2880,7 +2881,8 @@
       } else {
         container.appendChild(buildLineNodes(stream, entries));
       }
-      if (following[stream] && pinned) {
+      programmaticScroll.add(stream);
+      if (following[stream]) {
         container.scrollTop = container.scrollHeight;
       } else if (anchorId) {
         const anchorNow = container.querySelector('[data-byte-start="' + anchorId + '"]');
@@ -2890,7 +2892,55 @@
           container.scrollTop = scrollBefore;
         }
       }
+      lastScroll[stream] = container.scrollTop;
+      rememberReadingAnchor(stream);
+      requestAnimationFrame(() => programmaticScroll.delete(stream));
       setPendingLabel(stream);
+    }
+    function rememberReadingAnchor(stream) {
+      const container = logState.streams[stream].container;
+      if (!container) return;
+      const top = container.getBoundingClientRect().top;
+      const row = Array.from(container.querySelectorAll("[data-byte-start]")).find((node) => node.getBoundingClientRect().bottom > top);
+      if (row?.dataset.byteStart) readingAnchors[stream] = { id: row.dataset.byteStart, offset: row.getBoundingClientRect().top - top };
+      else delete readingAnchors[stream];
+    }
+    for (const stream of LOG_STREAMS) {
+      const container = logState.streams[stream].container;
+      if (container) {
+        const observer = new ResizeObserver(() => {
+          if (!projections[stream]) return;
+          programmaticScroll.add(stream);
+          const anchor = readingAnchors[stream];
+          const row = anchor && container.querySelector('[data-byte-start="' + anchor.id + '"]');
+          if (following[stream]) container.scrollTop = container.scrollHeight;
+          else if (row && anchor) container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
+          lastScroll[stream] = container.scrollTop;
+          rememberReadingAnchor(stream);
+          requestAnimationFrame(() => programmaticScroll.delete(stream));
+        });
+        observer.observe(container);
+      }
+      container?.addEventListener("scroll", () => {
+        const delta = container.scrollTop - lastScroll[stream];
+        lastScroll[stream] = container.scrollTop;
+        if (programmaticScroll.has(stream) || logState.paused) return;
+        rememberReadingAnchor(stream);
+        const view = projections[stream];
+        if (!view) return;
+        const decision = viewportScroll(
+          view,
+          container.scrollTop,
+          container.scrollHeight,
+          container.clientHeight,
+          delta,
+          following[stream],
+          projectionBusy.has(stream)
+        );
+        following[stream] = decision.following;
+        setPendingLabel(stream);
+        if (decision.action) void requestProjection(stream, decision.action);
+      }, { passive: true });
     }
     function appendLines(stream, newLines, partialLine, initialAnsiStyle) {
       const state = logState.streams[stream];
@@ -3083,8 +3133,11 @@
             return;
           }
           delete projections[message.params.stream];
+          resetRevision[message.params.stream] += 1;
+          following[message.params.stream] = true;
+          delete readingAnchors[message.params.stream];
           resetStream(message.params.stream);
-          projectionChanged(message.params.stream);
+          void requestProjection(message.params.stream, "tail");
           return;
         case "fws.logs.chunk": {
           if (message.params.shell_id !== currentShellId) {

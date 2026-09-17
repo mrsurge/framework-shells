@@ -2302,8 +2302,8 @@ class FrameworkShellManager:
 
     async def get_log_window(
         self, shell_id: str, *, stream: str = "stdout",
-        action: WindowAction = "tail", current: int = 0, count: int = 1000,
-        shift: int = 250, generation: str | None = None,
+        action: WindowAction = "tail", current: int = 0, count: int = 200,
+        shift: int = 50, generation: str | None = None,
     ) -> LogWindow:
         record = await self.load_shell_record(shell_id)
         if record is None:

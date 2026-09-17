@@ -282,8 +282,8 @@ async def get_log_window(
     stream: Literal["stdout", "stderr"] = "stdout",
     action: WindowAction = "tail",
     current: Annotated[int, Query(ge=0)] = 0,
-    count: Annotated[int, Query(ge=1, le=1000)] = 1000,
-    shift: Annotated[int, Query(ge=0)] = 250,
+    count: Annotated[int, Query(ge=1, le=1000)] = 200,
+    shift: Annotated[int, Query(ge=1)] = 50,
     generation: str | None = None,
 ):
     try:

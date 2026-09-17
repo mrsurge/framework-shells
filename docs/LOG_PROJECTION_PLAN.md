@@ -31,7 +31,7 @@ as the corresponding logical records, not newline splitting of binary bytes.
 Arbitrary pipe read chunks are never record boundaries.
 
 Starting defaults for implementation review:
-- 1,000 logical records per window, shifted by 250.
+- 200 logical records per dashboard window, extending by up to 50 per shift.
 - 8 KiB maximum rendered content per record, measured as UTF-8 bytes.
 - 1 MiB serialized response budget, including metadata; this may reduce the
   returned record count. Return actual bounds, not requested bounds.
@@ -498,3 +498,44 @@ reset, append, and recovery. Frontend Newer uses the returned end cursor. Late
 request failures from a previous drawer are ignored, and queued navigation takes
 precedence over an in-flight tail response. DOM/deferred-request stress remains
 pending; no live worker was restarted or tested for this slice.
+
+### Sliding Dashboard Viewport (2026-09-17)
+
+Implemented after ALS source comparison. The backend's tested adjacent-page
+contract stays intact; the shared browser merges adjoining slices into a
+200-record window, evicting the opposite edge. Typical shifts add 50 records;
+byte-budget-shortened pages use their actual bounds. Newer reads refresh the
+previous boundary record before extending it, preserving growing partial text
+lines. Text and MessagePack share record identity and navigation semantics.
+Python manager/index/REST defaults and Ferrous REST defaults are 200/50. Explicit
+API counts up to 1000 remain supported for non-dashboard consumers.
+
+Scroll direction and proximity trigger bounded fetches, with one request per
+stream in flight. Overlap retains visible byte-offset anchors; browser measurements
+restore pixel offset across replacement, pretty-print changes and viewport resize.
+Programmatic scrolls cannot trigger a fetch cascade. This is a bounded sliding
+buffer, not a full-history spacer or a global pixel-height estimate. Rows within
+that buffer remain mounted; there is no separate offscreen-row parking layer.
+
+Pinned mode follows output. User scroll-away detaches; incoming events mark new
+output available without modifying the historical view or accumulating chunks.
+Jump to live replaces the window and pins to its end. Reset events invalidate
+in-flight work per stream and restore the new generation. There are no polling
+timers. Existing explicit pause is still respected.
+
+Record content retains the 8 KiB preview/structured omission contract. Since bytes
+alone cannot bound layout height, record previews and IO rows have a 12rem outer
+height ceiling and accessible inner scrolling. The source-record buffer is at
+most 200; the existing IO overlay separately retains at most 128 recent metadata
+records. No spacer represents off-window history. Original-byte buttons and hex
+panels are removed; raw retrieval API and its tests remain. Header navigation
+uses existing .btn/.btn-small classes and theme variables.
+
+Validation: 31 Python tests, 79 Rust tests (2 benchmark probes ignored), 11 Node
+frontend tests; focused Python strict checks and UI typecheck pass. Node tests
+cover contiguous overlapping traversal, short pages, partial-line refresh,
+generation isolation, live snap and scroll direction/busy guards. These are not
+browser pixel-layout tests. Live mobile/desktop anchor/resize/pretty-print and
+rapid user-interaction acceptance remains outstanding. No install/restart,
+version change, commit or push in this slice. User-confirmed .314t build artifacts
+were preserved untouched.

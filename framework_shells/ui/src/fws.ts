@@ -1,4 +1,4 @@
-import { loadWindow, loadRawPage, type LogWindow, type ProjectedRecord, type WindowAction } from './log_projection_client';
+import { loadWindow, viewportScroll, type LogWindow, type ProjectedRecord, type WindowAction } from './log_projection_client';
 import { connectSocketIo, type SocketIoSocket } from './socketio_client';
 import { initFwsConsoleBridge } from './te2_console_bridge';
 import {
@@ -763,9 +763,12 @@ function renderDashboardContent(state: DashboardStatePayload): string {
   const projectionBusy = new Set<LogStreamName>();
   const projectionPending = new Map<LogStreamName, WindowAction>();
   const following: Record<LogStreamName, boolean> = {stdout: true, stderr: true};
+  const programmaticScroll = new Set<LogStreamName>();
+  const lastScroll: Record<LogStreamName, number> = {stdout: 0, stderr: 0};
+  const readingAnchors: Partial<Record<LogStreamName, {id: string; offset: number}>> = {};
+  const resetRevision: Record<LogStreamName, number> = {stdout: 0, stderr: 0};
   let projectionEpoch = 0;
   let metadataEntries: IoMetadataRecord[] = [];
-  let originalPageEpoch = 0;
 
   async function requestProjection(stream: LogStreamName, action: WindowAction = 'tail'): Promise<void> {
     projectionPending.set(stream, action);
@@ -777,24 +780,26 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         projectionPending.delete(stream);
         const shell = logState.shellId;
         const epoch = projectionEpoch;
+        const revision = resetRevision[stream];
         let view: LogWindow;
         try {
           view = await loadWindow(shell, stream, next, projections[stream]);
         } catch (error) {
-          if (epoch === projectionEpoch && shell === logState.shellId && !projectionPending.has(stream)) {
+          if (epoch === projectionEpoch && revision === resetRevision[stream] && shell === logState.shellId && !projectionPending.has(stream)) {
             renderLogError(error instanceof Error ? error.message : String(error));
           }
           continue;
         }
-        if (epoch !== projectionEpoch || shell !== logState.shellId) continue;
+        if (epoch !== projectionEpoch || revision !== resetRevision[stream] || shell !== logState.shellId) continue;
         // A navigation click supersedes an in-flight live-tail request.
         const queued = projectionPending.get(stream);
         if (queued !== undefined && queued !== next) continue;
-        if (logState.paused && projections[stream] && next === 'tail') {
+        if ((logState.paused || !following[stream]) && projections[stream] && next === 'tail') {
           logState.streams[stream].pendingCount = 1;
           setPendingLabel(stream);
           continue;
         }
+        if (projections[stream] && projections[stream]?.generation !== view.generation) following[stream] = true;
         projections[stream] = view;
         const state = logState.streams[stream];
         state.entries = view.records.map(record => ({kind: 'text', text: record.text.replace(/\r?\n$/, ''), projection: record}));
@@ -802,8 +807,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
           state.entries.push(...metadataEntries.map(record => ({kind: 'io' as const, record})));
         }
         state.partial = '';
-        state.pendingCount = 0;
-        following[stream] = next === 'tail';
+        if (following[stream]) state.pendingCount = 0;
         renderStream(stream);
       }
     } catch (error) {
@@ -1458,9 +1462,14 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     if (!container) {
       return;
     }
-    container.classList.toggle('is-paused', logState.paused && state.pendingCount > 0);
-    const label = state.pendingCount > 0 ? `${state.pendingCount} new line${state.pendingCount === 1 ? '' : 's'} buffered` : '';
+    container.classList.toggle('is-paused', (logState.paused || !following[stream]) && state.pendingCount > 0);
+    const label = state.pendingCount > 0 ? 'New output available' : '';
     container.setAttribute('data-pending-label', label);
+    const live = container.parentElement?.querySelector<HTMLButtonElement>('[data-log-action="tail"]');
+    if (live) {
+      live.textContent = following[stream] ? (logState.paused ? 'Paused' : 'Live') : (state.pendingCount ? 'Jump to live (new output)' : 'Jump to live');
+      live.setAttribute('aria-pressed', String(following[stream] && !logState.paused));
+    }
   }
 
   function formatMetadataTimestamp(record: IoMetadataRecord): string {
@@ -1514,6 +1523,9 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     });
     node.appendChild(rendered.fragment);
     if (entry.projection) {
+      node.classList.add('log-projected-record');
+      node.tabIndex = 0;
+      node.title = 'Record preview; long content scrolls within this row. Full data remains available through inspection.';
       const record = entry.projection;
       node.dataset.byteStart = String(record.raw.byte_start);
       if (record.diagnostic) {
@@ -1523,29 +1535,6 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         note.title = record.omissions.map(item => item.pointer + ': ' + item.serialized_bytes + ' bytes').join('\n');
         node.appendChild(note);
       }
-      const button = document.createElement('button');
-      button.className = 'log-raw-page';
-      button.textContent = 'Original bytes';
-      let offset = 0;
-      const shell = logState.shellId;
-      const output = document.createElement('pre');
-      output.className = 'log-original-page';
-      button.addEventListener('click', () => {
-        const pageEpoch = ++originalPageEpoch;
-        document.querySelectorAll('.log-original-page').forEach(element => { element.textContent = ''; });
-        button.disabled = true;
-        void loadRawPage(shell, stream, record.raw, offset).then(page => {
-          if (pageEpoch !== originalPageEpoch) { button.disabled = false; return; }
-          output.textContent = 'Bytes ' + offset + '-' + page.next_offset + ' (hex)\n' + page.hex;
-          offset = page.eof ? 0 : page.next_offset;
-          button.textContent = page.eof ? 'Original bytes again' : 'Next 64 KiB';
-          button.disabled = false;
-        }).catch((error: unknown) => {
-          output.textContent = String(error);
-          button.disabled = false;
-        });
-      });
-      node.append(button, output);
     }
     return { node, finalStyle: rendered.finalStyle };
   }
@@ -1571,7 +1560,6 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     if (!container) {
       return;
     }
-    const pinned = isPinned(container);
     const entries = getFilteredEntries(stream);
     const viewportTop = container.getBoundingClientRect().top;
     const anchor = Array.from(container.querySelectorAll<HTMLElement>('[data-byte-start]'))
@@ -1580,13 +1568,17 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     const anchorTop = anchor?.getBoundingClientRect().top;
     const scrollBefore = container.scrollTop;
     container.innerHTML = '';
+    const header = container.parentElement?.querySelector('.log-pane-header');
+    header?.querySelector('.log-window-controls')?.remove();
     const view = projections[stream];
     if (view) {
       const navigation = document.createElement('div');
       navigation.className = 'log-window-controls';
       for (const action of ['older', 'newer', 'tail'] as const) {
         const button = document.createElement('button');
-        button.textContent = action === 'tail' ? 'Live tail' : action;
+        button.className = 'btn btn-small';
+        button.dataset.logAction = action;
+        button.textContent = action === 'tail' ? (following[stream] ? 'Live' : 'Jump to live') : action === 'older' ? 'Older' : 'Newer';
         button.disabled = action === 'older' ? view.at_start : action === 'newer' ? view.at_tail : false;
         button.addEventListener('click', () => { following[stream] = action === 'tail'; void requestProjection(stream, action); });
         navigation.appendChild(button);
@@ -1594,7 +1586,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
       const status = document.createElement('span');
       status.textContent = ' Records ' + view.start + '-' + view.end + ' of ' + view.total + (view.pending_bytes ? ' (partial frame pending)' : '') + ' | Filters: displayed window';
       navigation.appendChild(status);
-      container.appendChild(navigation);
+      header?.appendChild(navigation);
     }
     if (entries.length === 0) {
       const empty = document.createElement('div');
@@ -1604,7 +1596,8 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     } else {
       container.appendChild(buildLineNodes(stream, entries));
     }
-    if (following[stream] && pinned) {
+    programmaticScroll.add(stream);
+    if (following[stream]) {
       container.scrollTop = container.scrollHeight;
     } else if (anchorId) {
       const anchorNow = container.querySelector<HTMLElement>('[data-byte-start="' + anchorId + '"]');
@@ -1614,7 +1607,51 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         container.scrollTop = scrollBefore;
       }
     }
+    lastScroll[stream] = container.scrollTop;
+    rememberReadingAnchor(stream);
+    requestAnimationFrame(() => programmaticScroll.delete(stream));
     setPendingLabel(stream);
+  }
+
+  function rememberReadingAnchor(stream: LogStreamName): void {
+    const container = logState.streams[stream].container;
+    if (!container) return;
+    const top = container.getBoundingClientRect().top;
+    const row = Array.from(container.querySelectorAll<HTMLElement>('[data-byte-start]'))
+      .find(node => node.getBoundingClientRect().bottom > top);
+    if (row?.dataset.byteStart) readingAnchors[stream] = {id: row.dataset.byteStart, offset: row.getBoundingClientRect().top - top};
+    else delete readingAnchors[stream];
+  }
+
+  for (const stream of LOG_STREAMS) {
+    const container = logState.streams[stream].container;
+    if (container) {
+      const observer = new ResizeObserver(() => {
+        if (!projections[stream]) return;
+        programmaticScroll.add(stream);
+        const anchor = readingAnchors[stream];
+        const row = anchor && container.querySelector<HTMLElement>('[data-byte-start="' + anchor.id + '"]');
+        if (following[stream]) container.scrollTop = container.scrollHeight;
+        else if (row && anchor) container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
+        lastScroll[stream] = container.scrollTop;
+        rememberReadingAnchor(stream);
+        requestAnimationFrame(() => programmaticScroll.delete(stream));
+      });
+      observer.observe(container);
+    }
+    container?.addEventListener('scroll', () => {
+      const delta = container.scrollTop - lastScroll[stream];
+      lastScroll[stream] = container.scrollTop;
+      if (programmaticScroll.has(stream) || logState.paused) return;
+      rememberReadingAnchor(stream);
+      const view = projections[stream];
+      if (!view) return;
+      const decision = viewportScroll(view, container.scrollTop, container.scrollHeight, container.clientHeight,
+        delta, following[stream], projectionBusy.has(stream));
+      following[stream] = decision.following;
+      setPendingLabel(stream);
+      if (decision.action) void requestProjection(stream, decision.action);
+    }, {passive: true});
   }
 
   function appendLines(stream: LogStreamName, newLines: string[], partialLine: string, initialAnsiStyle: AnsiStyle): void {
@@ -1821,8 +1858,11 @@ function renderDashboardContent(state: DashboardStatePayload): string {
           return;
         }
         delete projections[message.params.stream];
+        resetRevision[message.params.stream] += 1;
+        following[message.params.stream] = true;
+        delete readingAnchors[message.params.stream];
         resetStream(message.params.stream);
-        projectionChanged(message.params.stream);
+        void requestProjection(message.params.stream, 'tail');
         return;
       case 'fws.logs.chunk': {
         if (message.params.shell_id !== currentShellId) {

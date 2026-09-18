@@ -523,9 +523,9 @@ Jump to live replaces the window and pins to its end. Reset events invalidate
 in-flight work per stream and restore the new generation. There are no polling
 timers. Existing explicit pause is still respected.
 
-Record content retains the 8 KiB preview/structured omission contract. Since bytes
-alone cannot bound layout height, record previews and IO rows have a 12rem outer
-height ceiling and accessible inner scrolling. The source-record buffer is at
+Record content retains the 8 KiB preview/structured omission contract. This slice
+initially introduced a 12rem row height ceiling; the subsequent pane-layout slice
+below removes it at the user's request. The source-record buffer is at
 most 200; the existing IO overlay separately retains at most 128 recent metadata
 records. No spacer represents off-window history. Original-byte buttons and hex
 panels are removed; raw retrieval API and its tests remain. Header navigation
@@ -539,3 +539,38 @@ browser pixel-layout tests. Live mobile/desktop anchor/resize/pretty-print and
 rapid user-interaction acceptance remains outstanding. No install/restart,
 version change, commit or push in this slice. User-confirmed .314t build artifacts
 were preserved untouched.
+
+### Collapsible Pane Layout (2026-09-17)
+
+The shared dashboard now has stacked STDIN/STDOUT/STDERR panes. STDOUT alone is
+expanded on first use. Clicking a header/title toggles its corresponding content;
+filters, checkboxes and navigation buttons do not toggle it. There are no twisties.
+Expanded panes share available height equally unless the user has resized that
+combination. Horizontal pointer/touch and keyboard-accessible separators persist
+sizes per shell and expanded combination in `fws.log.panes.v1.<shell_id>`.
+All panes may be collapsed. A one-time hint explains header and divider behavior.
+
+STDIN uses the existing input capability/backend-attempt eligibility, not a new
+shellspec flag or debug.io_metadata requirement. Ineligible STDIN forms are
+removed from the DOM; the detached element retains its handlers for later
+eligible shells. Existing cross-manager write-attempt semantics are unchanged.
+
+The 12rem per-record/IO row cap and nested record scrolling have been removed.
+The 200-record window and byte-budget/atomic-value omissions remain, but pixel
+height is no longer capped per record. Subtle borders/alternating tint identify
+record boundaries. Wrap is globally shared across the drawer streams/composer,
+on by default, and saved as `fws.log.wrap`. Navigation now spans the full header:
+buttons on the right, record-range information across its bottom row.
+
+Verification: strict UI typecheck, 16 Node projection/layout tests, and an isolated
+browser-frame probe through TE2 console eval using current checkout HTML/CSS and
+the compiled layout module. The browser probe checks default collapse, equal two/
+three-pane geometry, keyboard resize/persistence, input DOM removal, controls not
+collapsing headers, uncapped record height, shared wrap, and a 360px-wide layout
+with full-width navigation/no document overflow. The probe restores its storage
+and removes its frame. `tests/log_pane_layout.browser.js` accepts
+`window.__paneLayoutSource = {html, css, script}`; script is an esbuild IIFE of
+log_pane_layout.ts with globalName PaneLayoutPreview. It runs without starting
+Socket.IO or sending stdin. Real touch-drag and full deployed streaming interaction
+remain user acceptance checks. No manager restart, install, version, commit/push;
+only a dashboard client refresh was performed for inspection.

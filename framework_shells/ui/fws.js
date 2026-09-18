@@ -47,6 +47,209 @@
     return previous ? slideWindow(previous, body.data, action) : body.data;
   }
 
+  // framework_shells/ui/src/log_pane_layout.ts
+  var IDS = ["stdin", "stdout", "stderr"];
+  var PREFIX = "fws.log.panes.v1.";
+  function readPaneState(raw) {
+    const result = { collapsed: { stdin: true, stdout: false, stderr: true }, sizes: {} };
+    try {
+      const value = JSON.parse(raw ?? "null");
+      if (!value || typeof value !== "object") return result;
+      const stored = value;
+      if (stored.collapsed && typeof stored.collapsed === "object") {
+        const collapsed = stored.collapsed;
+        for (const id of IDS) if (typeof collapsed[id] === "boolean") result.collapsed[id] = collapsed[id];
+      }
+      if (stored.sizes && typeof stored.sizes === "object") {
+        for (const [key, weights] of Object.entries(stored.sizes)) {
+          const ids = key.split(",");
+          if (!ids.length || ids.length > 3 || new Set(ids).size !== ids.length || !ids.every((id) => IDS.includes(id))) continue;
+          if (Array.isArray(weights) && weights.length === ids.length && weights.every((n) => typeof n === "number" && Number.isFinite(n) && n > 0 && n <= 1e6)) {
+            result.sizes[key] = weights;
+          }
+        }
+      }
+    } catch {
+    }
+    return result;
+  }
+  function resizePair(heights, index, delta) {
+    const next = heights.slice();
+    const a = next[index];
+    const b = next[index + 1];
+    if (a === void 0 || b === void 0 || !Number.isFinite(delta)) return next;
+    const total = a + b;
+    const minimum = Math.min(100, total / 4);
+    next[index] = Math.max(minimum, Math.min(total - minimum, a + delta));
+    next[index + 1] = total - next[index];
+    return next;
+  }
+  function bindLogPaneLayout(drawer, stdin) {
+    const body = drawer?.querySelector(".log-drawer-body");
+    const panes = /* @__PURE__ */ new Map();
+    const toggles = /* @__PURE__ */ new Map();
+    let shell = "";
+    let state = readPaneState(null);
+    let available = false;
+    let dragCancel = null;
+    const get = (key) => {
+      try {
+        return localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    };
+    const put = (key, value) => {
+      try {
+        localStorage.setItem(key, value);
+      } catch {
+      }
+    };
+    const save = () => {
+      if (shell) put(PREFIX + shell, JSON.stringify(state));
+    };
+    if (body && drawer) {
+      for (const id of IDS) {
+        const pane = id === "stdin" ? stdin : drawer.querySelector(`#${id}-container`)?.closest(".log-pane");
+        if (!pane) continue;
+        panes.set(id, pane);
+        pane.dataset.logPane = id;
+        pane.classList.add("log-pane");
+        const header = pane.querySelector(id === "stdin" ? ".stdin-injector-header" : ".log-pane-header");
+        const title = header?.querySelector(id === "stdin" ? ".stdin-injector-title" : ".log-pane-title");
+        if (!header || !title) continue;
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = `${title.className} pane-toggle`;
+        toggle.textContent = title.textContent;
+        toggle.id = `fws-${id}-pane-toggle`;
+        toggle.setAttribute("aria-controls", id === "stdin" ? "fws-stdin-input" : `${id}-container`);
+        title.replaceWith(toggle);
+        toggles.set(id, toggle);
+        header.title = "Tap the header to expand or collapse";
+        header.addEventListener("click", (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const control = target.closest("button,input,label,textarea,select,a,.filters");
+          if (control && control !== toggle) return;
+          state.collapsed[id] = !state.collapsed[id];
+          apply();
+          save();
+        });
+      }
+      stdin?.remove();
+    }
+    function expanded() {
+      return IDS.filter((id) => (id !== "stdin" || available) && panes.has(id) && !state.collapsed[id]);
+    }
+    function applyWeights(ids, weights) {
+      ids.forEach((id, i) => panes.get(id)?.style.setProperty("flex-grow", String(weights[i] ?? 1)));
+    }
+    function apply() {
+      if (!body) return;
+      dragCancel?.();
+      body.querySelectorAll(".log-pane-splitter").forEach((el) => el.remove());
+      const ids = expanded();
+      for (const [id, pane] of panes) {
+        pane.classList.toggle("is-collapsed", state.collapsed[id]);
+        pane.style.flexGrow = state.collapsed[id] ? "0" : "1";
+        toggles.get(id)?.setAttribute("aria-expanded", String(!state.collapsed[id]));
+      }
+      applyWeights(ids, state.sizes[ids.join(",")] ?? ids.map(() => 1));
+      ids.slice(0, -1).forEach((id, index) => {
+        const handle = document.createElement("div");
+        handle.className = "log-pane-splitter";
+        handle.tabIndex = 0;
+        handle.setAttribute("role", "separator");
+        handle.setAttribute("aria-orientation", "horizontal");
+        handle.setAttribute("aria-label", `Resize ${id} and ${ids[index + 1]}`);
+        handle.setAttribute("aria-valuemin", "0");
+        handle.setAttribute("aria-valuemax", "100");
+        const heights = () => ids.map((key) => panes.get(key).getBoundingClientRect().height);
+        const update = (values) => {
+          state.sizes[ids.join(",")] = values;
+          applyWeights(ids, values);
+          handle.setAttribute("aria-valuenow", String(Math.round(100 * values[index] / (values[index] + values[index + 1]))));
+        };
+        const weights = state.sizes[ids.join(",")] ?? ids.map(() => 1);
+        handle.setAttribute("aria-valuenow", String(Math.round(100 * weights[index] / (weights[index] + weights[index + 1]))));
+        handle.addEventListener("pointerdown", (event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          const initial = heights();
+          const start = event.clientY;
+          const move = (next) => {
+            if (next.pointerId === event.pointerId) update(resizePair(initial, index, next.clientY - start));
+          };
+          const finish = () => {
+            handle.removeEventListener("pointermove", move);
+            handle.removeEventListener("pointerup", end);
+            handle.removeEventListener("pointercancel", end);
+            handle.removeEventListener("lostpointercapture", finish);
+            handle.classList.remove("is-dragging");
+            dragCancel = null;
+            save();
+          };
+          const end = (next) => {
+            if (next.pointerId === event.pointerId) finish();
+          };
+          dragCancel?.();
+          dragCancel = finish;
+          handle.classList.add("is-dragging");
+          handle.setPointerCapture(event.pointerId);
+          handle.addEventListener("pointermove", move);
+          handle.addEventListener("pointerup", end);
+          handle.addEventListener("pointercancel", end);
+          handle.addEventListener("lostpointercapture", finish);
+        });
+        handle.addEventListener("keydown", (event) => {
+          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+          event.preventDefault();
+          update(resizePair(heights(), index, event.key === "ArrowUp" ? -20 : 20));
+          save();
+        });
+        panes.get(id)?.after(handle);
+      });
+    }
+    const wrap = drawer?.querySelector("#fws-log-wrap");
+    if (wrap && drawer) {
+      wrap.checked = get("fws.log.wrap") !== "false";
+      drawer.classList.toggle("log-nowrap", !wrap.checked);
+      if (stdin) stdin.querySelector("textarea")?.setAttribute("wrap", wrap.checked ? "soft" : "off");
+      wrap.addEventListener("change", () => {
+        drawer.classList.toggle("log-nowrap", !wrap.checked);
+        if (stdin) stdin.querySelector("textarea")?.setAttribute("wrap", wrap.checked ? "soft" : "off");
+        put("fws.log.wrap", String(wrap.checked));
+        drawer.dispatchEvent(new Event("fws-wrap-change"));
+      });
+    }
+    return {
+      open(shellId) {
+        dragCancel?.();
+        shell = shellId;
+        state = readPaneState(get(PREFIX + shell));
+        apply();
+        if (drawer && get("fws.log.panes.hint") !== "seen") {
+          put("fws.log.panes.hint", "seen");
+          const hint = document.createElement("div");
+          hint.className = "log-pane-hint";
+          hint.setAttribute("role", "status");
+          hint.textContent = "Tap a header to expand or collapse. Drag dividers to resize.";
+          drawer.appendChild(hint);
+          hint.addEventListener("click", () => hint.remove());
+          window.setTimeout(() => hint.remove(), 5e3);
+        }
+      },
+      setStdinAvailable(enabled) {
+        if (!body || !stdin || enabled === available) return;
+        available = enabled;
+        if (enabled) body.prepend(stdin);
+        else stdin.remove();
+        apply();
+      }
+    };
+  }
+
   // framework_shells/ui/src/socketio_client.ts
   var DEFAULT_SOCKET_IO_SCRIPT_PATH = "/static/vendor/socket.io.min.js";
   function getSocketIoFactory() {
@@ -2104,6 +2307,7 @@
     const stdinStatusEl = getElementById("fws-stdin-status");
     const ioOverlayInput = getElementById("fws-io-overlay");
     const ioOverlayWrap = getElementById("fws-io-overlay-wrap");
+    const paneLayout = bindLogPaneLayout(logDrawer, stdinForm);
     const collapseState = /* @__PURE__ */ new Map();
     let defaultCollapsed = true;
     let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
@@ -2266,6 +2470,7 @@
       const capabilities = shell?.capabilities;
       const canWrite = capabilities?.stdin_write === true;
       const canAttemptWrite = canWrite || canAttemptShellInput(shell);
+      paneLayout.setStdinAvailable(canAttemptWrite);
       setStdinInjectorDisabled(!canAttemptWrite);
       if (!stdinStatusEl) {
         return;
@@ -2809,8 +3014,6 @@
       node.appendChild(rendered.fragment);
       if (entry.projection) {
         node.classList.add("log-projected-record");
-        node.tabIndex = 0;
-        node.title = "Record preview; long content scrolls within this row. Full data remains available through inspection.";
         const record = entry.projection;
         node.dataset.byteStart = String(record.raw.byte_start);
         if (record.diagnostic) {
@@ -2856,6 +3059,8 @@
       if (view) {
         const navigation = document.createElement("div");
         navigation.className = "log-window-controls";
+        const actions = document.createElement("div");
+        actions.className = "log-window-actions";
         for (const action of ["older", "newer", "tail"]) {
           const button = document.createElement("button");
           button.className = "btn btn-small";
@@ -2866,11 +3071,13 @@
             following[stream] = action === "tail";
             void requestProjection(stream, action);
           });
-          navigation.appendChild(button);
+          actions.appendChild(button);
         }
         const status = document.createElement("span");
-        status.textContent = " Records " + view.start + "-" + view.end + " of " + view.total + (view.pending_bytes ? " (partial frame pending)" : "") + " | Filters: displayed window";
-        navigation.appendChild(status);
+        status.className = "log-window-info";
+        status.textContent = "Records " + view.start + "-" + view.end + " of " + view.total + (view.pending_bytes ? " (partial frame pending)" : "");
+        status.title = "Filters apply to the displayed window";
+        navigation.append(status, actions);
         header?.appendChild(navigation);
       }
       if (entries.length === 0) {
@@ -2909,7 +3116,7 @@
       const container = logState.streams[stream].container;
       if (container) {
         const observer = new ResizeObserver(() => {
-          if (!projections[stream]) return;
+          if (!projections[stream] || container.clientHeight === 0) return;
           programmaticScroll.add(stream);
           const anchor = readingAnchors[stream];
           const row = anchor && container.querySelector('[data-byte-start="' + anchor.id + '"]');
@@ -3213,6 +3420,7 @@
       }
       logState.shellId = nextShellId;
       logState.shellLabel = shellLabel || findShellLabel(nextShellId);
+      paneLayout.open(nextShellId);
       applyStoredLogRenderOptions(nextShellId);
       updateStdinInjectorState();
       if (logTitleEl) {
@@ -3344,6 +3552,9 @@
     wireFilters("stderr");
     wirePrettyJsonToggle("stdout");
     wirePrettyJsonToggle("stderr");
+    logDrawer?.addEventListener("fws-wrap-change", () => {
+      for (const stream of LOG_STREAMS) renderStream(stream);
+    });
     ioOverlayInput?.addEventListener("change", () => {
       const enabled = ioOverlayInput.checked && shellHasIoMetadata(logState.shellId);
       logState.ioOverlayEnabled = enabled;

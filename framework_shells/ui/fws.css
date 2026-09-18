@@ -858,9 +858,45 @@ body.has-log-drawer {
   font-size: .75rem;
 }
 .log-projection-note { color: var(--muted-foreground); font-size: .75rem; }
-.log-projected-record, .io-metadata-line {
-  max-height: 12rem;
-  overflow: auto;
-  scrollbar-width: thin;
-}
 .log-content { overflow-anchor: none; }
+
+/* Pane geometry belongs to the drawer, not to individual log records. */
+.log-drawer-header { flex-wrap: wrap; padding: 8px; gap: 6px 12px; }
+.log-drawer-header-left { flex: 1 1 220px; }
+.log-drawer-header-left > div { min-width: 0; }
+.log-drawer-title, .log-drawer-subtitle { overflow-wrap: anywhere; }
+.log-drawer-header-right { flex-wrap: wrap; margin-left: auto; gap: 8px; }
+.log-drawer-body { overflow-y: auto; }
+.log-pane { flex: 1 1 0; min-height: 140px; overflow: hidden; }
+.log-pane.is-collapsed { flex: 0 0 auto; min-height: 0; }
+.log-pane.is-collapsed .log-content,
+.log-pane.is-collapsed .filters,
+.log-pane.is-collapsed .log-render-toggle,
+.log-pane.is-collapsed .log-window-controls,
+.log-pane.is-collapsed .stdin-injector-actions,
+.log-pane.is-collapsed .stdin-injector-subtitle,
+.log-pane.is-collapsed .stdin-injector-input { display: none; }
+.log-pane-header { display: flex; flex-direction: column; align-items: stretch; gap: 5px; padding: 5px 8px; cursor: pointer; }
+.log-pane-header:hover, .stdin-injector-header:hover { box-shadow: inset 0 0 0 1px var(--border); }
+.log-pane-title-row { flex-direction: row; align-items: center; justify-content: space-between; min-width: 0; }
+.pane-toggle { border: 0; padding: 3px 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.pane-toggle:focus-visible { outline: 1px solid var(--primary); outline-offset: 2px; }
+.log-pane.is-collapsed .pane-toggle { opacity: .75; }
+.log-pane.is-collapsed .log-pane-header { border-bottom: 0; }
+.log-window-controls { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; min-width: 0; box-sizing: border-box; padding: 4px 6px; gap: 4px; font-weight: 400; border: var(--hairline) solid var(--border); }
+.log-window-info { grid-row: 2; min-width: 0; overflow-wrap: anywhere; }
+.log-window-actions { grid-row: 1; display: flex; gap: 4px; justify-self: end; flex-wrap: wrap; justify-content: flex-end; }
+.log-window-actions .btn { font-size: .72rem; padding: 3px 6px; }
+.stdin-injector.log-pane { margin: 0; padding: 0; gap: 0; }
+.stdin-injector-header { padding: 5px 8px; cursor: pointer; flex-direction: column; gap: 6px; background: var(--card); }
+.stdin-injector-actions { width: 100%; }
+.stdin-injector-input { flex: 1; min-height: 0; resize: none; border-radius: 0; }
+.log-pane-splitter { flex: 0 0 8px; cursor: row-resize; touch-action: none; position: relative; background: var(--background); outline: none; }
+.log-pane-splitter::after { content: ''; position: absolute; inset: 3px 0; background: var(--border); }
+.log-pane-splitter:hover::after, .log-pane-splitter:focus-visible::after, .log-pane-splitter.is-dragging::after { inset: 2px 0; background: var(--primary); }
+.log-projected-record { border-bottom: var(--hairline) solid var(--border); padding: 4px 6px; }
+.log-projected-record:nth-child(even) { background: rgba(127, 127, 127, .035); }
+.log-lines, .json-pretty-block { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.json-pretty-block { overflow-x: visible; }
+.log-nowrap .log-lines, .log-nowrap .json-pretty-block { white-space: pre; overflow-wrap: normal; word-break: normal; }
+.log-pane-hint { position: absolute; bottom: 14px; left: 12px; right: 12px; margin: auto; max-width: 420px; z-index: 2; padding: 8px 12px; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: 3px; font-size: .78rem; box-shadow: 0 2px 10px #0005; }

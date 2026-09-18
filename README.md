@@ -275,8 +275,11 @@ The dashboard keeps a sliding window of up to 200 source records. Scrolling near
 an edge fetches another slice while retaining overlap and your reading position.
 Scrolling away detaches live following; Jump to live restores the newest window.
 Existing events signal new output without polling or accumulating hidden history.
-Oversized records show explicit omissions; tall previews scroll within a bounded
-row. Raw files are unchanged, and original-byte retrieval remains available
+Tap a pane header to expand or collapse STDOUT, STDERR, or available STDIN input.
+STDOUT opens first; per-shell collapse and divider sizes persist locally. A shared
+Wrap checkbox controls stream wrapping (on by default). Records have subtle
+separators and no individual height cap; oversized records still show explicit
+projection omissions. Raw files are unchanged, and original-byte retrieval remains available
 through the raw API in pages of at most 64 KiB, not as dashboard hex controls.
 
 Declare how each stream should be observed in its shellspec:

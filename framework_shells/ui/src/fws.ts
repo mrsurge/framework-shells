@@ -1,4 +1,5 @@
 import { loadWindow, viewportScroll, type LogWindow, type ProjectedRecord, type WindowAction } from './log_projection_client';
+import { bindLogPaneLayout } from './log_pane_layout';
 import { connectSocketIo, type SocketIoSocket } from './socketio_client';
 import { initFwsConsoleBridge } from './te2_console_bridge';
 import {
@@ -734,6 +735,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
   const stdinStatusEl = getElementById<HTMLElement>('fws-stdin-status');
   const ioOverlayInput = getElementById<HTMLInputElement>('fws-io-overlay');
   const ioOverlayWrap = getElementById<HTMLElement>('fws-io-overlay-wrap');
+  const paneLayout = bindLogPaneLayout(logDrawer, stdinForm);
 
   const collapseState = new Map<string, boolean>();
   let defaultCollapsed = true;
@@ -926,6 +928,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     const capabilities = shell?.capabilities;
     const canWrite = capabilities?.stdin_write === true;
     const canAttemptWrite = canWrite || canAttemptShellInput(shell);
+    paneLayout.setStdinAvailable(canAttemptWrite);
     setStdinInjectorDisabled(!canAttemptWrite);
     if (!stdinStatusEl) {
       return;
@@ -1524,8 +1527,6 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     node.appendChild(rendered.fragment);
     if (entry.projection) {
       node.classList.add('log-projected-record');
-      node.tabIndex = 0;
-      node.title = 'Record preview; long content scrolls within this row. Full data remains available through inspection.';
       const record = entry.projection;
       node.dataset.byteStart = String(record.raw.byte_start);
       if (record.diagnostic) {
@@ -1574,6 +1575,8 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     if (view) {
       const navigation = document.createElement('div');
       navigation.className = 'log-window-controls';
+      const actions = document.createElement('div');
+      actions.className = 'log-window-actions';
       for (const action of ['older', 'newer', 'tail'] as const) {
         const button = document.createElement('button');
         button.className = 'btn btn-small';
@@ -1581,11 +1584,13 @@ function renderDashboardContent(state: DashboardStatePayload): string {
         button.textContent = action === 'tail' ? (following[stream] ? 'Live' : 'Jump to live') : action === 'older' ? 'Older' : 'Newer';
         button.disabled = action === 'older' ? view.at_start : action === 'newer' ? view.at_tail : false;
         button.addEventListener('click', () => { following[stream] = action === 'tail'; void requestProjection(stream, action); });
-        navigation.appendChild(button);
+        actions.appendChild(button);
       }
       const status = document.createElement('span');
-      status.textContent = ' Records ' + view.start + '-' + view.end + ' of ' + view.total + (view.pending_bytes ? ' (partial frame pending)' : '') + ' | Filters: displayed window';
-      navigation.appendChild(status);
+      status.className = 'log-window-info';
+      status.textContent = 'Records ' + view.start + '-' + view.end + ' of ' + view.total + (view.pending_bytes ? ' (partial frame pending)' : '');
+      status.title = 'Filters apply to the displayed window';
+      navigation.append(status, actions);
       header?.appendChild(navigation);
     }
     if (entries.length === 0) {
@@ -1627,7 +1632,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     const container = logState.streams[stream].container;
     if (container) {
       const observer = new ResizeObserver(() => {
-        if (!projections[stream]) return;
+        if (!projections[stream] || container.clientHeight === 0) return;
         programmaticScroll.add(stream);
         const anchor = readingAnchors[stream];
         const row = anchor && container.querySelector<HTMLElement>('[data-byte-start="' + anchor.id + '"]');
@@ -1942,6 +1947,7 @@ function renderDashboardContent(state: DashboardStatePayload): string {
     for (const stream of LOG_STREAMS) { delete projections[stream]; following[stream] = true; }
     logState.shellId = nextShellId;
     logState.shellLabel = shellLabel || findShellLabel(nextShellId);
+    paneLayout.open(nextShellId);
     applyStoredLogRenderOptions(nextShellId);
     updateStdinInjectorState();
     if (logTitleEl) {
@@ -2079,6 +2085,9 @@ function renderDashboardContent(state: DashboardStatePayload): string {
   wireFilters('stderr');
   wirePrettyJsonToggle('stdout');
   wirePrettyJsonToggle('stderr');
+  logDrawer?.addEventListener('fws-wrap-change', () => {
+    for (const stream of LOG_STREAMS) renderStream(stream);
+  });
   ioOverlayInput?.addEventListener('change', () => {
     const enabled = ioOverlayInput.checked && shellHasIoMetadata(logState.shellId);
     logState.ioOverlayEnabled = enabled;

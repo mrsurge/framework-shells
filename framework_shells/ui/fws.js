@@ -1,5 +1,255 @@
 "use strict";
 (() => {
+  // framework_shells/ui/src/log_projection_client.ts
+  var LOG_WINDOW_RECORDS = 200;
+  var LOG_WINDOW_SHIFT = 50;
+  function viewportScroll(view, top, height, viewport, delta, following, busy) {
+    const bottom = Math.max(0, height - top - viewport);
+    if (bottom >= 12) following = false;
+    else if (view.at_tail && delta > 0) return { following: true, action: "tail" };
+    if (busy || following || Math.abs(delta) < 1) return { following, action: null };
+    const runway = Math.max(160, viewport);
+    const action = delta < 0 && !view.at_start && top < runway ? "older" : delta > 0 && !view.at_tail && bottom < runway ? "newer" : null;
+    return { following, action };
+  }
+  function slideWindow(previous, page, action) {
+    if (previous.generation !== page.generation || action !== "older" && action !== "newer") return page;
+    if (action === "older" ? page.end !== previous.start : page.start < previous.start || page.start > previous.end) return page;
+    let records = action === "older" ? [...page.records, ...previous.records] : [...previous.records.slice(0, page.start - previous.start), ...page.records];
+    records = action === "older" ? records.slice(0, LOG_WINDOW_RECORDS) : records.slice(-LOG_WINDOW_RECORDS);
+    const start = action === "older" ? page.start : page.end - records.length;
+    const end = start + records.length;
+    return { ...page, records, start, end, at_start: start === 0, at_tail: end === page.total };
+  }
+  function endpoint(shell, operation, params) {
+    const path = window.location.pathname;
+    const prefix = path.slice(0, path.lastIndexOf("/fws"));
+    return `${prefix}/api/framework_shells/logs/${encodeURIComponent(shell)}/${operation}?${params}`;
+  }
+  async function loadWindow(shell, stream, action, previous, resync = false) {
+    const newer = action === "newer" && previous !== void 0;
+    const cursor = newer ? Math.max(previous.start, previous.end - 1) : previous?.start;
+    const params = new URLSearchParams({
+      stream,
+      action: newer ? "current" : action,
+      count: String(newer ? LOG_WINDOW_SHIFT + 1 : LOG_WINDOW_RECORDS),
+      shift: String(LOG_WINDOW_SHIFT),
+      current: String(cursor ?? 0)
+    });
+    if (previous) params.set("generation", previous.generation);
+    const response = await fetch(endpoint(shell, "window", params));
+    if (response.status === 409 && !resync) return loadWindow(shell, stream, "tail", void 0, true);
+    if (!response.ok) throw new Error(`Log window: ${response.status} ${await response.text()}`);
+    const body = await response.json();
+    if (!body.data || !Array.isArray(body.data.records) || body.data.records.length > 1e3) {
+      throw new Error("Invalid log window response");
+    }
+    return previous ? slideWindow(previous, body.data, action) : body.data;
+  }
+
+  // framework_shells/ui/src/log_pane_layout.ts
+  var IDS = ["stdin", "stdout", "stderr"];
+  var PREFIX = "fws.log.panes.v1.";
+  function readPaneState(raw) {
+    const result = { collapsed: { stdin: true, stdout: false, stderr: true }, sizes: {} };
+    try {
+      const value = JSON.parse(raw ?? "null");
+      if (!value || typeof value !== "object") return result;
+      const stored = value;
+      if (stored.collapsed && typeof stored.collapsed === "object") {
+        const collapsed = stored.collapsed;
+        for (const id of IDS) if (typeof collapsed[id] === "boolean") result.collapsed[id] = collapsed[id];
+      }
+      if (stored.sizes && typeof stored.sizes === "object") {
+        for (const [key, weights] of Object.entries(stored.sizes)) {
+          const ids = key.split(",");
+          if (!ids.length || ids.length > 3 || new Set(ids).size !== ids.length || !ids.every((id) => IDS.includes(id))) continue;
+          if (Array.isArray(weights) && weights.length === ids.length && weights.every((n) => typeof n === "number" && Number.isFinite(n) && n > 0 && n <= 1e6)) {
+            result.sizes[key] = weights;
+          }
+        }
+      }
+    } catch {
+    }
+    return result;
+  }
+  function resizePair(heights, index, delta) {
+    const next = heights.slice();
+    const a = next[index];
+    const b = next[index + 1];
+    if (a === void 0 || b === void 0 || !Number.isFinite(delta)) return next;
+    const total = a + b;
+    const minimum = Math.min(100, total / 4);
+    next[index] = Math.max(minimum, Math.min(total - minimum, a + delta));
+    next[index + 1] = total - next[index];
+    return next;
+  }
+  function bindLogPaneLayout(drawer, stdin) {
+    const body = drawer?.querySelector(".log-drawer-body");
+    const panes = /* @__PURE__ */ new Map();
+    const toggles = /* @__PURE__ */ new Map();
+    let shell = "";
+    let state = readPaneState(null);
+    let available = false;
+    let dragCancel = null;
+    const get = (key) => {
+      try {
+        return localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    };
+    const put = (key, value) => {
+      try {
+        localStorage.setItem(key, value);
+      } catch {
+      }
+    };
+    const save = () => {
+      if (shell) put(PREFIX + shell, JSON.stringify(state));
+    };
+    if (body && drawer) {
+      for (const id of IDS) {
+        const pane = id === "stdin" ? stdin : drawer.querySelector(`#${id}-container`)?.closest(".log-pane");
+        if (!pane) continue;
+        panes.set(id, pane);
+        pane.dataset.logPane = id;
+        pane.classList.add("log-pane");
+        const header = pane.querySelector(id === "stdin" ? ".stdin-injector-header" : ".log-pane-header");
+        const title = header?.querySelector(id === "stdin" ? ".stdin-injector-title" : ".log-pane-title");
+        if (!header || !title) continue;
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = `${title.className} pane-toggle`;
+        toggle.textContent = title.textContent;
+        toggle.id = `fws-${id}-pane-toggle`;
+        toggle.setAttribute("aria-controls", id === "stdin" ? "fws-stdin-input" : `${id}-container`);
+        title.replaceWith(toggle);
+        toggles.set(id, toggle);
+        header.title = "Tap the header to expand or collapse";
+        header.addEventListener("click", (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const control = target.closest("button,input,label,textarea,select,a,.filters");
+          if (control && control !== toggle) return;
+          state.collapsed[id] = !state.collapsed[id];
+          apply();
+          save();
+        });
+      }
+      stdin?.remove();
+    }
+    function expanded() {
+      return IDS.filter((id) => (id !== "stdin" || available) && panes.has(id) && !state.collapsed[id]);
+    }
+    function applyWeights(ids, weights) {
+      ids.forEach((id, i) => panes.get(id)?.style.setProperty("flex-grow", String(weights[i] ?? 1)));
+    }
+    function apply() {
+      if (!body) return;
+      dragCancel?.();
+      body.querySelectorAll(".log-pane-splitter").forEach((el) => el.remove());
+      const ids = expanded();
+      for (const [id, pane] of panes) {
+        pane.classList.toggle("is-collapsed", state.collapsed[id]);
+        pane.style.flexGrow = state.collapsed[id] ? "0" : "1";
+        toggles.get(id)?.setAttribute("aria-expanded", String(!state.collapsed[id]));
+      }
+      applyWeights(ids, state.sizes[ids.join(",")] ?? ids.map(() => 1));
+      ids.slice(0, -1).forEach((id, index) => {
+        const handle = document.createElement("div");
+        handle.className = "log-pane-splitter";
+        handle.tabIndex = 0;
+        handle.setAttribute("role", "separator");
+        handle.setAttribute("aria-orientation", "horizontal");
+        handle.setAttribute("aria-label", `Resize ${id} and ${ids[index + 1]}`);
+        handle.setAttribute("aria-valuemin", "0");
+        handle.setAttribute("aria-valuemax", "100");
+        const heights = () => ids.map((key) => panes.get(key).getBoundingClientRect().height);
+        const update = (values) => {
+          state.sizes[ids.join(",")] = values;
+          applyWeights(ids, values);
+          handle.setAttribute("aria-valuenow", String(Math.round(100 * values[index] / (values[index] + values[index + 1]))));
+        };
+        const weights = state.sizes[ids.join(",")] ?? ids.map(() => 1);
+        handle.setAttribute("aria-valuenow", String(Math.round(100 * weights[index] / (weights[index] + weights[index + 1]))));
+        handle.addEventListener("pointerdown", (event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          const initial = heights();
+          const start = event.clientY;
+          const move = (next) => {
+            if (next.pointerId === event.pointerId) update(resizePair(initial, index, next.clientY - start));
+          };
+          const finish = () => {
+            handle.removeEventListener("pointermove", move);
+            handle.removeEventListener("pointerup", end);
+            handle.removeEventListener("pointercancel", end);
+            handle.removeEventListener("lostpointercapture", finish);
+            handle.classList.remove("is-dragging");
+            dragCancel = null;
+            save();
+          };
+          const end = (next) => {
+            if (next.pointerId === event.pointerId) finish();
+          };
+          dragCancel?.();
+          dragCancel = finish;
+          handle.classList.add("is-dragging");
+          handle.setPointerCapture(event.pointerId);
+          handle.addEventListener("pointermove", move);
+          handle.addEventListener("pointerup", end);
+          handle.addEventListener("pointercancel", end);
+          handle.addEventListener("lostpointercapture", finish);
+        });
+        handle.addEventListener("keydown", (event) => {
+          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+          event.preventDefault();
+          update(resizePair(heights(), index, event.key === "ArrowUp" ? -20 : 20));
+          save();
+        });
+        panes.get(id)?.after(handle);
+      });
+    }
+    const wrap = drawer?.querySelector("#fws-log-wrap");
+    if (wrap && drawer) {
+      wrap.checked = get("fws.log.wrap") !== "false";
+      drawer.classList.toggle("log-nowrap", !wrap.checked);
+      if (stdin) stdin.querySelector("textarea")?.setAttribute("wrap", wrap.checked ? "soft" : "off");
+      wrap.addEventListener("change", () => {
+        drawer.classList.toggle("log-nowrap", !wrap.checked);
+        if (stdin) stdin.querySelector("textarea")?.setAttribute("wrap", wrap.checked ? "soft" : "off");
+        put("fws.log.wrap", String(wrap.checked));
+        drawer.dispatchEvent(new Event("fws-wrap-change"));
+      });
+    }
+    return {
+      open(shellId) {
+        dragCancel?.();
+        shell = shellId;
+        state = readPaneState(get(PREFIX + shell));
+        apply();
+        if (drawer && get("fws.log.panes.hint") !== "seen") {
+          put("fws.log.panes.hint", "seen");
+          const hint = document.createElement("div");
+          hint.className = "log-pane-hint";
+          hint.setAttribute("role", "status");
+          hint.textContent = "Tap a header to expand or collapse. Drag dividers to resize.";
+          drawer.appendChild(hint);
+          hint.addEventListener("click", () => hint.remove());
+          window.setTimeout(() => hint.remove(), 5e3);
+        }
+      },
+      setStdinAvailable(enabled) {
+        if (!body || !stdin || enabled === available) return;
+        available = enabled;
+        if (enabled) body.prepend(stdin);
+        else stdin.remove();
+        apply();
+      }
+    };
+  }
+
   // framework_shells/ui/src/socketio_client.ts
   var DEFAULT_SOCKET_IO_SCRIPT_PATH = "/static/vendor/socket.io.min.js";
   function getSocketIoFactory() {
@@ -655,7 +905,16 @@
     const node = document.createElement("span");
     node.className = "json-pretty-block";
     try {
-      appendJsonTokens(node, JSON.stringify(JSON.parse(raw), null, 2), options);
+      const pretty = JSON.stringify(JSON.parse(raw), null, 2);
+      if (new TextEncoder().encode(pretty).length > 8192) {
+        appendJsonTokens(node, raw, options);
+        const note = document.createElement("span");
+        note.className = "log-projection-note";
+        note.textContent = " [Pretty JSON exceeds display budget; showing compact record]";
+        node.appendChild(note);
+      } else {
+        appendJsonTokens(node, pretty, options);
+      }
     } catch {
       appendJsonTokens(node, raw, options);
     }
@@ -2048,6 +2307,7 @@
     const stdinStatusEl = getElementById("fws-stdin-status");
     const ioOverlayInput = getElementById("fws-io-overlay");
     const ioOverlayWrap = getElementById("fws-io-overlay-wrap");
+    const paneLayout = bindLogPaneLayout(logDrawer, stdinForm);
     const collapseState = /* @__PURE__ */ new Map();
     let defaultCollapsed = true;
     let groupExpanded = parseStoredGroupExpanded(window.localStorage.getItem(GROUP_EXPANDED_KEY));
@@ -2070,6 +2330,69 @@
         stderr: makeStreamState("stderr-container")
       }
     };
+    const projections = {};
+    const projectionBusy = /* @__PURE__ */ new Set();
+    const projectionPending = /* @__PURE__ */ new Map();
+    const following = { stdout: true, stderr: true };
+    const programmaticScroll = /* @__PURE__ */ new Set();
+    const lastScroll = { stdout: 0, stderr: 0 };
+    const readingAnchors = {};
+    const resetRevision = { stdout: 0, stderr: 0 };
+    let projectionEpoch = 0;
+    let metadataEntries = [];
+    async function requestProjection(stream, action = "tail") {
+      projectionPending.set(stream, action);
+      if (projectionBusy.has(stream)) return;
+      projectionBusy.add(stream);
+      try {
+        while (projectionPending.has(stream) && logState.shellId) {
+          const next = projectionPending.get(stream) ?? "tail";
+          projectionPending.delete(stream);
+          const shell = logState.shellId;
+          const epoch = projectionEpoch;
+          const revision = resetRevision[stream];
+          let view;
+          try {
+            view = await loadWindow(shell, stream, next, projections[stream]);
+          } catch (error) {
+            if (epoch === projectionEpoch && revision === resetRevision[stream] && shell === logState.shellId && !projectionPending.has(stream)) {
+              renderLogError(error instanceof Error ? error.message : String(error));
+            }
+            continue;
+          }
+          if (epoch !== projectionEpoch || revision !== resetRevision[stream] || shell !== logState.shellId) continue;
+          const queued = projectionPending.get(stream);
+          if (queued !== void 0 && queued !== next) continue;
+          if ((logState.paused || !following[stream]) && projections[stream] && next === "tail") {
+            logState.streams[stream].pendingCount = 1;
+            setPendingLabel(stream);
+            continue;
+          }
+          if (projections[stream] && projections[stream]?.generation !== view.generation) following[stream] = true;
+          projections[stream] = view;
+          const state = logState.streams[stream];
+          state.entries = view.records.map((record) => ({ kind: "text", text: record.text.replace(/\r?\n$/, ""), projection: record }));
+          if (stream === "stdout" && view.at_tail) {
+            state.entries.push(...metadataEntries.map((record) => ({ kind: "io", record })));
+          }
+          state.partial = "";
+          if (following[stream]) state.pendingCount = 0;
+          renderStream(stream);
+        }
+      } catch (error) {
+        renderLogError(error instanceof Error ? error.message : String(error));
+      } finally {
+        projectionBusy.delete(stream);
+      }
+    }
+    function projectionChanged(stream) {
+      if (logState.paused || !following[stream]) {
+        logState.streams[stream].pendingCount = 1;
+        setPendingLabel(stream);
+      } else {
+        void requestProjection(stream);
+      }
+    }
     function nextDashboardRequestId() {
       dashboardRequestCounter += 1;
       return `fws_req_${dashboardRequestCounter}`;
@@ -2147,6 +2470,7 @@
       const capabilities = shell?.capabilities;
       const canWrite = capabilities?.stdin_write === true;
       const canAttemptWrite = canWrite || canAttemptShellInput(shell);
+      paneLayout.setStdinAvailable(canAttemptWrite);
       setStdinInjectorDisabled(!canAttemptWrite);
       if (!stdinStatusEl) {
         return;
@@ -2632,9 +2956,14 @@
       if (!container) {
         return;
       }
-      container.classList.toggle("is-paused", logState.paused && state.pendingCount > 0);
-      const label = state.pendingCount > 0 ? `${state.pendingCount} new line${state.pendingCount === 1 ? "" : "s"} buffered` : "";
+      container.classList.toggle("is-paused", (logState.paused || !following[stream]) && state.pendingCount > 0);
+      const label = state.pendingCount > 0 ? "New output available" : "";
       container.setAttribute("data-pending-label", label);
+      const live = container.parentElement?.querySelector('[data-log-action="tail"]');
+      if (live) {
+        live.textContent = following[stream] ? logState.paused ? "Paused" : "Live" : state.pendingCount ? "Jump to live (new output)" : "Jump to live";
+        live.setAttribute("aria-pressed", String(following[stream] && !logState.paused));
+      }
     }
     function formatMetadataTimestamp(record) {
       if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) {
@@ -2683,6 +3012,18 @@
         highlight: getFilterHighlight(stream)
       });
       node.appendChild(rendered.fragment);
+      if (entry.projection) {
+        node.classList.add("log-projected-record");
+        const record = entry.projection;
+        node.dataset.byteStart = String(record.raw.byte_start);
+        if (record.diagnostic) {
+          const note = document.createElement("span");
+          note.className = "log-projection-note";
+          note.textContent = " [" + record.diagnostic + "]";
+          note.title = record.omissions.map((item) => item.pointer + ": " + item.serialized_bytes + " bytes").join("\n");
+          node.appendChild(note);
+        }
+      }
       return { node, finalStyle: rendered.finalStyle };
     }
     function buildLineNodes(stream, entries) {
@@ -2705,9 +3046,40 @@
       if (!container) {
         return;
       }
-      const pinned = isPinned(container);
       const entries = getFilteredEntries(stream);
+      const viewportTop = container.getBoundingClientRect().top;
+      const anchor = Array.from(container.querySelectorAll("[data-byte-start]")).find((node) => node.getBoundingClientRect().bottom >= viewportTop + 32);
+      const anchorId = anchor?.dataset.byteStart;
+      const anchorTop = anchor?.getBoundingClientRect().top;
+      const scrollBefore = container.scrollTop;
       container.innerHTML = "";
+      const header = container.parentElement?.querySelector(".log-pane-header");
+      header?.querySelector(".log-window-controls")?.remove();
+      const view = projections[stream];
+      if (view) {
+        const navigation = document.createElement("div");
+        navigation.className = "log-window-controls";
+        const actions = document.createElement("div");
+        actions.className = "log-window-actions";
+        for (const action of ["older", "newer", "tail"]) {
+          const button = document.createElement("button");
+          button.className = "btn btn-small";
+          button.dataset.logAction = action;
+          button.textContent = action === "tail" ? following[stream] ? "Live" : "Jump to live" : action === "older" ? "Older" : "Newer";
+          button.disabled = action === "older" ? view.at_start : action === "newer" ? view.at_tail : false;
+          button.addEventListener("click", () => {
+            following[stream] = action === "tail";
+            void requestProjection(stream, action);
+          });
+          actions.appendChild(button);
+        }
+        const status = document.createElement("span");
+        status.className = "log-window-info";
+        status.textContent = "Records " + view.start + "-" + view.end + " of " + view.total + (view.pending_bytes ? " (partial frame pending)" : "");
+        status.title = "Filters apply to the displayed window";
+        navigation.append(status, actions);
+        header?.appendChild(navigation);
+      }
       if (entries.length === 0) {
         const empty = document.createElement("div");
         empty.className = "loading";
@@ -2716,10 +3088,66 @@
       } else {
         container.appendChild(buildLineNodes(stream, entries));
       }
-      if (pinned) {
+      programmaticScroll.add(stream);
+      if (following[stream]) {
         container.scrollTop = container.scrollHeight;
+      } else if (anchorId) {
+        const anchorNow = container.querySelector('[data-byte-start="' + anchorId + '"]');
+        if (anchorNow && anchorTop !== void 0) {
+          container.scrollTop += anchorNow.getBoundingClientRect().top - anchorTop;
+        } else {
+          container.scrollTop = scrollBefore;
+        }
       }
+      lastScroll[stream] = container.scrollTop;
+      rememberReadingAnchor(stream);
+      requestAnimationFrame(() => programmaticScroll.delete(stream));
       setPendingLabel(stream);
+    }
+    function rememberReadingAnchor(stream) {
+      const container = logState.streams[stream].container;
+      if (!container) return;
+      const top = container.getBoundingClientRect().top;
+      const row = Array.from(container.querySelectorAll("[data-byte-start]")).find((node) => node.getBoundingClientRect().bottom > top);
+      if (row?.dataset.byteStart) readingAnchors[stream] = { id: row.dataset.byteStart, offset: row.getBoundingClientRect().top - top };
+      else delete readingAnchors[stream];
+    }
+    for (const stream of LOG_STREAMS) {
+      const container = logState.streams[stream].container;
+      if (container) {
+        const observer = new ResizeObserver(() => {
+          if (!projections[stream] || container.clientHeight === 0) return;
+          programmaticScroll.add(stream);
+          const anchor = readingAnchors[stream];
+          const row = anchor && container.querySelector('[data-byte-start="' + anchor.id + '"]');
+          if (following[stream]) container.scrollTop = container.scrollHeight;
+          else if (row && anchor) container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
+          lastScroll[stream] = container.scrollTop;
+          rememberReadingAnchor(stream);
+          requestAnimationFrame(() => programmaticScroll.delete(stream));
+        });
+        observer.observe(container);
+      }
+      container?.addEventListener("scroll", () => {
+        const delta = container.scrollTop - lastScroll[stream];
+        lastScroll[stream] = container.scrollTop;
+        if (programmaticScroll.has(stream) || logState.paused) return;
+        rememberReadingAnchor(stream);
+        const view = projections[stream];
+        if (!view) return;
+        const decision = viewportScroll(
+          view,
+          container.scrollTop,
+          container.scrollHeight,
+          container.clientHeight,
+          delta,
+          following[stream],
+          projectionBusy.has(stream)
+        );
+        following[stream] = decision.following;
+        setPendingLabel(stream);
+        if (decision.action) void requestProjection(stream, decision.action);
+      }, { passive: true });
     }
     function appendLines(stream, newLines, partialLine, initialAnsiStyle) {
       const state = logState.streams[stream];
@@ -2802,8 +3230,24 @@
       if (record.kind !== "stdin_write" && record.kind !== "stdin_eof") {
         return;
       }
+      record = { ...record };
+      if (record.text && record.text.length > 4096) {
+        record.text = record.text.slice(0, 4096);
+        record.preview_truncated = true;
+      }
+      if (record.preview && record.preview.length > 4096) {
+        record.preview = record.preview.slice(0, 4096);
+        record.preview_truncated = true;
+      }
+      metadataEntries.push(record);
+      if (metadataEntries.length > 128) metadataEntries.shift();
       const state = logState.streams.stdout;
+      if (logState.paused) {
+        state.pendingCount = 1;
+        return;
+      }
       state.entries.push({ kind: "io", record });
+      if (state.entries.length > 1e3) state.entries.splice(0, state.entries.length - 1e3);
       if (!options.render) {
         return;
       }
@@ -2879,9 +3323,9 @@
           if (message.params.shell_id !== currentShellId) {
             return;
           }
-          parseTextIntoState("stdout", message.params.stdout);
-          parseTextIntoState("stderr", message.params.stderr);
           appendInitialIoMetadata(message.params.io_metadata);
+          projectionChanged("stdout");
+          projectionChanged("stderr");
           renderStream("stdout");
           renderStream("stderr");
           return;
@@ -2895,24 +3339,18 @@
           if (message.params.shell_id !== currentShellId) {
             return;
           }
+          delete projections[message.params.stream];
+          resetRevision[message.params.stream] += 1;
+          following[message.params.stream] = true;
+          delete readingAnchors[message.params.stream];
           resetStream(message.params.stream);
+          void requestProjection(message.params.stream, "tail");
           return;
         case "fws.logs.chunk": {
           if (message.params.shell_id !== currentShellId) {
             return;
           }
-          const stream = message.params.stream;
-          const appended = appendChunkToState(stream, message.params.chunk);
-          if (logState.paused) {
-            logState.streams[stream].pendingCount += appended.newLines.length;
-            setPendingLabel(stream);
-            return;
-          }
-          if (hasActiveFilters(stream)) {
-            renderStream(stream);
-          } else {
-            appendLines(stream, appended.newLines, appended.partialLine, appended.initialAnsiStyle);
-          }
+          projectionChanged(message.params.stream);
           return;
         }
         case "fws.error":
@@ -2928,7 +3366,10 @@
     }
     async function openLogSubscription(shellId) {
       try {
-        await sendDashboardRequest("fws.logs.open", { shell_id: shellId });
+        await sendDashboardRequest("fws.logs.open", { shell_id: shellId, projection: true });
+        if (logState.shellId === shellId) {
+          await Promise.all(LOG_STREAMS.map((stream) => requestProjection(stream)));
+        }
         if (logState.shellId === shellId) {
           setLogStatus("Connected", true);
         }
@@ -2971,8 +3412,15 @@
       document.body.classList.add("has-log-drawer");
       logDrawer.classList.add("is-open");
       logDrawer.setAttribute("aria-hidden", "false");
+      projectionEpoch += 1;
+      metadataEntries = [];
+      for (const stream of LOG_STREAMS) {
+        delete projections[stream];
+        following[stream] = true;
+      }
       logState.shellId = nextShellId;
       logState.shellLabel = shellLabel || findShellLabel(nextShellId);
+      paneLayout.open(nextShellId);
       applyStoredLogRenderOptions(nextShellId);
       updateStdinInjectorState();
       if (logTitleEl) {
@@ -3001,6 +3449,10 @@
         return;
       }
       const previousShellId = logState.shellId;
+      projectionEpoch += 1;
+      metadataEntries = [];
+      projectionPending.clear();
+      for (const stream of LOG_STREAMS) delete projections[stream];
       logState.shellId = "";
       logState.shellLabel = "";
       logState.ioOverlayEnabled = false;
@@ -3100,6 +3552,9 @@
     wireFilters("stderr");
     wirePrettyJsonToggle("stdout");
     wirePrettyJsonToggle("stderr");
+    logDrawer?.addEventListener("fws-wrap-change", () => {
+      for (const stream of LOG_STREAMS) renderStream(stream);
+    });
     ioOverlayInput?.addEventListener("change", () => {
       const enabled = ioOverlayInput.checked && shellHasIoMetadata(logState.shellId);
       logState.ioOverlayEnabled = enabled;
@@ -3119,8 +3574,7 @@
         logState.paused = logPauseInput.checked;
         if (!logState.paused) {
           for (const stream of LOG_STREAMS) {
-            logState.streams[stream].pendingCount = 0;
-            renderStream(stream);
+            projectionChanged(stream);
           }
         } else {
           for (const stream of LOG_STREAMS) {

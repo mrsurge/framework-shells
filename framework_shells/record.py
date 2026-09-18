@@ -97,6 +97,8 @@ class ShellRecord:
     parent_shell_id: Optional[str] = None
     is_app_worker: bool = False
 
+    log_codecs: dict[str, str] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         self.set_backend(
             normalize_backend(
@@ -146,6 +148,7 @@ class ShellRecord:
             )
         )
         return {
+            **({"log_codecs": dict(self.log_codecs)} if self.log_codecs else {}),
             "id": self.id,
             "spec_id": self.spec_id,
             "command": self.command,
@@ -189,6 +192,7 @@ class ShellRecord:
             )
         )
         payload: JsonMap = {
+            "log_codecs": dict(self.log_codecs),
             "id": self.id,
             "spec_id": self.spec_id,
             "command": list(self.command),

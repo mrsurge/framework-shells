@@ -148,6 +148,43 @@
         "subgroups": ["pty", "term-app"],
         "autostart": true
       }
+    },
+    {
+      "name": "stream_observation_codecs",
+      "entry": "worker",
+      "ctx": {
+        "CODEC": "messagepack"
+      },
+      "env": {
+        "STDERR_CODEC": "text"
+      },
+      "document": {
+        "version": "1",
+        "shells": {
+          "worker": {
+            "backend": "pipe",
+            "command": [
+              "worker"
+            ],
+            "log_codecs": {
+              "stdout": "${ctx:CODEC}",
+              "stderr": "${env:STDERR_CODEC}"
+            }
+          }
+        }
+      },
+      "expect": {
+        "id": "worker",
+        "backend": "pipe",
+        "command": [
+          "worker"
+        ],
+        "autostart": true,
+        "log_codecs": {
+          "stdout": "messagepack",
+          "stderr": "text"
+        }
+      }
     }
   ]
 }

@@ -191,7 +191,7 @@ async def _set_browser_log_shell(ns: socketio.AsyncNamespace, sid: str, shell_id
     await _broadcast_peer_subscriptions()
 
 
-async def _load_log_backlog(shell_id: str) -> tuple[str, str, list[IoMetadataPayload]]:
+async def _load_log_backlog(shell_id: str, *, projection: bool = False) -> tuple[str, str, list[IoMetadataPayload]]:
     if not shell_id:
         raise LookupError("Shell not found: ")
     mgr = await get_manager()
@@ -220,6 +220,8 @@ async def _load_log_backlog(shell_id: str) -> tuple[str, str, list[IoMetadataPay
                 include_timestamps=True,
             ),
         )
+    if projection:
+        return "", "", metadata
     return await _read_tail(Path(record.stdout_log)), await _read_tail(Path(record.stderr_log)), metadata
 
 
@@ -487,6 +489,12 @@ class FwsSocketIoNamespace(socketio.AsyncNamespace):
             if method == LOGS_OPEN_METHOD:
                 params = cast(Mapping[str, object], request["params"])
                 shell_id = str(params.get("shell_id") or "")
+                if params.get("projection") is True:
+                    await _set_browser_log_shell(self, sid, shell_id)
+                    _, _, metadata = await _load_log_backlog(shell_id, projection=True)
+                    await self.emit(FWS_NOTIFICATION_EVENT,
+                        build_logs_initial_notification(shell_id, "", "", io_metadata=metadata), to=sid)
+                    return build_logs_open_response(request["id"], shell_id)
                 stdout_text, stderr_text, io_metadata_records = await _load_log_backlog(shell_id)
                 await _set_browser_log_shell(self, sid, shell_id)
                 await self.emit(
@@ -641,7 +649,10 @@ def mount_fws_dashboard_runtime(app: FastAPI) -> None:
     if getattr(app.state, "_framework_shells_fws_dashboard_runtime_mounted", False):
         return
     from .fws_ui import router as fws_ui_router
+    from .fastapi_router import projection_router
 
     app.include_router(fws_ui_router)
+    if not any(getattr(route, "path", None) == "/api/framework_shells/logs/{shell_id}/window" for route in app.routes):
+        app.include_router(projection_router)
     mount_fws_socketio_runtime(app)
     setattr(app.state, "_framework_shells_fws_dashboard_runtime_mounted", True)

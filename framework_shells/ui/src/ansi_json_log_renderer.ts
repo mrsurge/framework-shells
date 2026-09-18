@@ -409,7 +409,16 @@ function appendPrettyJsonBlock(parent: Node, raw: string, options: RenderLogLine
   const node = document.createElement('span');
   node.className = 'json-pretty-block';
   try {
-    appendJsonTokens(node, JSON.stringify(JSON.parse(raw), null, 2), options);
+    const pretty = JSON.stringify(JSON.parse(raw), null, 2);
+    if (new TextEncoder().encode(pretty).length > 8192) {
+      appendJsonTokens(node, raw, options);
+      const note = document.createElement('span');
+      note.className = 'log-projection-note';
+      note.textContent = ' [Pretty JSON exceeds display budget; showing compact record]';
+      node.appendChild(note);
+    } else {
+      appendJsonTokens(node, pretty, options);
+    }
   } catch {
     appendJsonTokens(node, raw, options);
   }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, TypeAlias, TypedDict, cast
+from typing import Literal, NotRequired, TypeAlias, TypedDict, cast
 
 from .jsonrpc import (
     JSONRPC_VERSION,
@@ -51,6 +51,7 @@ class DashboardOpenParams(TypedDict):
 
 class LogsOpenParams(TypedDict):
     shell_id: str
+    projection: NotRequired[bool]
 
 
 class LogsCloseParams(TypedDict):
@@ -456,7 +457,7 @@ def parse_fws_request(raw: str) -> FwsRequest | None:
             "jsonrpc": JSONRPC_VERSION,
             "id": parsed.id,
             "method": LOGS_OPEN_METHOD,
-            "params": {"shell_id": shell_id},
+            "params": {"shell_id": shell_id, "projection": parsed.params.get("projection") is True},
         }
 
     if parsed.method == LOGS_CLOSE_METHOD:

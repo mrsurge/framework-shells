@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "records": [
+    {
+      "source": "{\"id\":7,\"params\":{\"name\":\"x\",\"dump\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"}}",
+      "codec": "json",
+      "budget": 32,
+      "expected": {
+        "text": "{\"id\":7,\"params\":{\"name\":\"x\"}}",
+        "omissions": [{"pointer":"/params/dump","original_type":"string","serialized_bytes":54}],
+        "diagnostic": "values_omitted"
+      }
+    },
+    {
+      "source": "hello\n",
+      "codec": "text",
+      "budget": 32,
+      "expected": {
+        "text": "hello\n",
+        "omissions": [],
+        "diagnostic": null
+      }
+    },
+    {
+      "source": "{     \"ok\": true,                       \"n\": 1}",
+      "codec": "json",
+      "budget": 32,
+      "expected": {
+        "text": "{\"n\":1,\"ok\":true}",
+        "omissions": [],
+        "diagnostic": null
+      }
+    },
+    {
+      "source": "{\"id\":7,\"blob\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"}",
+      "codec": "json",
+      "budget": 32,
+      "expected": {
+        "text": "{\"id\":7}",
+        "omissions": [
+          {
+            "pointer": "/blob",
+            "original_type": "string",
+            "serialized_bytes": 54
+          }
+        ],
+        "diagnostic": "values_omitted"
+      }
+    },
+    {
+      "source": "{\"a/b~c\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\",\"id\":9}",
+      "codec": "json",
+      "budget": 32,
+      "expected": {
+        "text": "{\"id\":9}",
+        "omissions": [
+          {
+            "pointer": "/a~1b~0c",
+            "original_type": "string",
+            "serialized_bytes": 54
+          }
+        ],
+        "diagnostic": "values_omitted"
+      }
+    },
+    {
+      "source": "abcdefghijklmnopqrstuvwxyz0123456789",
+      "codec": "text",
+      "budget": 32,
+      "expected": {
+        "text": "abcdefghijklmnopqrstuvwxyz012345",
+        "omissions": [],
+        "diagnostic": "record_too_large"
+      }
+    },
+    {
+      "source": "éééééééééééééééééééé",
+      "codec": "text",
+      "budget": 33,
+      "expected": {
+        "text": "éééééééééééééééé",
+        "omissions": [],
+        "diagnostic": "record_too_large"
+      }
+    }
+  ],
+  "windows": [
+    {
+      "total": 100,
+      "current": 0,
+      "count": 20,
+      "shift": 5,
+      "action": "tail",
+      "expected": 80
+    },
+    {
+      "total": 100,
+      "current": 80,
+      "count": 20,
+      "shift": 5,
+      "action": "older",
+      "expected": 75
+    },
+    {
+      "total": 100,
+      "current": 78,
+      "count": 20,
+      "shift": 5,
+      "action": "newer",
+      "expected": 80
+    },
+    {
+      "total": 3,
+      "current": 90,
+      "count": 20,
+      "shift": 5,
+      "action": "current",
+      "expected": 0
+    },
+    {
+      "total": 0,
+      "current": 0,
+      "count": 20,
+      "shift": 5,
+      "action": "tail",
+      "expected": 0
+    }
+  ]
+}

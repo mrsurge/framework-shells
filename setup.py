@@ -8,7 +8,7 @@ import sys
 import sysconfig
 from typing import cast
 
-from setuptools import Command, setup
+from setuptools import Command, Distribution, setup
 try:
     from setuptools.command.build_py import build_py as _build_py
 except Exception:  # pragma: no cover - setuptools should provide this in normal builds
@@ -124,6 +124,10 @@ def _is_android_python() -> bool:
     platform = sysconfig.get_platform().lower()
     multiarch = str(sysconfig.get_config_var("MULTIARCH") or "").lower()
     return "android" in platform or "android" in multiarch
+
+
+def _is_shared_python() -> bool:
+    return bool(sysconfig.get_config_var("Py_ENABLE_SHARED"))
 
 
 def _python_extension_suffix() -> str:
@@ -286,10 +290,16 @@ def _write_pipe_pump_pyo3_config() -> Path:
 def _pipe_pump_cargo_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("PYO3_BUILD_EXTENSION_MODULE", "1")
-    if _is_free_threaded_python() and _is_android_python() and not env.get("PYO3_CONFIG_FILE"):
+    needs_explicit_config = _is_free_threaded_python() and (
+        _is_android_python() or not _is_shared_python()
+    )
+    if needs_explicit_config and not env.get("PYO3_CONFIG_FILE"):
         config_path = _write_pipe_pump_pyo3_config()
         env["PYO3_CONFIG_FILE"] = str(config_path)
-        _log(f"using PyO3 extension-module config for free-threaded Android Python: {config_path}")
+        _log(
+            "using no-link PyO3 extension-module config for free-threaded "
+            f"{'Android' if _is_android_python() else 'static'} Python: {config_path}"
+        )
     return env
 
 
@@ -388,6 +398,13 @@ def _cleanup_staged_native_artifacts() -> None:
 cmdclass: dict[str, object] = {}
 
 
+class BinaryDistribution(Distribution):
+    """Install packaged native payloads through platlib, not purelib."""
+
+    def has_ext_modules(self) -> bool:
+        return _has_bundled_native_broker() or _has_bundled_pipe_pump()
+
+
 if _build_py is not None:
 
     class build_py(_build_py):
@@ -478,4 +495,7 @@ if _bdist_wheel is not None:
     cmdclass["bdist_wheel"] = bdist_wheel
 
 
-setup(cmdclass=cast(dict[str, type[Command]], cmdclass))
+setup(
+    cmdclass=cast(dict[str, type[Command]], cmdclass),
+    distclass=BinaryDistribution,
+)

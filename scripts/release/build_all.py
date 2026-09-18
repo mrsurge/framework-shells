@@ -72,12 +72,6 @@ def main() -> None:
     sdist_path = build_sdist(out_dir=out_dir)
     log(f"built sdist: {sdist_path}")
 
-    pure_wheel = build_wheel(out_dir=out_dir)
-    log(f"built pure wheel: {pure_wheel}")
-    if not args.skip_smoke:
-        smoke_test_wheel(pure_wheel, expect_native_broker=False)
-        log("pure wheel smoke test passed")
-
     native_wheels: list[tuple[str, Path]] = []
     for target in native_targets:
         plat_name = args.plat_name if len(native_targets) == 1 else default_plat_name_for_target(target)
@@ -103,7 +97,6 @@ def main() -> None:
 
     print("\nArtifacts:")
     print(f"  sdist: {sdist_path}")
-    print(f"  pure wheel: {pure_wheel}")
     for target, native_wheel in native_wheels:
         print(f"  native wheel [{target}]: {native_wheel}")
 

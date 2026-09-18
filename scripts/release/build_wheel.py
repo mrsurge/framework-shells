@@ -30,6 +30,11 @@ def build_wheel(
     staging_dir: Path | None = None,
     keep_staging: bool = False,
 ) -> Path:
+    if not native_broker and broker_path is None:
+        raise ValueError(
+            "Release wheels must contain the native terminal broker and pipe pump; "
+            "pure-Python wheels are not publishable"
+        )
     dist_dir = (out_dir or DIST_DIR).resolve()
     dist_dir.mkdir(parents=True, exist_ok=True)
     before = snapshot_paths(dist_dir, "*.whl")

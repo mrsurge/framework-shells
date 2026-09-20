@@ -1,0 +1,8 @@
+-r requirements.txt
+# FWS manager dependencies for source imports; no framework-shells installation.
+aiofiles
+aiohttp>=3,<4
+fastapi
+msgpack>=1,<2
+pyyaml
+python-socketio>=5,<6

@@ -11,6 +11,8 @@ dist/
 build/
 node_modules/
 native/*/target/
+native/fws_supervisor/Cargo.lock
+native/fws_supervisor_client/Cargo.lock
 notes/
 ANNOUNCEMENT_DRAFT.md
 

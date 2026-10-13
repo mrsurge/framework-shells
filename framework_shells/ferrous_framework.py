@@ -111,8 +111,8 @@ class _FrameworkShellsModule(Protocol):
     async def get_manager(self, *, run_id: str) -> _FrameworkShellManager: ...
 
 
-class _FastApiModule(Protocol):
-    def FastAPI(self) -> object: ...
+class _StarletteModule(Protocol):
+    def Starlette(self) -> object: ...
 
 
 class _UvicornServer(Protocol):
@@ -369,13 +369,13 @@ class FerrousFrameworkHost:
         return future.result()
 
     async def _serve(self) -> None:
-        fastapi = cast(_FastApiModule, importlib.import_module("fastapi"))
+        starlette = cast(_StarletteModule, importlib.import_module("starlette.applications"))
         uvicorn = cast(_UvicornModule, importlib.import_module("uvicorn"))
         socketio_backend = cast(
             _SocketioBackendModule,
             importlib.import_module("framework_shells.api.socketio_backend"),
         )
-        app = fastapi.FastAPI()
+        app = starlette.Starlette()
         socketio_backend.mount_fws_dashboard_runtime(app)
         config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning", lifespan="on")
         server = uvicorn.Server(config)

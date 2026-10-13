@@ -1,6 +1,8 @@
 //! Experimental shared supervisor; not yet integrated into FWS manager launch paths.
+pub mod attachment;
 pub mod client;
 pub mod policy;
+pub mod replay;
 pub mod service;
 pub mod session;
 

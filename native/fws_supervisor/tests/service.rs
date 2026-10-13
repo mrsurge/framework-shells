@@ -1,8 +1,10 @@
 //! A real Rust client controlling an unmodified stdio child through the supervisor.
 use anyhow::{anyhow, ensure};
 use fws_supervisor::{
+    attachment,
     client::{Client, Event},
     framed,
+    replay::Cursor,
     session::{authenticate_client, receive, send},
 };
 use serde_json::{Value, json};
@@ -23,7 +25,8 @@ fn rust_client_reconnects_to_unmodified_cat() {
         let socket = dir.path().join("s");
         let config = dir.path().join("config.json");
         std::fs::write(&config, serde_json::to_vec(&json!({
-            "socket":socket,"stdout_log":dir.path().join("out"),"stderr_log":dir.path().join("err"),"command":["cat"]
+            "socket":socket,"stdout_log":dir.path().join("out"),"stderr_log":dir.path().join("err"),"command":["cat"],
+            "attachment":{"id":"fs_rust","label":"app-worker:example","spec_id":"example:worker","subgroups":["example","worker"]}
         })).unwrap()).unwrap();
         let mut supervisor = Command::new(env!("CARGO_BIN_EXE_fws-supervisor"))
             .arg(config).env("FRAMEWORK_SHELLS_SECRET", "test-secret")
@@ -35,8 +38,28 @@ fn rust_client_reconnects_to_unmodified_cat() {
             let ready: Value = serde_json::from_str(&line)?;
             child_pid = ready["pid"].as_i64();
             let instance = ready["instance"].as_str().ok_or_else(|| anyhow!("missing instance"))?;
-            for _ in 0..2 {
-                let client = Client::connect(&socket, b"test-secret", instance).await?;
+            let descriptor_path = socket.with_extension("attachment.json");
+            let mut wrong = attachment::Descriptor::load(&descriptor_path, b"test-secret")?;
+            wrong.pid = 1;
+            let wrong_path = dir.path().join("wrong.attachment.json");
+            wrong.publish(&wrong_path, b"test-secret")?;
+            ensure!(attachment::attach(&wrong_path, b"test-secret", "fs_rust", None).await.is_err(), "signed metadata bypassed status verification");
+            ensure!(attachment::attach(&descriptor_path, b"test-secret", "another-shell", None).await.is_err(), "shell id ignored");
+            for iteration in 0..2 {
+                let client = if iteration == 0 { Client::connect(&socket, b"test-secret", instance).await? }
+                    else {
+                        let attached = attachment::attach(socket.with_extension("attachment.json"), b"test-secret", "fs_rust", Some(Cursor::default())).await?;
+                        ensure!(attached.descriptor.shell.subgroups == ["example", "worker"], "metadata lost");
+                        ensure!(attached.descriptor.shell.label.as_deref() == Some("app-worker:example"), "label lost");
+                        ensure!(attached.client.write(b"not-acquired").await.is_err(), "observer acquired writer");
+                        attached.client
+                    };
+                if iteration == 1 {
+                    match client.read().await? {
+                        Event::Output { data, stream, offset } => ensure!(data == b"\0\xff\n" && stream == "stdout" && offset == 0, "replay changed"),
+                        other => anyhow::bail!("unexpected replay {other:?}"),
+                    }
+                }
                 ensure!(Some(i64::from(client.status().await?.pid)) == child_pid, "child restarted");
                 client.acquire(true).await?;
                 ensure!(client.write(b"\0\xff\n").await? == 3, "short write");

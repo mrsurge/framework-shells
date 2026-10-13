@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
     "Cargo.toml", "README.md", "src/lib.rs", "src/policy.rs", "src/session.rs",
-    "src/service.rs", "src/client.rs", "src/bin/fws-supervisor.rs", "tests/framing.rs",
-    "tests/session.rs", "tests/service.rs", "tests/client.rs", "examples/framing_peer.rs",
+    "src/service.rs", "src/client.rs", "src/replay.rs", "src/attachment.rs", "src/bin/fws-supervisor.rs", "tests/framing.rs",
+    "tests/session.rs", "tests/service.rs", "tests/client.rs", "tests/attachment_cases.json", "examples/framing_peer.rs",
 )
 
 

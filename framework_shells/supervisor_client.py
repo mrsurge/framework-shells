@@ -44,6 +44,26 @@ class SupervisorStatus:
     failure: str | None
 
 
+@dataclass(frozen=True)
+class SupervisorCursor:
+    """Next consumed byte offsets; meaningful only for the supplied instance ID."""
+    stdout: int = 0
+    stderr: int = 0
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not int or not 0 <= value < 2**64 for value in (self.stdout, self.stderr)):
+            raise ValueError("cursor offsets must be unsigned 64-bit integers")
+
+    @classmethod
+    def parse(cls, value: object) -> SupervisorCursor:
+        if not isinstance(value, dict):
+            raise ValueError("invalid cursor object")
+        fields = cast(Message, value)
+        if set(fields) != {"stdout", "stderr"} or type(fields["stdout"]) is not int or type(fields["stderr"]) is not int:
+            raise ValueError("invalid cursor fields")
+        return cls(fields["stdout"], fields["stderr"])
+
+
 class _Driver(Protocol):
     def acquire(self, takeover: bool) -> Awaitable[int]: ...
     def write(self, data: bytes) -> Awaitable[int]: ...
@@ -56,7 +76,7 @@ class _Driver(Protocol):
 
 
 class _NativeClass(Protocol):
-    def connect(self, path: str, secret: bytes, instance: str) -> Awaitable[_NativeHandle]: ...
+    def connect(self, path: str, secret: bytes, instance: str, cursor: tuple[int, int] | None) -> Awaitable[_NativeHandle]: ...
 
 
 class _NativeHandle(Protocol):
@@ -82,7 +102,7 @@ def _native() -> _NativeModule | None:
         module = cast(_NativeModule, importlib.import_module("fws_supervisor_client"))
     except (ImportError, OSError):
         return None
-    return module if getattr(module, "API_VERSION", None) == 2 else None
+    return module if getattr(module, "API_VERSION", None) == 3 else None
 
 
 async def _call(operation: Callable[[], Awaitable[T]]) -> T:
@@ -103,21 +123,23 @@ class SupervisorClient:
 
     @classmethod
     async def connect(cls, path: str, secret: bytes, instance: str, *,
-                      backend: Literal["auto", "python", "native"] = "auto") -> SupervisorClient:
+                      backend: Literal["auto", "python", "native"] = "auto",
+                      cursor: SupervisorCursor | None = None) -> SupervisorClient:
         """Backend override is for parity testing; normal callers leave auto selected."""
         if backend not in ("auto", "python", "native"):
             raise ValueError("invalid backend")
         module = _native() if backend != "python" else None
         if backend == "native" and module is None:
-            raise SupervisorError("unavailable", "native API v2 extension unavailable")
+            raise SupervisorError("unavailable", "native API v3 extension unavailable")
         if module is not None:
-            driver = await _call(lambda: module.NativeClient.connect(path, secret, instance))
+            pair = (cursor.stdout, cursor.stderr) if cursor is not None else None
+            driver = await _call(lambda: module.NativeClient.connect(path, secret, instance, pair))
             try:
                 return cls(_NativeDriver(driver), "native")
             except BaseException:
                 await driver.close()
                 raise
-        return cls(await _PythonClient.connect(path, secret, instance), "python")
+        return cls(await _PythonClient.connect(path, secret, instance, cursor), "python")
 
     async def acquire(self, takeover: bool = False) -> int:
         return await _call(lambda: self._driver.acquire(takeover))
@@ -279,20 +301,81 @@ class _NativeDriver:
             self.writes.clear()
 
 
+def _output(value: Message, offsets: dict[str, int]) -> EventTuple:
+    stream, offset, encoded = value.get("stream"), value.get("offset"), value.get("data")
+    if stream not in ("stdout", "stderr") or type(offset) is not int or not isinstance(encoded, str):
+        raise SupervisorError("protocol", "invalid output")
+    stream = cast(str, stream)
+    data = base64.b64decode(encoded, validate=True)
+    if offset < 0 or offset > 2**64 - 1 - len(data) or len(data) > 8192:
+        raise SupervisorError("protocol", "invalid offset/chunk size")
+    if offsets.get(stream, offset) != offset:
+        raise SupervisorError("lagged", "output offset gap")
+    offsets[stream] = offset + len(data)
+    return "output", stream, offset, data, None
+
+
+async def _resume(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                  cursor: SupervisorCursor) -> tuple[list[EventTuple], dict[str, int]]:
+    requested: Message = {"stdout": cursor.stdout, "stderr": cursor.stderr}
+    await send_message(writer, {"op": "resume", "cursor": requested})
+    end: SupervisorCursor | None = None
+    events: list[EventTuple] = []
+    offsets = {"stdout": cursor.stdout, "stderr": cursor.stderr}
+    count = 0
+    while True:
+        value = await receive_message(reader)
+        if "ok" in value:
+            if value.get("ok") is not True:
+                raise ValueError(f"replay rejected: {value.get('error')}")
+            result = value.get("result")
+            if end is None or not isinstance(result, dict):
+                raise ValueError("invalid replay acknowledgement")
+            result = cast(Message, result)
+            if (result.get("resumed") is not True or SupervisorCursor.parse(result.get("end")) != end
+                    or type(result.get("replayed_bytes")) is not int or result["replayed_bytes"] != count
+                    or offsets != {"stdout": end.stdout, "stderr": end.stderr}):
+                raise ValueError("incomplete replay/boundary mismatch")
+            return events, offsets
+        if value.get("event") == "replay_begin":
+            if end is not None or SupervisorCursor.parse(value.get("cursor")) != cursor:
+                raise ValueError("duplicate/mismatched replay boundary")
+            end = SupervisorCursor.parse(value.get("end"))
+            count = (end.stdout - cursor.stdout) + (end.stderr - cursor.stderr)
+            if end.stdout < cursor.stdout or end.stderr < cursor.stderr or count > 1024 * 1024:
+                raise ValueError("invalid/oversized replay span")
+        elif end is None:
+            if value.get("event") not in ("output", "exited"):
+                raise ValueError("unexpected pre-replay event")
+        else:
+            if value.get("event") == "output":
+                events.append(_output(value, offsets))
+            elif value.get("event") == "exited":
+                code = value.get("code")
+                events.append(("exited", "", 0, b"", code if type(code) is int else None))
+            else:
+                raise ValueError("unexpected replay event or supervisor failure")
+            if offsets["stdout"] > end.stdout or offsets["stderr"] > end.stderr or len(events) > 256:
+                raise ValueError("replay exceeded declared bounds")
+
+
 class _PythonClient:
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                 initial: list[EventTuple], offsets: dict[str, int]) -> None:
         self.writer: asyncio.StreamWriter = writer
         self.events: asyncio.Queue[EventTuple] = asyncio.Queue(maxsize=256)
+        for event in initial:
+            self.events.put_nowait(event)
         self.commands: asyncio.Queue[tuple[str, object, asyncio.Future[Message]]] = asyncio.Queue(maxsize=64)
         self.failure: asyncio.Future[SupervisorError] = asyncio.get_running_loop().create_future()
         self.ack: asyncio.Future[Message] | None = None
         self.generation: int | None = None
-        self.offsets: dict[str, int] = {}
+        self.offsets: dict[str, int] = offsets
         self.receiver: asyncio.Task[None] = asyncio.create_task(self._receive(reader))
         self.actor: asyncio.Task[None] = asyncio.create_task(self._run())
 
     @classmethod
-    async def connect(cls, path: str, secret: bytes, instance: str) -> _PythonClient:
+    async def connect(cls, path: str, secret: bytes, instance: str, cursor: SupervisorCursor | None) -> _PythonClient:
         writer: asyncio.StreamWriter | None = None
         try:
             async with asyncio.timeout(5):
@@ -300,7 +383,13 @@ class _PythonClient:
                 attached = await receive_message(reader)
                 if attached.get("event") != "attached" or attached.get("instance") != instance:
                     raise ValueError("invalid attachment")
-                return cls(reader, writer)
+                initial: list[EventTuple] = []
+                offsets: dict[str, int] = {}
+                if cursor is not None:
+                    if attached.get("replay") is not True:
+                        raise ValueError("supervisor does not support replay")
+                    initial, offsets = await _resume(reader, writer, cursor)
+                return cls(reader, writer, initial, offsets)
         except Exception as exc:
             if writer is not None:
                 writer.close()
@@ -330,17 +419,7 @@ class _PythonClient:
                     continue
                 kind = value.get("event")
                 if kind == "output":
-                    stream, offset, encoded = value.get("stream"), value.get("offset"), value.get("data")
-                    if stream not in ("stdout", "stderr") or type(offset) is not int or not isinstance(encoded, str):
-                        raise SupervisorError("protocol", "invalid output")
-                    stream = cast(str, stream)
-                    data = base64.b64decode(encoded, validate=True)
-                    if offset < 0 or offset > 2**64 - 1 - len(data) or len(data) > 8192:
-                        raise SupervisorError("protocol", "invalid offset/chunk size")
-                    if self.offsets.get(stream, offset) != offset:
-                        raise SupervisorError("lagged", "output offset gap")
-                    self.offsets[stream] = offset + len(data)
-                    self.events.put_nowait(("output", stream, offset, data, None))
+                    self.events.put_nowait(_output(value, self.offsets))
                 elif kind == "exited":
                     code = value.get("code")
                     self.events.put_nowait(("exited", "", 0, b"", code if type(code) is int else None))

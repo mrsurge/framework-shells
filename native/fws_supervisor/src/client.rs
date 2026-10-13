@@ -2,6 +2,7 @@
 //! application bytes are never parsed. No reconnect or input retry is performed.
 use crate::{
     framed,
+    replay::Cursor,
     session::{Wire, authenticate_client, receive, send},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -90,7 +91,23 @@ pub struct Client {
 }
 impl Client {
     pub async fn connect(path: impl AsRef<Path>, secret: &[u8], instance: &str) -> Result<Self> {
-        let mut wire = timeout(DEADLINE, async {
+        Self::connect_inner(path, secret, instance, None).await
+    }
+    pub async fn connect_from(
+        path: impl AsRef<Path>,
+        secret: &[u8],
+        instance: &str,
+        cursor: Cursor,
+    ) -> Result<Self> {
+        Self::connect_inner(path, secret, instance, Some(cursor)).await
+    }
+    async fn connect_inner(
+        path: impl AsRef<Path>,
+        secret: &[u8],
+        instance: &str,
+        cursor: Option<Cursor>,
+    ) -> Result<Self> {
+        let (mut wire, replay_supported) = timeout(DEADLINE, async {
             let mut wire = framed(UnixStream::connect(path).await?);
             authenticate_client(&mut wire, secret, instance).await?;
             let attached: Value = receive(&mut wire).await?;
@@ -98,20 +115,33 @@ impl Client {
                 attached["event"] == "attached" && attached["instance"] == instance,
                 "invalid attachment"
             );
-            Ok::<Wire, anyhow::Error>(wire)
+            Ok::<_, anyhow::Error>((wire, attached["replay"] == true))
         })
         .await
         .map_err(|_| ClientError::new("connect", "connection deadline"))?
         .map_err(|e| ClientError::new("connect", e))?;
         let (commands, rx) = mpsc::channel(64);
         let (events, output) = mpsc::channel(CAPACITY);
+        let mut offsets = [None, None];
+        if let Some(cursor) = cursor {
+            if !replay_supported {
+                return Err(ClientError::new(
+                    "connect",
+                    "supervisor does not support replay",
+                ));
+            }
+            timeout(DEADLINE, resume(&mut wire, cursor, &events, &mut offsets))
+                .await
+                .map_err(|_| ClientError::new("connect", "replay deadline"))?
+                .map_err(|e| ClientError::new("connect", e))?;
+        }
         let (failure_tx, failure) = watch::channel(None);
         let cancel = CancellationToken::new();
         let shutdown = cancel.clone();
         let task = tokio::spawn(async move {
             let result = tokio::select! {
                 _ = shutdown.cancelled() => Err(ClientError::new("closed", "client closed")),
-                result = run(&mut wire, rx, events) => result,
+                result = run(&mut wire, rx, events, offsets) => result,
             };
             let error = result
                 .err()
@@ -218,6 +248,62 @@ impl Client {
     }
 }
 
+async fn resume(
+    wire: &mut Wire,
+    cursor: Cursor,
+    events: &mpsc::Sender<Event>,
+    offsets: &mut [Option<u64>; 2],
+) -> anyhow::Result<()> {
+    send(wire, &json!({"op":"resume","cursor":cursor})).await?;
+    let mut end: Option<Cursor> = None;
+    let mut replayed = 0u64;
+    loop {
+        let value: Value = receive(wire).await?;
+        if value.get("ok").is_some() {
+            anyhow::ensure!(value["ok"] == true, "replay rejected: {}", value["error"]);
+            let end = end.ok_or_else(|| anyhow::anyhow!("replay ACK before boundary"))?;
+            anyhow::ensure!(value["result"]["resumed"] == true, "invalid replay ACK");
+            anyhow::ensure!(
+                serde_json::from_value::<Cursor>(value["result"]["end"].clone())? == end,
+                "replay boundary mismatch"
+            );
+            anyhow::ensure!(
+                value["result"]["replayed_bytes"].as_u64() == Some(replayed),
+                "replay byte count mismatch"
+            );
+            anyhow::ensure!(
+                *offsets == [Some(end.stdout), Some(end.stderr)],
+                "incomplete replay"
+            );
+            return Ok(());
+        }
+        if value["event"] == "replay_begin" {
+            anyhow::ensure!(end.is_none(), "duplicate replay boundary");
+            anyhow::ensure!(
+                serde_json::from_value::<Cursor>(value["cursor"].clone())? == cursor,
+                "requested cursor mismatch"
+            );
+            let boundary: Cursor = serde_json::from_value(value["end"].clone())?;
+            replayed = cursor.replay_bytes(boundary)?;
+            end = Some(boundary);
+            *offsets = [Some(cursor.stdout), Some(cursor.stderr)];
+        } else if let Some(end) = end {
+            route(&value, events, offsets)?;
+            anyhow::ensure!(
+                offsets[0] <= Some(end.stdout) && offsets[1] <= Some(end.stderr),
+                "output beyond replay boundary"
+            );
+        } else {
+            // The existing live-only server may already have emitted output
+            // before handling Resume. The marker establishes the new epoch.
+            anyhow::ensure!(
+                value["event"] == "output" || value["event"] == "exited",
+                "unexpected pre-replay event"
+            );
+        }
+    }
+}
+
 fn route(
     value: &Value,
     events: &mpsc::Sender<Event>,
@@ -310,9 +396,9 @@ async fn run(
     wire: &mut Wire,
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<Event>,
+    mut offsets: [Option<u64>; 2],
 ) -> Result<()> {
     let mut generation: Option<u64> = None;
-    let mut offsets = [None, None];
     loop {
         tokio::select! {
             value = receive::<Value>(wire) => {

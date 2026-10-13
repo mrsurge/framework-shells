@@ -1,6 +1,7 @@
 //! Optional experimental binding. Hot-path completions cross a readiness FD;
 //! Tokio worker threads never enter Python to deliver output or write ACKs.
 use fws_supervisor::client::{Client, ClientError, Event};
+use fws_supervisor::replay::Cursor;
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyBytes};
 use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use std::{
@@ -115,18 +116,24 @@ type Drain = (Vec<EventTuple>, Vec<ReplyTuple>, Option<String>);
 #[pymethods]
 impl NativeClient {
     #[staticmethod]
+    #[pyo3(signature = (path, secret, instance, cursor=None))]
     fn connect(
         py: Python<'_>,
         path: String,
         secret: Vec<u8>,
         instance: String,
+        cursor: Option<(u64, u64)>,
     ) -> PyResult<Bound<'_, PyAny>> {
         future_into_py(py, async move {
             let bridge =
                 Arc::new(Bridge::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?);
-            let client = Client::connect(path, &secret, &instance)
-                .await
-                .map_err(error)?;
+            let client = match cursor {
+                Some((stdout, stderr)) => {
+                    Client::connect_from(path, &secret, &instance, Cursor { stdout, stderr }).await
+                }
+                None => Client::connect(path, &secret, &instance).await,
+            }
+            .map_err(error)?;
             let output = bridge.clone();
             let reader_client = client.clone();
             let reader = tokio::spawn(async move {
@@ -298,6 +305,6 @@ fn fws_supervisor_client(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
     pyo3_async_runtimes::tokio::init(builder);
-    module.add("API_VERSION", 2)?;
+    module.add("API_VERSION", 3)?;
     module.add_class::<NativeClient>()
 }

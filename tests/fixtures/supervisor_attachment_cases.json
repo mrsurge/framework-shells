@@ -1,0 +1,16 @@
+[
+  {"field":"version","value":1,"valid":true},
+  {"field":"version","value":2,"valid":false},
+  {"field":"version","value":true,"valid":false},
+  {"field":"runtime_id","value":"wrong-runtime","valid":false},
+  {"field":"pid","value":0,"valid":false},
+  {"field":"pid","value":true,"valid":false},
+  {"field":"pid","value":4294967296,"valid":false},
+  {"field":"supervisor_pid","value":-1,"valid":false},
+  {"field":"instance","value":"","valid":false},
+  {"field":"socket","value":"relative/socket","valid":false},
+  {"field":"command","value":[],"valid":false},
+  {"field":"shell","value":{"id":"../escape","label":null,"spec_id":null,"subgroups":[]},"valid":false},
+  {"field":"shell","value":{"id":"fs_example","label":"unicode-\u03bb","spec_id":null,"subgroups":["first","second"]},"valid":true},
+  {"field":"unexpected","value":0,"valid":false}
+]

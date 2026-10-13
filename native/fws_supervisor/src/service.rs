@@ -1,7 +1,8 @@
-//! Isolated experimental service. Replay and FWS manager integration are deliberately absent.
+//! Isolated experimental service. FWS manager integration is deliberately absent.
 use crate::{
     framed,
     policy::{AttachmentState, WriterLease},
+    replay::{Cursor, Source},
     session::{self, DEADLINE, Wire},
 };
 use anyhow::{Result, anyhow, ensure};
@@ -12,7 +13,7 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex as SyncMutex},
 };
 use tokio::{
     fs::File,
@@ -31,11 +32,16 @@ pub struct Config {
     pub stdout_log: PathBuf,
     pub stderr_log: PathBuf,
     pub command: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub attachment: Option<crate::attachment::ShellIdentity>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    Resume {
+        cursor: Cursor,
+    },
     Status,
     Acquire {
         #[serde(default)]
@@ -60,6 +66,8 @@ enum Event {
         stream: String,
         offset: u64,
         data: String,
+        #[serde(skip_serializing)]
+        len: usize,
     },
     Exited {
         code: Option<i32>,
@@ -84,6 +92,16 @@ struct Shared {
     pid: u32,
     events: broadcast::Sender<Event>,
     stop: watch::Sender<bool>,
+    published: SyncMutex<Published>,
+    stdout_source: Source,
+    stderr_source: Source,
+}
+
+#[derive(Clone, Default)]
+struct Published {
+    end: Cursor,
+    exit: Option<Option<i32>>,
+    failure: Option<String>,
 }
 
 struct Endpoint {
@@ -162,10 +180,13 @@ async fn capture<R: AsyncRead + Unpin>(
         }
         log.write_all(&buffer[..count]).await?;
         log.flush().await?; // Observation is published only after bytes are visible to raw readers.
+        let mut published = shared.published.lock().unwrap();
+        published.end.set(stream, offset + count as u64)?;
         let _ = shared.events.send(Event::Output {
             stream: stream.into(),
             offset,
             data: B64.encode(&buffer[..count]),
+            len: count,
         });
         offset += count as u64;
     }
@@ -179,6 +200,7 @@ async fn handle(request: Request, connection: &str, shared: &Shared) -> Result<V
         connection: connection.to_owned(),
     };
     match request {
+        Request::Resume { .. } => Err(anyhow!("resume requires a fresh observer connection")),
         Request::Status => Ok(
             json!({"pid":shared.pid, "instance":shared.instance, "exited":state.exited, "code":state.code, "failure":state.failure}),
         ),
@@ -223,20 +245,146 @@ async fn handle(request: Request, connection: &str, shared: &Shared) -> Result<V
     }
 }
 
+async fn replay(
+    wire: &mut Wire,
+    cursor: Cursor,
+    shared: &Shared,
+) -> Result<(broadcast::Receiver<Event>, Cursor)> {
+    // Publication and subscription/snapshot share this short lock. File I/O and
+    // socket sends never hold it, so an observer cannot block child capture.
+    let (output, boundary) = {
+        let published = shared.published.lock().unwrap();
+        (shared.events.subscribe(), published.clone())
+    };
+    let count = cursor.replay_bytes(boundary.end)?;
+    let mut stdout = shared
+        .stdout_source
+        .open(cursor.stdout, boundary.end.stdout)
+        .await?;
+    let mut stderr = shared
+        .stderr_source
+        .open(cursor.stderr, boundary.end.stderr)
+        .await?;
+    session::send(
+        wire,
+        &json!({"event":"replay_begin", "cursor":cursor, "end":boundary.end}),
+    )
+    .await?;
+    let mut buffer = [0u8; 8192];
+    for (stream, file, start, end) in [
+        ("stdout", &mut stdout, cursor.stdout, boundary.end.stdout),
+        ("stderr", &mut stderr, cursor.stderr, boundary.end.stderr),
+    ] {
+        let mut offset = start;
+        while offset < end {
+            let count = (end - offset).min(buffer.len() as u64) as usize;
+            file.read_exact(&mut buffer[..count]).await?;
+            session::send(
+                wire,
+                &Event::Output {
+                    stream: stream.into(),
+                    offset,
+                    data: B64.encode(&buffer[..count]),
+                    len: count,
+                },
+            )
+            .await?;
+            offset += count as u64;
+        }
+    }
+    shared
+        .stdout_source
+        .verify(&stdout, boundary.end.stdout)
+        .await?;
+    shared
+        .stderr_source
+        .verify(&stderr, boundary.end.stderr)
+        .await?;
+    // Lifecycle that predates the snapshot is sticky; later lifecycle stays in
+    // the subscribed lane. Cross-stream output ordering is not reconstructed.
+    if let Some(code) = boundary.exit {
+        session::send(wire, &Event::Exited { code }).await?;
+    }
+    if let Some(message) = boundary.failure {
+        session::send(wire, &Event::Failure { message }).await?;
+    }
+    session::send(
+        wire,
+        &json!({"ok":true,"result":{"resumed":true,"end":boundary.end,"replayed_bytes":count}}),
+    )
+    .await?;
+    Ok((output, boundary.end))
+}
+
+fn after_boundary(event: Event, cursor: &mut Option<Cursor>) -> Result<Option<Event>> {
+    if let Event::Output {
+        stream,
+        offset,
+        data,
+        len,
+    } = event
+    {
+        if let Some(cursor) = cursor {
+            let Some(skip) = cursor.accept(&stream, offset, len)? else {
+                return Ok(None);
+            };
+            if skip == 0 {
+                return Ok(Some(Event::Output {
+                    stream,
+                    offset,
+                    data,
+                    len,
+                }));
+            }
+            let bytes = B64.decode(&data)?;
+            return Ok(Some(Event::Output {
+                stream,
+                offset: offset + skip as u64,
+                data: B64.encode(&bytes[skip..]),
+                len: len - skip,
+            }));
+        }
+        return Ok(Some(Event::Output {
+            stream,
+            offset,
+            data,
+            len,
+        }));
+    }
+    Ok(Some(event))
+}
+
 async fn serve(mut wire: Wire, secret: Arc<Vec<u8>>, shared: Arc<Shared>) -> Result<()> {
     session::authenticate_server(&mut wire, &secret, &shared.instance).await?;
     let connection = session::nonce()?;
     let mut output = shared.events.subscribe();
     session::send(
         &mut wire,
-        &json!({"event":"attached", "instance":shared.instance, "pid":shared.pid, "replay":false}),
+        &json!({"event":"attached", "instance":shared.instance, "pid":shared.pid, "replay":true}),
     )
     .await?;
+    let mut first_request = true;
+    let mut cursor = None;
     let result = async {
         loop {
             tokio::select! {
                 request = session::receive::<Request>(&mut wire) => {
                     let request = request?;
+                    if let Request::Resume { cursor: requested } = request {
+                        if !first_request { return Err(anyhow!("resume requires a fresh observer connection")); }
+                        first_request = false;
+                        let replayed = timeout(DEADLINE, replay(&mut wire, requested, &shared))
+                            .await.unwrap_or_else(|_| Err(anyhow!("replay deadline exceeded")));
+                        match replayed {
+                            Ok((receiver, end)) => { output = receiver; cursor = Some(end); }
+                            Err(error) => {
+                                let _ = session::send(&mut wire, &json!({"ok":false,"error":format!("replay_unavailable: {error}")})).await;
+                                return Err(error);
+                            }
+                        }
+                        continue;
+                    }
+                    first_request = false;
                     let stopping = matches!(request, Request::Stop);
                     let response = match handle(request, &connection, &shared).await {
                         Ok(value) => json!({"ok":true,"result":value}),
@@ -250,7 +398,16 @@ async fn serve(mut wire: Wire, secret: Arc<Vec<u8>>, shared: Arc<Shared>) -> Res
                     if stop_ok { return Ok(()); }
                 }
                 event = output.recv() => match event {
-                    Ok(event) => session::send(&mut wire, &event).await?,
+                    Ok(event) => {
+                        match after_boundary(event, &mut cursor) {
+                            Ok(Some(event)) => session::send(&mut wire, &event).await?,
+                            Ok(None) => (),
+                            Err(error) => {
+                                session::send(&mut wire, &Event::Gap { skipped: 0 }).await?;
+                                return Err(error);
+                            }
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         session::send(&mut wire, &Event::Gap { skipped }).await?;
                         return Err(anyhow!("output gap; reconnect and inspect raw logs"));
@@ -273,9 +430,32 @@ pub async fn run(config: Config, secret: Vec<u8>) -> Result<()> {
         "secret and command required"
     );
     let (listener, _endpoint) = bind(&config.socket)?;
+    let instance = session::nonce()?;
+    let cwd = std::fs::canonicalize(config.cwd.as_deref().unwrap_or(Path::new(".")))?;
+    let attachment_path = crate::attachment::record_path(&config.socket);
+    let attachment_enabled = config.attachment.is_some();
+    if let Some(identity) = &config.attachment {
+        identity.validate()?;
+        ensure!(
+            config.socket.is_absolute()
+                && config.stdout_log.is_absolute()
+                && config.stderr_log.is_absolute(),
+            "attachment requires absolute paths"
+        );
+        match std::fs::symlink_metadata(&attachment_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+            Ok(_) => anyhow::bail!("attachment already exists; explicit recovery required"),
+        }
+    }
     let stdout_log = new_log(&config.stdout_log).await?;
     let stderr_log = new_log(&config.stderr_log).await?;
+    let stdout_source = Source::new(config.stdout_log.clone(), &stdout_log).await?;
+    let stderr_source = Source::new(config.stderr_log.clone(), &stderr_log).await?;
     let mut command = Command::new(&config.command[0]);
+    if let Some(cwd) = &config.cwd {
+        command.current_dir(cwd);
+    }
     command
         .args(&config.command[1..])
         .stdin(Stdio::piped())
@@ -285,7 +465,26 @@ pub async fn run(config: Config, secret: Vec<u8>) -> Result<()> {
         .process_group(0);
     let mut child = command.spawn()?;
     let pid = child.id().ok_or_else(|| anyhow!("missing child pid"))?;
-    let instance = session::nonce()?;
+    if let Some(identity) = config.attachment {
+        let descriptor = crate::attachment::Descriptor {
+            version: 1,
+            runtime_id: crate::attachment::runtime_id(&secret),
+            shell: identity,
+            instance: instance.clone(),
+            pid,
+            supervisor_pid: std::process::id(),
+            socket: config.socket.clone(),
+            stdout_log: config.stdout_log.clone(),
+            stderr_log: config.stderr_log.clone(),
+            command: config.command.clone(),
+            cwd,
+        };
+        if let Err(error) = descriptor.publish(&attachment_path, &secret) {
+            let _ = signal_group(pid);
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    }
     let (events, _) = broadcast::channel(64);
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(Shared {
@@ -300,6 +499,9 @@ pub async fn run(config: Config, secret: Vec<u8>) -> Result<()> {
         pid,
         events,
         stop,
+        published: SyncMutex::new(Published::default()),
+        stdout_source,
+        stderr_source,
     });
     let stdout = child
         .stdout
@@ -318,7 +520,8 @@ pub async fn run(config: Config, secret: Vec<u8>) -> Result<()> {
     let mut child_exited = false;
     println!(
         "{}",
-        json!({"ready":true,"instance":shared.instance,"pid":pid,"socket":config.socket})
+        json!({"ready":true,"instance":shared.instance,"pid":pid,"socket":config.socket,
+            "attachment_file":attachment_enabled.then_some(&attachment_path)})
     );
     loop {
         tokio::select! {
@@ -338,6 +541,8 @@ pub async fn run(config: Config, secret: Vec<u8>) -> Result<()> {
                         state.failure = Some(message.clone());
                         state.policy.child_exited();
                         state.stdin.take();
+                        let mut published = shared.published.lock().unwrap();
+                        published.failure = Some(message.clone());
                         let _ = shared.events.send(Event::Failure { message });
                         if !state.exited { signal_group(pid)?; }
                     }
@@ -351,6 +556,8 @@ pub async fn run(config: Config, secret: Vec<u8>) -> Result<()> {
                 state.code = status.code();
                 state.policy.child_exited();
                 state.stdin.take();
+                let mut published = shared.published.lock().unwrap();
+                published.exit = Some(status.code());
                 let _ = shared.events.send(Event::Exited { code:status.code() });
             }
             _ = stopped.changed() => break,

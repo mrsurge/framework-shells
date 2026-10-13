@@ -11,6 +11,8 @@ An experimental standalone supervisor now provides authenticated sessions,
 ordinary child stdio, raw capture, writer fencing, disconnect/reconnect and
 explicit EOF/Stop. It is not connected to shellspec launch or FWS adoption;
 framework shutdown survival is not guaranteed yet.
+Signed discovery records and explicit authenticated attachment adapters now
+provide the adoption foundation. Ordinary manager launch/shutdown remains unchanged.
 Existing proc/pipe/PTY paths and Socket.IO peer transport remain unchanged.
 The broader requirements remain in LOG_PROJECTION_PLAN.md.
 
@@ -73,11 +75,27 @@ The broader requirements remain in LOG_PROJECTION_PLAN.md.
    0600 sockets, 16-session bounds, three-second handshake/send/write deadlines,
    and fenced input are implemented. See the shared crate README for the exact
    request/event contract. Logging continues when clients disconnect; live output
-   is event-driven with bounded broadcast and explicit lag gaps. No replay yet.
+   is event-driven with bounded broadcast and explicit lag gaps. Bounded replay
+   is provided by the following slice; manager adoption remains separate.
 4. Binary-envelope comparison and control baselines as specified below. Select
-   the schema/codec before expanding the prototype wire contract for replay.
+   the schema/codec before freezing the production wire contract. The shared-client
+   experiment now allows replay semantics to be tested on the existing experimental
+   JSON/base64 wire first, without choosing a production codec by implication.
 5. Raw byte cursor replay/live attachment with bounded buffering and explicit
    gaps/errors; test disconnected output and lost acknowledgements.
+
+   Active slice after pushed checkpoints FWS `80d81b5` / Ferrous `7db12fd`:
+   explicit new-connection stdout/stderr cursors, bound to the authenticated
+   supervisor instance. Capture a published-byte watermark and subscribe to live
+   output in one critical section; replay only to that watermark, then forward
+   live events from there. Suppress pre-resume live events until a replay-begin
+   marker. Reject future offsets and replay spans above 1 MiB combined rather
+   than clipping, resetting cursors or silently jumping to tail. This initial
+   startup replay is bounded, not an arbitrary-history paging API; raw logs remain
+   untouched. Live broadcast lag during replay fails explicitly. Validate raw-log
+   identity/size; external log mutation is unsupported (not an atomic filesystem
+   snapshot). A reconnect is explicit and never replays stdin or reacquires its
+   writer lease automatically. Keep the ordinary live-only connect path unchanged.
 6. Python and Rust manager adapters, shellspec rendering, persisted identity and
    acquire-before-spawn reconciliation. Integrate typed shutdown intent and
    process-group-safe protection before advertising survival capability.
@@ -402,8 +420,10 @@ logging and Python/Rust scheduling may still dominate. Preserve build caches.
 | Supervisor process and framing/auth | Prototype client tested | Shared prototype tested | Nonce/counter, raw cat, auth rejection, fencing, disconnect/EOF |
 | Schema-defined binary envelope selection | Candidate adapters tested | Candidate adapters tested | Shared schemas and mixed round trips; no production dependency selected |
 | Controlled envelope benchmark matrix | Transport/msgspec/RPC runs complete | Native/mixed and real-supervisor paths exercised | Logging visibility matched; codec/log/ACK cost attribution still pending |
-| Shared native client / automatic Python selection | Experimental API v2 binding plus reference tested | Shared async client tested | Common byte/auth/fencing/EOF/fault tests; paired actual-supervisor results below |
-| Replay, launch/adoption, packaging | Pending | Pending | Same bytes/identity across manager replacement |
+| Shared native client / automatic Python selection | Experimental API v3 binding plus reference | Shared async client | API v2 benchmark checkpoint below; v3 adds explicit cursor attachment |
+| Bounded replay/live handoff | Implemented, validation below | Implemented in shared core | Instance-bound cursors, atomic watermark/subscription, bounded raw replay; no stdin replay |
+| Persisted supervisor identity and explicit attachment | Implemented, common client | Shared Rust descriptor/client | Signed private records; same PID/nonce/counter after disposable launcher death |
+| Launch/adoption, packaging | Pending | Pending | Same bytes/identity across manager replacement |
 | Shutdown executor integration | Pending | Pending | No broad signals across preserved boundaries |
 | Live downstream acceptance | Not run | Not run | Requires separate authorization |
 
@@ -511,4 +531,117 @@ for the core and PyO3 binding pass; Ferrous's three policy tests plus pipe-adopt
 regression pass with the new reexport. Mirrored plans and canonical/vendor source
 inventory match. Validation logs are retained beside benchmark evidence. These
 are source/disposable-runtime checks, not an installed-package or live-framework
-acceptance run. Changes remain uncommitted; existing package artifacts preserved.
+acceptance run. This experiment was subsequently checkpointed as described below;
+existing package artifacts were preserved.
+
+## Pushed Checkpoint And Replay Slice (2026-09-20)
+
+Both `feature/uds-shells` snapshots were committed and pushed without version
+changes: Python FWS `80d81b5ba6dfd6a1e80281dd54de1ba22e725d94` (0.0.64),
+Ferrous `7db12fdbfc7ed18660ddcdcfbcae20144c3ead4f` (0.2.14). Native package
+artifacts were excluded; no installation or live restart was performed.
+
+The subsequent uncommitted slice implements explicit bounded raw replay in the
+shared Rust service/client, optional PyO3 API v3 binding, and asyncio reference.
+Python `SupervisorClient.connect(..., cursor=SupervisorCursor(stdout=..., stderr=...))`
+and Rust `Client::connect_from(..., replay::Cursor { stdout, stderr })` take the
+next consumed offsets for the authenticated instance. A fresh connection is
+required; ordinary `connect` remains live-only. No writer lease is acquired.
+
+The replay subscription and published stdout/stderr watermark are captured under
+one short lock. No file/socket await holds that lock. Raw history is delivered
+up to the watermark, followed by contiguous live output. Clients discard live
+prelude before `replay_begin` and validate the final replay acknowledgement
+before exposing history. Independent stream cursors preserve each stream, not
+historical cross-stream chronology. Pre-boundary exit state is sticky.
+
+Startup replay is capped at 1 MiB combined and a three-second service deadline;
+normal 8192-byte frames and bounded queues remain. Future/oversized cursors,
+log replacement/truncation, and output gaps fail rather than silently clipping.
+There is no history paging endpoint yet. File identity/minimum-size checks do
+not provide a snapshot against same-inode overwrite/truncate-regrow; external
+log mutation is unsupported. Interrupted replay returns no successful client,
+and reconnect remains the caller's explicit decision. Stdin is never replayed.
+
+Tests use disposable real supervisors and unmodified `cat`, plus a binary
+stdout/stderr child. They cover same PID, raw log equality, mid-chunk offsets,
+concurrent output during replay, independent stream offsets, empty/equal-tail
+replay, exact/over-limit budgets, replaced sources, and historical exit. Existing
+live-only authentication/fencing/EOF/cancellation/fault and JSON-RPC lanes are
+regression checks. No claim of manager-restart or installed/live acceptance.
+
+Verification: 39 focused Python tests pass with both client implementations and
+all real-process/framing/RPC artifacts supplied; no skips. Eleven standalone
+supervisor Rust tests and five Ferrous policy/public-API/adoption checks pass.
+Focused basedpyright reports zero errors/warnings; core and PyO3 binding Clippy
+pass with warnings denied. Shared source inventory and mirrored plans match.
+Evidence: `.external/bench-results/uds-replay-validation-final-20260920.log` and
+`uds-replay-ferrous-validation-20260920.log`. An earlier broad test invocation
+had two nonexistent module names; the corrected 39-case invocation above passed.
+Only isolated release artifacts were built; no new performance claim or full
+benchmark rerun. New replay changes remain uncommitted after the checkpoint.
+
+Next: manager launch/adoption and persisted cursor ownership, shutdown executor
+protection, then packaging/mixed-runtime acceptance. Production binary-envelope
+selection and replay fault/saturation stress remain open; no production wire
+format is frozen by this experimental JSON/base64 operation.
+
+## Attachment Foundation (2026-09-20)
+
+User approved implementing persisted identity/authenticated attachment before
+changing normal manager launch or shutdown. This is a prerequisite, not automatic
+adoption or a claim that `lifecycle.survive_shutdown` can now be enabled.
+
+The standalone supervisor optionally accepts an `attachment` identity
+(`id`, `label`, `spec_id`, `subgroups`) and `cwd`. Before readiness it publishes
+`<socket>.attachment.json`: bounded signed identity, instance nonce, child and
+supervisor PIDs, runtime ID, command/cwd/log paths. No environment map or secret
+is stored. This is separate from canonical FWS `meta.json`; integration into
+that store remains pending. Existing records/endpoints are never replaced or
+automatically cleaned up to force a launch. Records remain after Stop as history.
+
+Publication uses the existing ecosystem `tempfile` crate's no-clobber API. A
+direct hard-link implementation failed with EACCES on this Android host; the
+library's atomic no-replace path passes. Private owned directories and files,
+no-follow bounded reads, domain-separated HMAC over exact UTF-8 body bytes,
+strict schema/version and expected runtime checks are shared by Python/Rust.
+Ancestor paths are trusted; this is not a hardened untrusted multi-user filesystem
+or power-loss recovery guarantee. The signed JSON disk envelope is cold-path
+discovery only and does not decide the future hot-path binary codec.
+
+Python `supervisor_attachment.attach_supervisor` and Ferrous
+`persistent_shell::attachment::attach` return descriptor/client/status after
+authenticating the endpoint and matching expected shell ID, instance and PID.
+Stale/unavailable endpoints and even correctly signed wrong PID/instance metadata
+fail; exited instances remain explicitly exited. No implicit launch, input lease,
+takeover, PID signaling or input replay. Optional cursors reuse the existing
+bounded replay client. Python filesystem work runs off-loop; optional native I/O
+remains selected by the existing API v3 client, without a new shellspec flag.
+
+Shared descriptor fixtures cover types, version/runtime, path/identity validation,
+and Unicode metadata. Filesystem checks cover permissions, symlinks, size caps
+and no-clobber publication. Real supervisor tests cover labels/groups, read-only
+attachment, explicit writer acquisition, replay, stale endpoints, and exit status.
+A disposable Python launcher owns a live counter/nonce child, is killed with
+SIGKILL, and Python then native clients attach with the same child PID/nonce and
+incremented counter. This proves launcher-death reattachment, not graceful
+framework teardown survival, nested protected trees or live TE2/ALS acceptance.
+
+Final verification: 50 focused Python tests pass with both drivers and all
+process/framing/RPC artifacts supplied, no skips or ResourceWarnings. Thirteen
+shared supervisor Rust tests and five Ferrous public-API/policy/adoption checks
+pass. Focused basedpyright is clean; core/binding Clippy pass with warnings denied.
+Mirrored plan, source inventory and shared descriptor fixtures match. Evidence:
+`.external/bench-results/uds-attachment-final-20260920.log` and
+`uds-attachment-ferrous-20260920.log`; isolated artifacts are retained under
+`.external/uds-native-attachment`. Earlier tests exposed the hard-link denial;
+one prematurely launched Python run targeted its not-yet-built binary and failed,
+then was rerun successfully after the build. Fixture setup now registers cleanup
+immediately so setup failures do not leave temporary-directory warnings.
+No performance claims, production install, live restart, version bump or commit;
+previous replay edits, package artifacts and cached binaries remain intact.
+
+Next: integrate discovery with canonical manager records and acquire-before-spawn
+reconciliation, then identity-safe protected shutdown. Until those are connected
+in both runtimes, keep the survival flag unavailable. Packaging/free-threaded
+acceptance, live restarts and the production binary-envelope choice remain open.

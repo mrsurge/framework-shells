@@ -353,6 +353,22 @@ Free-threaded Termux Python is supported by the source build path. The PyO3 pipe
 fws_pipe_pump.cpython-314t-aarch64-linux-android.so
 ```
 
+## Optional uvloop
+
+The FWS CLI and Python bridge threads use `uvloop` when it is installed. If it
+is absent, they use standard asyncio. Broken uvloop imports or ABI errors fail
+visibly rather than silently falling back. Set
+`FRAMEWORK_SHELLS_DISABLE_UVLOOP=1` to force asyncio for these FWS-owned loops.
+
+Embedded managers continue using the host application's running loop; importing
+FWS does not replace that loop or change the global event-loop policy. This
+setting does not override TE2's own loop selection or Rust's Tokio runtime.
+
+uvloop remains separately installed, not a required FWS dependency. Use upstream
+`uvloop` on supported desktop interpreters, or `uvloop-te2==0.23.0.post1` for
+regular CPython 3.14 on Termux Android arm64. Both provide `import uvloop`; do
+not install them together in one environment.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -363,6 +379,7 @@ fws_pipe_pump.cpython-314t-aarch64-linux-android.so
 | `FRAMEWORK_SHELLS_PTY_MODE` | Default PTY mode for new PTY shells, `raw` or `interactive` |
 | `FRAMEWORK_SHELLS_INSTALL_MODE` | Native packaging mode, `auto`, `build`, or `python-only` |
 | `FRAMEWORK_SHELLS_PIPE_PUMP_MODE` | Native pipe extension packaging mode, defaults to install mode |
+| `FRAMEWORK_SHELLS_DISABLE_UVLOOP` | Force asyncio for FWS-owned loops (`1`, `true`, `yes`, `on`) |
 
 If `FRAMEWORK_SHELLS_SECRET` is missing, the CLI tries to load or create the runtime secret under the current repo fingerprint. If the secret is set, mutating API endpoints require a derived token via `X-Framework-Key` or `Authorization: Bearer ...`.
 

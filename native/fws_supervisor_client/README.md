@@ -7,7 +7,7 @@ Python uses `framework_shells.supervisor_client.SupervisorClient`:
 ```python
 client = await SupervisorClient.connect(socket_path, secret_bytes, instance_id)
 try:
-    print(client.backend)  # native when API v2 binding is importable, else python
+    print(client.backend)  # native when API v3 binding is importable, else python
     await client.acquire()
     await client.write(application_bytes)
     event = await client.read()  # stream, offset, raw data; or exited/code
@@ -37,7 +37,13 @@ that a previously submitted write was not delivered. Reconcile uncertain writes
 at application level; never retry blindly. Active cancelled commands consume
 their ACK before another is issued; cancelled queued commands may be skipped.
 A write ACK means kernel-pipe acceptance, not application execution. Always close
-clients in `finally`. No reconnect or replay exists yet.
+clients in `finally`. Reconnect is explicit. For bounded raw output replay, pass
+`cursor=SupervisorCursor(stdout=next_stdout_byte, stderr=next_stderr_byte)` to
+`connect`, retaining the same authenticated instance ID. Replay and subsequent
+live output are contiguous per stream; historical inter-stream order is not
+reconstructed. Startup replay is capped at 1 MiB combined and rejected if too
+large, beyond the log end, or unavailable. There is no clipping or stdin replay,
+and no writer lease is acquired by resuming. Default connections stay live-only.
 
 There are 64 queued controls plus one active command and 256 output events of at
 most 8192 bytes each. Full control queues reject new commands (`busy`, not sent).
@@ -71,7 +77,7 @@ run the same cases with disposable test-owned children only. The RPC harness in
 ## Hot-Path Scheduling
 
 The initial future-per-chunk/ACK binding is retained only in ignored benchmark
-artifacts after a substantial regression. The current API v2 binding registers a
+artifacts after a substantial regression. The current API v3 binding registers a
 nonblocking readiness socketpair with asyncio `add_reader`; Rust batches typed
 output/completions without calling Python from runtime threads. Write submission
 returns a local completion ID, not a wire protocol ID. Python resolves its own

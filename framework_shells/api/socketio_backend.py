@@ -10,7 +10,7 @@ from typing import Protocol, cast
 
 import aiofiles
 import socketio
-from fastapi import FastAPI
+from starlette.applications import Starlette
 
 from ..auth import derive_api_token, derive_runtime_id, get_secret
 from ..events import EventType, ShellEvent, get_event_bus
@@ -63,16 +63,16 @@ from ..protocols.fws_ui import (
     parse_fws_request,
 )
 from ..shared_manager import get_manager
-from .fws_ui import (
-    _action_purge_exited,
-    _action_purge_shell,
-    _action_shutdown,
-    _action_shutdown_app,
-    _action_terminate_pid,
-    _action_terminate_shell,
-    _action_truncate_logs,
-    _dashboard_notification_for_event,
-    _dashboard_state_parts,
+from .dashboard_service import (
+    action_purge_exited as _action_purge_exited,
+    action_purge_shell as _action_purge_shell,
+    action_shutdown as _action_shutdown,
+    action_shutdown_app as _action_shutdown_app,
+    action_terminate_pid as _action_terminate_pid,
+    action_terminate_shell as _action_terminate_shell,
+    action_truncate_logs as _action_truncate_logs,
+    dashboard_notification_for_event as _dashboard_notification_for_event,
+    dashboard_state_parts as _dashboard_state_parts,
 )
 
 _LOCAL_REPLAY_MAX_LINES = 2000
@@ -637,7 +637,7 @@ FWS_SOCKETIO_SIO.register_namespace(FwsSocketIoNamespace(FWS_SOCKETIO_NAMESPACE)
 FWS_SOCKETIO_ASGI_APP = socketio.ASGIApp(FWS_SOCKETIO_SIO, socketio_path="")
 
 
-def mount_fws_socketio_runtime(app: FastAPI) -> None:
+def mount_fws_socketio_runtime(app: Starlette) -> None:
     if getattr(app.state, "_framework_shells_fws_socketio_runtime_mounted", False):
         return
     os.environ["FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID"] = str(os.getpid())
@@ -645,14 +645,14 @@ def mount_fws_socketio_runtime(app: FastAPI) -> None:
     setattr(app.state, "_framework_shells_fws_socketio_runtime_mounted", True)
 
 
-def mount_fws_dashboard_runtime(app: FastAPI) -> None:
+def mount_fws_dashboard_runtime(app: Starlette) -> None:
     if getattr(app.state, "_framework_shells_fws_dashboard_runtime_mounted", False):
         return
     from .fws_ui import router as fws_ui_router
-    from .fastapi_router import projection_router
+    from .http_router import projection_router
 
-    app.include_router(fws_ui_router)
+    app.router.routes.extend(fws_ui_router.routes)
     if not any(getattr(route, "path", None) == "/api/framework_shells/logs/{shell_id}/window" for route in app.routes):
-        app.include_router(projection_router)
+        app.router.routes.extend(projection_router.routes)
     mount_fws_socketio_runtime(app)
     setattr(app.state, "_framework_shells_fws_dashboard_runtime_mounted", True)

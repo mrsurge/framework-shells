@@ -16,6 +16,15 @@ provide the adoption foundation. Ordinary manager launch/shutdown remains unchan
 Existing proc/pipe/PTY paths and Socket.IO peer transport remain unchanged.
 The broader requirements remain in LOG_PROJECTION_PLAN.md.
 
+Release-priority detour, 2026-10-13: FastAPI removal from the Python host is
+implemented and undergoing isolated source/installed/compiled validation;
+see FASTAPI_REMOVAL_PLAN.md. This does not change the supervisor envelope,
+attachment/replay protocol or normal launch/shutdown semantics. Next UDS slice
+remains canonical manager records and acquire-before-spawn reconciliation,
+followed by identity-safe protected teardown in both implementations. Do not
+enable the survival flag before those gates or conflate dependency removal
+with production persistent-shell acceptance.
+
 ## Contract Decisions
 
 - Persistent stdio is an opt-in managed transport, not an application protocol.

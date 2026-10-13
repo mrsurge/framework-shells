@@ -9,7 +9,9 @@ description = "Framework-agnostic process orchestration with PTY, pipe, and dtac
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-  "fastapi",
+  "starlette>=0.44,<2",
+  "msgspec>=0.19,<1",
+  "python-multipart>=0.0.18,<1",
   "aiofiles",
   "aiohttp>=3,<4",
   "msgpack>=1,<2",

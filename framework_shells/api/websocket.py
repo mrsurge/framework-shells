@@ -1,10 +1,9 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.routing import Router, WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
 from ..events import get_event_bus
 
-router = APIRouter()
 
-@router.websocket("/ws/events")
-async def shell_events_ws(websocket: WebSocket):
+async def shell_events_ws(websocket: WebSocket) -> None:
     """Stream all shell lifecycle events."""
     await websocket.accept()
     bus = get_event_bus()
@@ -21,3 +20,6 @@ async def shell_events_ws(websocket: WebSocket):
         pass
     finally:
         bus.unsubscribe(q)
+
+
+router = Router(routes=[WebSocketRoute("/ws/events", shell_events_ws)])

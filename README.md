@@ -206,7 +206,9 @@ fws tree --depth 4
 
 ## Dashboard And API
 
-`framework-shells` can be mounted into a FastAPI/ASGI host. The mounted runtime exposes:
+`framework-shells` provides a standalone ASGI application and explicit mounting
+helpers for an existing Starlette host. It does not require FastAPI or Pydantic.
+The mounted runtime exposes:
 
 - REST endpoints for shell list/detail/control
 - live dashboard updates
@@ -215,13 +217,35 @@ fws tree --depth 4
 - log inspection helpers
 - runtime auth derived from `FRAMEWORK_SHELLS_SECRET`
 
-The helper mount is:
+For a standalone host:
 
 ```python
+from framework_shells.api.application import create_fws_application
+
+app = create_fws_application()
+```
+
+Or add FWS to an existing host without replacing its lifespan or event loop:
+
+```python
+from starlette.applications import Starlette
+from framework_shells.api.application import mount_fws_http_api
 from framework_shells.api.socketio_backend import mount_fws_dashboard_runtime
 
+app = Starlette()
+mount_fws_http_api(app)
 mount_fws_dashboard_runtime(app)
 ```
+
+Both helpers are idempotent. The dashboard helper alone mounts its UI, projection
+endpoints and Socket.IO lane; the HTTP helper adds the complete REST API and
+lifecycle WebSocket. JSON ingress uses `msgspec`, with an 8 MiB request-body
+limit; the legacy shutdown form is limited to 64 KiB. These limits do not affect
+pipe bytes or raw logs.
+
+`framework_shells.api.fastapi_router` remains an import-location shim for the
+existing business functions. Its `router` is now a Starlette router, not a
+FastAPI `APIRouter`; use the mounting helpers instead of `include_router`.
 
 Important routes:
 

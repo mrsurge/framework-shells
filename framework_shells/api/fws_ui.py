@@ -3,20 +3,34 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import mimetypes
-import os
 import re
-import signal
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, cast
+from typing import cast
 
 import aiofiles
 import fnmatch
-from fastapi import APIRouter, Form, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
+from starlette.responses import Response, FileResponse, HTMLResponse, RedirectResponse
+from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.routing import Route, Router, WebSocketRoute
+from .http_support import http_route, path_text, read_body, RequestError, validation_error
+from .dashboard_service import (
+    dashboard_state_parts as _dashboard_state_parts,
+    dashboard_notification_for_event as _dashboard_notification_for_event,
+    action_truncate_logs as _action_truncate_logs,
+    action_purge_exited as _action_purge_exited,
+    action_terminate_shell as _action_terminate_shell,
+    action_shell_input as _action_shell_input,
+    action_purge_shell as _action_purge_shell,
+    action_terminate_pid as _action_terminate_pid,
+    action_shutdown_app as _action_shutdown_app,
+    action_shutdown as _action_shutdown,
+)
 
-from ..events import EventType, ShellEvent, get_event_bus
+from ..events import EventType, get_event_bus
 from ..io_metadata import read_io_metadata
 from ..process_snapshot import ProcessRecord
 from ..protocols.jsonrpc import dump_json_line
@@ -25,13 +39,6 @@ from ..protocols.fws_ui import (
     APP_SHUTDOWN_METHOD,
     DASHBOARD_OPEN_METHOD,
     DASHBOARD_REFRESH_METHOD,
-    FwsShellEventMethod,
-    SHELL_CREATED_NOTIFICATION_METHOD,
-    SHELL_EXITED_NOTIFICATION_METHOD,
-    SHELL_SPAWNED_NOTIFICATION_METHOD,
-    SHELL_UPDATED_NOTIFICATION_METHOD,
-    DashboardProcessPayload,
-    DashboardShellPayload,
     EXITED_PURGE_METHOD,
     FwsNotification,
     FwsRequest,
@@ -50,8 +57,6 @@ from ..protocols.fws_ui import (
     build_logs_io_metadata_notification,
     build_logs_open_response,
     build_logs_reset_notification,
-    build_shell_event_notification,
-    build_shell_removed_notification,
     build_request_error_response,
     build_error_notification,
     parse_fws_request,
@@ -64,75 +69,22 @@ from ..protocols.fws_ui import (
     SHUTDOWN_METHOD,
     LogStreamName,
 )
-from ..shutdown import ShutdownPolicy, shutdown_snapshot
 
 
-router = APIRouter()
 
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 ShellInfo = dict[str, object]
 StyleMap = dict[str, dict[str, str]]
 
 
-def _dashboard_shell_payload(value: object) -> DashboardShellPayload:
-    return cast(DashboardShellPayload, value)
 
 
-def _process_payload(proc: ProcessRecord) -> DashboardProcessPayload:
-    return {
-        "pid": int(proc.pid),
-        "parent_pid": int(proc.parent_pid) if proc.parent_pid is not None else None,
-        "type": str(proc.type),
-        "label": proc.label,
-        "shell_id": proc.shell_id,
-        "metadata": dict(proc.metadata),
-    }
 
 
-async def _dashboard_state_parts() -> tuple[list[DashboardShellPayload], list[DashboardProcessPayload]]:
-    mgr = await get_manager()
-    shells = await mgr.list_shells()
-    described: list[DashboardShellPayload] = []
-    for rec in shells:
-        try:
-            described.append(_dashboard_shell_payload(await mgr.describe(rec)))
-        except Exception:
-            described.append(_dashboard_shell_payload(rec.to_payload()))
-    snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
-    processes = [_process_payload(proc) for proc in snapshot.processes.values()]
-    return described, processes
 
 
-async def _dashboard_shell_payload_from_event(event: ShellEvent) -> DashboardShellPayload | None:
-    mgr = await get_manager()
-    rec = await mgr.load_shell_record(event.shell_id)
-    if rec is not None:
-        try:
-            return _dashboard_shell_payload(await mgr.describe(rec))
-        except Exception:
-            return _dashboard_shell_payload(rec.to_payload())
-    if event.data:
-        return _dashboard_shell_payload(dict(event.data))
-    return None
 
 
-async def _dashboard_notification_for_event(event: ShellEvent) -> FwsNotification | None:
-    if event.type == EventType.SHELL_REMOVED:
-        return build_shell_removed_notification(event.shell_id)
-
-    method_by_type: dict[EventType, FwsShellEventMethod] = {
-        EventType.SHELL_CREATED: SHELL_CREATED_NOTIFICATION_METHOD,
-        EventType.SHELL_SPAWNED: SHELL_SPAWNED_NOTIFICATION_METHOD,
-        EventType.SHELL_UPDATED: SHELL_UPDATED_NOTIFICATION_METHOD,
-        EventType.SHELL_EXITED: SHELL_EXITED_NOTIFICATION_METHOD,
-    }
-    method = method_by_type.get(event.type)
-    if method is None:
-        return None
-    shell = await _dashboard_shell_payload_from_event(event)
-    if shell is None:
-        return None
-    return build_shell_event_notification(method, shell)
 
 
 async def _send_ws_payload(websocket: WebSocket, payload: Mapping[str, object]) -> None:
@@ -704,12 +656,10 @@ async def _render_dashboard_html() -> str:  # pyright: ignore[reportUnusedFuncti
     return "\n".join(parts)
 
 
-@router.get("/fws")
 async def fws_root() -> RedirectResponse:
     return RedirectResponse(url="/fws/", status_code=308)
 
 
-@router.get("/fws/")
 async def fws_index() -> FileResponse:
     return FileResponse(
         _UI_DIR / "index.html",
@@ -722,7 +672,6 @@ async def fws_index() -> FileResponse:
     )
 
 
-@router.get("/fws/exited", response_class=HTMLResponse)
 async def fws_exited_fragment() -> HTMLResponse:
     mgr = await get_manager()
     shells = await mgr.list_shells()
@@ -737,7 +686,6 @@ async def fws_exited_fragment() -> HTMLResponse:
     return HTMLResponse(content=_render_exited_content(exited, subgroup_styles))
 
 
-@router.get("/fws/static/{path:path}")
 async def fws_static(path: str) -> FileResponse:
     target = (_UI_DIR / path).resolve()
     if not target.is_file() or _UI_DIR not in target.parents:
@@ -754,7 +702,6 @@ async def fws_static(path: str) -> FileResponse:
     )
 
 
-@router.post("/fws/action/refresh")
 async def fws_refresh() -> RedirectResponse:
     return RedirectResponse(url="/fws/", status_code=303)
 
@@ -763,120 +710,24 @@ def _is_ajax(request: Request) -> bool:
     return (request.headers.get("x-fws-ajax") or "").strip() == "1"
 
 
-async def _truncate_log_file(path: Path, *, logs_root: Path) -> bool:
-    resolved = path.resolve(strict=False)
-    if resolved.suffix != ".log":
-        return False
-    if logs_root != resolved and logs_root not in resolved.parents:
-        return False
-    try:
-        if not resolved.exists() or not resolved.is_file():
-            return False
-        await asyncio.to_thread(lambda: resolved.open("wb").close())
-        return True
-    except Exception:
-        return False
 
 
-async def _action_truncate_logs() -> None:
-    mgr = await get_manager()
-    shells = await mgr.list_shells()
-
-    logs_root = Path(mgr.logs_dir).resolve(strict=False)
-    candidates: list[Path] = []
-    for rec in shells:
-        candidates.append(Path(rec.stdout_log))
-        candidates.append(Path(rec.stderr_log))
-        if rec.io_metadata_log:
-            candidates.append(Path(rec.io_metadata_log))
-
-    try:
-        candidates.extend(list(Path(mgr.logs_dir).glob("*.log")))
-    except Exception:
-        pass
-
-    seen: set[Path] = set()
-    for path in candidates:
-        resolved = path.resolve(strict=False)
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        _ = await _truncate_log_file(resolved, logs_root=logs_root)
-
-    for rec in shells:
-        await mgr.emit_log_reset(rec.id, "stdout")
-        await mgr.emit_log_reset(rec.id, "stderr")
 
 
-async def _action_purge_exited() -> None:
-    mgr = await get_manager()
-    shells = await mgr.list_shells()
-    exited = [s for s in shells if (getattr(s, "status", None) or "") == "exited"]
-    for rec in exited:
-        try:
-            _ = await mgr.remove_shell(rec.id, force=True)
-        except Exception:
-            pass
 
 
-async def _action_terminate_shell(shell_id: str) -> None:
-    mgr = await get_manager()
-    await mgr.terminate_shell(shell_id, force=True)
 
 
-async def _action_shell_input(
-    shell_id: str,
-    data: str | None,
-    *,
-    append_newline: bool = False,
-    eof: bool = False,
-    source: str = "dashboard",
-) -> None:
-    mgr = await get_manager()
-    if eof:
-        _ = await mgr.send_shell_eof(shell_id, source=source)
-        return
-    if data is None:
-        raise ValueError("data is required unless eof=true")
-    _ = await mgr.write_to_shell(shell_id, data, append_newline=append_newline, source=source)
 
 
-async def _action_purge_shell(shell_id: str) -> None:
-    mgr = await get_manager()
-    _ = await mgr.remove_shell(shell_id, force=True)
 
 
-async def _action_terminate_pid(pid: int) -> None:
-    try:
-        os.kill(int(pid), signal.SIGKILL)
-    except Exception:
-        pass
 
 
-async def _action_shutdown_app(app_id: str) -> None:
-    mgr = await get_manager()
-    shells = await mgr.list_shells()
-    targets = [s for s in shells if (s.derive_app_id() or "") == app_id and s.pid and s.status == "running"]
-    snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
-    root_pids = [s.pid for s in targets if s.pid]
-    _ = await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]), root_pids=root_pids)
 
 
-async def _action_shutdown(scope: str) -> None:
-    mgr = await get_manager()
-    shells = await mgr.list_shells()
-
-    if scope == "shells":
-        for s in shells:
-            if s.pid and s.status == "running":
-                await mgr.terminate_shell(s.id, force=True)
-        return
-
-    snapshot = await mgr.build_process_snapshot(shells=shells, include_procfs_descendants=True)
-    _ = await shutdown_snapshot(snapshot, manager=mgr, policy=ShutdownPolicy(types_last=[]))
 
 
-@router.post("/fws/action/logs/purge")
 async def fws_purge_logs(request: Request) -> Response:
     await _action_truncate_logs()
 
@@ -885,7 +736,6 @@ async def fws_purge_logs(request: Request) -> Response:
     return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/exited/purge")
 async def fws_purge_exited(request: Request) -> Response:
     await _action_purge_exited()
     if _is_ajax(request):
@@ -893,7 +743,6 @@ async def fws_purge_exited(request: Request) -> Response:
     return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/shell/{shell_id}/terminate")
 async def fws_terminate_shell(shell_id: str, request: Request) -> Response:
     await _action_terminate_shell(shell_id)
     if _is_ajax(request):
@@ -901,7 +750,6 @@ async def fws_terminate_shell(shell_id: str, request: Request) -> Response:
     return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/shell/{shell_id}/purge")
 async def fws_purge_shell(shell_id: str, request: Request) -> Response:
     await _action_purge_shell(shell_id)
     if _is_ajax(request):
@@ -909,7 +757,6 @@ async def fws_purge_shell(shell_id: str, request: Request) -> Response:
     return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/pid/{pid}/terminate")
 async def fws_terminate_pid(pid: int, request: Request) -> Response:
     await _action_terminate_pid(pid)
     if _is_ajax(request):
@@ -917,7 +764,6 @@ async def fws_terminate_pid(pid: int, request: Request) -> Response:
     return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/app/{app_id}/shutdown")
 async def fws_shutdown_app(app_id: str, request: Request) -> Response:
     await _action_shutdown_app(app_id)
     if _is_ajax(request):
@@ -925,13 +771,11 @@ async def fws_shutdown_app(app_id: str, request: Request) -> Response:
     return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.post("/fws/action/shutdown")
-async def fws_shutdown(scope: Annotated[str, Form()] = "tree") -> RedirectResponse:
+async def fws_shutdown(scope: str = "tree") -> RedirectResponse:
     await _action_shutdown(scope)
     return RedirectResponse(url="/fws/", status_code=303)
 
 
-@router.websocket("/ws/fws")
 async def fws_ws(websocket: WebSocket):
     await websocket.accept()
     open_raw = await _receive_ws_text(websocket)
@@ -1079,12 +923,10 @@ async def fws_ws(websocket: WebSocket):
             pass
 
 
-@router.get("/fws/logs/{shell_id}", response_class=HTMLResponse)
 async def fws_logs(shell_id: str):
     return RedirectResponse(url=f"/fws/?log={shell_id}", status_code=307)
 
 
-@router.websocket("/ws/fws/logs/{shell_id}")
 async def fws_logs_ws(websocket: WebSocket, shell_id: str):
     await websocket.accept()
 
@@ -1267,11 +1109,106 @@ async def fws_logs_ws(websocket: WebSocket, shell_id: str):
 # Compatibility routes (legacy TE2)
 
 
-@router.get("/shell-logs/{shell_id}")
 async def legacy_shell_logs(shell_id: str) -> RedirectResponse:
     return RedirectResponse(url=f"/fws/logs/{shell_id}", status_code=307)
 
 
-@router.websocket("/ws/shell-logs/{shell_id}")
 async def legacy_shell_logs_ws(websocket: WebSocket, shell_id: str):
     await fws_logs_ws(websocket, shell_id)
+
+
+async def _form_scope(request: Request) -> str:
+    from urllib.parse import parse_qs
+    from starlette.formparsers import MultiPartException, MultiPartParser
+    data = await read_body(request, limit=64 * 1024)
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    value: object = "tree"
+    if content_type == "application/x-www-form-urlencoded":
+        try:
+            values = parse_qs(data.decode("utf-8"), keep_blank_values=True, max_num_fields=16)
+        except (ValueError, UnicodeError) as exc:
+            raise HTTPException(400, "Invalid form body") from exc
+        value = values.get("scope", ["tree"])[-1]
+    elif content_type == "multipart/form-data":
+        async def chunks() -> AsyncGenerator[bytes, None]:
+            yield data
+        try:
+            form = await MultiPartParser(request.headers, chunks(), max_files=0, max_fields=16,
+                                         max_part_size=64 * 1024).parse()
+        except MultiPartException as exc:
+            raise HTTPException(400, exc.message) from exc
+        value = form.get("scope", "tree")
+    if not isinstance(value, str):
+        raise RequestError([validation_error("string_type", ["body", "scope"],
+                                            "Input should be a valid string", None)])
+    return value or "tree"
+
+
+async def _http_dispatch(request: Request, operation: str) -> Response:
+    if operation == "root":
+        return await fws_root()
+    if operation == "index":
+        return await fws_index()
+    if operation == "exited":
+        return await fws_exited_fragment()
+    if operation == "static":
+        return await fws_static(path_text(request, "path"))
+    if operation == "refresh":
+        return await fws_refresh()
+    if operation == "purge_logs":
+        return await fws_purge_logs(request)
+    if operation == "purge_exited":
+        return await fws_purge_exited(request)
+    if operation == "terminate":
+        return await fws_terminate_shell(path_text(request, "shell_id"), request)
+    if operation == "purge_shell":
+        return await fws_purge_shell(path_text(request, "shell_id"), request)
+    if operation == "terminate_pid":
+        value = path_text(request, "pid")
+        try:
+            pid = int(value)
+        except ValueError as exc:
+            raise RequestError([validation_error("int_parsing", ["path", "pid"],
+                "Input should be a valid integer, unable to parse string as an integer", value)]) from exc
+        return await fws_terminate_pid(pid, request)
+    if operation == "shutdown_app":
+        return await fws_shutdown_app(path_text(request, "app_id"), request)
+    if operation == "shutdown":
+        return await fws_shutdown(await _form_scope(request))
+    if operation == "logs":
+        return await fws_logs(path_text(request, "shell_id"))
+    if operation == "legacy_logs":
+        return await legacy_shell_logs(path_text(request, "shell_id"))
+    raise RuntimeError(f"Unknown FWS UI operation: {operation}")
+
+
+def _route(path: str, operation: str, method: str = "GET") -> Route:
+    async def dispatch(request: Request) -> Response:
+        return await _http_dispatch(request, operation)
+    return http_route(path, dispatch, methods=[method])
+
+
+async def _logs_socket(websocket: WebSocket) -> None:
+    await fws_logs_ws(websocket, str(cast(object, websocket.path_params["shell_id"])))
+
+
+async def _legacy_logs_socket(websocket: WebSocket) -> None:
+    await legacy_shell_logs_ws(websocket, str(cast(object, websocket.path_params["shell_id"])))
+
+
+router = Router(routes=[
+    _route("/fws", "root"), _route("/fws/", "index"), _route("/fws/exited", "exited"),
+    _route("/fws/static/{path:path}", "static"),
+    _route("/fws/action/refresh", "refresh", "POST"),
+    _route("/fws/action/logs/purge", "purge_logs", "POST"),
+    _route("/fws/action/exited/purge", "purge_exited", "POST"),
+    _route("/fws/action/shell/{shell_id}/terminate", "terminate", "POST"),
+    _route("/fws/action/shell/{shell_id}/purge", "purge_shell", "POST"),
+    _route("/fws/action/pid/{pid}/terminate", "terminate_pid", "POST"),
+    _route("/fws/action/app/{app_id}/shutdown", "shutdown_app", "POST"),
+    _route("/fws/action/shutdown", "shutdown", "POST"),
+    _route("/fws/logs/{shell_id}", "logs"), _route("/shell-logs/{shell_id}", "legacy_logs"),
+    WebSocketRoute("/ws/fws", fws_ws),
+    WebSocketRoute("/ws/fws/logs/{shell_id}", _logs_socket),
+    WebSocketRoute("/ws/shell-logs/{shell_id}", _legacy_logs_socket),
+])

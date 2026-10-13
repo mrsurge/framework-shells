@@ -8,14 +8,13 @@ Python/Ferrous HTTP, Socket.IO, dashboard and peer contracts. Existing strict
 typing is achieved, not a prerequisite to repeat. mypy/mypyc compatibility and
 compiled execution are separate acceptance checks.
 
-Completed approval: plan/tracker and isolated uvloop-te2 build, validation and
-PyPI upload. Subsequent approval adds optional loop selection at FWS-owned CLI
-and Python bridge thread startup, documentation and isolated tests. FastAPI
-migration remains pending. No TE2 edits, repository commit/push, live restart or
-existing-environment installation. Preserve uncommitted UDS replay/attachment
-work and existing native artifacts/caches.
+The uvloop packaging and optional FWS-owned loop selection checkpoint has been
+committed, pushed and installed with separate user authorization. The active
+slice now removes FastAPI from FWS using explicit typed ASGI adapters and
+isolated validation. No TE2 runtime edits, new release/install or live restart
+are authorized for this slice. Preserve UDS work and native artifacts/caches.
 
-## Source Findings
+## Baseline Source Findings
 
 - FWS directly requires FastAPI in pyproject.toml. API adapters live in
   framework_shells/api/fastapi_router.py, fws_ui.py and websocket.py.
@@ -37,19 +36,19 @@ work and existing native artifacts/caches.
 
 - [x] Establish priority, scope and source-level dependency inventory.
 - [x] Record strict typing as the existing baseline.
-- [ ] Characterize routes, status/error bodies, query/body coercion, auth,
+- [x] Characterize routes, status/error bodies, query/body coercion, auth,
   redirects/root paths, file responses, WebSockets and host lifespan behavior.
-- [ ] Extract shared actions/state/auth from framework-specific adapters.
-- [ ] Replace FastAPI routing/injection with explicit typed ASGI adapters and
+- [x] Extract shared actions/state/auth from framework-specific adapters.
+- [x] Replace FastAPI routing/injection with explicit typed ASGI adapters and
   established Starlette primitives. Preserve body bounds/disconnect handling;
   never retry mutations or issue a second response after streaming has begun.
-- [ ] Replace host mounting/construction with an explicit standalone ASGI API;
+- [x] Replace host mounting/construction with an explicit standalone ASGI API;
   inventory and coordinate downstream imports before removing old exports.
-- [ ] Remove FastAPI from FWS dependencies and validate a fresh installation
+- [x] Remove FastAPI from FWS dependencies and validate a fresh installation
   without FastAPI/Pydantic. Check the complete resolved dependency closure.
-- [ ] Run existing strict checks, add actual mypy compatibility checks and
+- [x] Run existing strict checks, add actual mypy compatibility checks and
   compile an explicit eligible module list with mypyc in an isolated build.
-- [ ] Compare source and compiled import/lifecycle/transport behavior. Do not
+- [x] Compare source and compiled import/lifecycle/transport behavior. Do not
   equate typecheck success, Rust extensions or importability with mypyc parity.
 - [ ] Verify Python/Ferrous dashboard, peer control and raw pipe/log behavior;
   no protocol changes, polling, lifecycle rewrite or log hot-path changes.
@@ -110,7 +109,7 @@ macOS and unsupported-platform policy need an explicit integration decision.
 - [ ] Verify deployed hosts after an approved install/restart.
 
 The optional selector does not install uvloop. Platform dependency markers
-remain pending; FastAPI removal remains the next release priority.
+remain pending; deployed acceptance of FastAPI removal remains a release gate.
 
 Validation: 12 focused tests pass with the published wheel and cached native
 pipe extension; system-interpreter regression run passes 13 tests with two
@@ -130,7 +129,8 @@ registered. Do not change an existing project's ownership/settings.
 
 ## Results
 
-Planning and wheel publication complete; runtime removal remains pending.
+The uvloop publication below is historical evidence. The newer FastAPI removal
+slice and its remaining deployment gates are recorded at the end of this plan.
 Build tools and source artifacts stay in
 ignored .external/uvloop-te2. The reproducible recipe verifies upstream's sdist
 SHA256 and creates a fresh retained source directory per run:
@@ -172,3 +172,54 @@ Published 2026-10-13:
 - Build/logs/receipt retained under .external/uvloop-te2; existing caches and
   user-owned native artifacts retained. No FWS dependency markers/runtime
   migration, TE2 changes, live restarts, repository versions/commits/pushes.
+
+### FastAPI Removal Checkpoint, 2026-10-13
+
+Implemented in the working tree, not released or globally installed:
+
+- `api/http_router.py` keeps existing business operations behind explicit typed
+  routes. `api/http_support.py` bounds ingress and uses msgspec for JSON decoding.
+  Starlette provides HTTP, file response, form and WebSocket primitives.
+- `api/dashboard_service.py` owns shared actions/state, independently of UI
+  routing. Socket.IO imports that service; its namespace/path, peer authentication,
+  request/ACK and event DTOs are unchanged.
+- `api/application.py` exposes `create_fws_application()` and idempotent
+  `mount_fws_http_api()`. Existing dashboard mounting now extends explicit routes.
+  The historical Python bridge constructs Starlette instead of FastAPI.
+- `api/fastapi_router.py` is an import-location shim for business functions.
+  Its router is no longer a FastAPI APIRouter; consumers must use explicit
+  mounting instead of FastAPI `include_router`. Automatic OpenAPI/docs generation
+  is not retained. Existing host lifespan is not replaced.
+- Dependencies are Starlette >=0.44,<2, msgspec >=0.19,<1 and python-multipart
+  >=0.0.18,<1, with FastAPI removed. Multipart is retained for the existing form
+  contract. Body bounds are 8 MiB for JSON and 64 KiB for the shutdown form;
+  these do not truncate pipe traffic or logs. The Starlette minimum was verified
+  against its actual multipart constructor, not inferred from current imports.
+- Ten boundary tests cover validation, HTTP auth/control, stdin delegation,
+  inspection flags, redirects/static files, method policy, forms, disconnects,
+  response-send failure without mutation retry, mounted paths, host lifespan and
+  dashboard WebSocket lifecycle notifications. They pass against source,
+  an isolated site-package installation and minimum Starlette 0.44.0.
+- Focused basedpyright and ty checks cover the API and historical bridge; mypy
+  strict checking covers HTTP support/router/service/application and the loop
+  helper, with `--follow-imports=skip`. This is not whole-package mypy compliance.
+- Actual Android mypyc compilation at opt_level=3 covers `api/http_support.py`
+  and `asyncio_runtime.py` only. Compiled HTTP runs the same ten boundary tests;
+  compiled loop tests exercise real subprocesses, task/async-generator/executor
+  cleanup and both uvloop/asyncio. A reused typed exception variable broke the
+  first compiled HTTP run; distinct handler variables fixed it before acceptance.
+  Compilation alone was not treated as success. Compiled modules are isolated
+  probes, not shipped by setup.py or installed globally.
+- A fresh non-editable Python-only wheel resolves without fastapi, pydantic or
+  pydantic_core; installed imports and `pip check` pass. Native packaging is
+  intentionally disabled for this dependency-closure test, not removed from FWS.
+- A disposable loopback server passes websocket-only `/fws` request/ACK, local
+  lifecycle forwarding and authenticated peer lifecycle relay with the installed
+  wheel. It does not prove live mixed Python/Ferrous consumer acceptance.
+- Evidence and retained wheel/compiler outputs: `.external/fastapi-removal`.
+  No production install, shared worker restart, version bump, commit or push.
+  Existing native artifacts and caches remain untouched.
+
+Remaining: downstream explicit-mount/deployed acceptance, actual Python 3.9/3.10
+testing, and broader mypyc eligibility/compiled parity beyond these two modules.
+The live Python/Ferrous gate remains open; no Rust runtime change was necessary.

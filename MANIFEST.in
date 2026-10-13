@@ -4,7 +4,11 @@ include framework_shells/py.typed
 include framework_shells/*.pyi
 recursive-include native/fws_terminal_stream_broker *
 recursive-include native/fws_pipe_pump *
+recursive-include native/fws_supervisor *
+recursive-include native/fws_supervisor_client *
 recursive-include scripts/release *
 prune native/fws_terminal_stream_broker/target
 prune native/fws_pipe_pump/target
+prune native/fws_supervisor/target
+prune native/fws_supervisor_client/target
 global-exclude __pycache__ *.py[cod]

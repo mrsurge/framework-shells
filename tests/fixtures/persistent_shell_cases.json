@@ -1,0 +1,24 @@
+{
+  "survival": [
+    {"value": true, "expected": true},
+    {"value": false, "expected": false},
+    {"value": "false", "expected": false},
+    {"value": "0", "expected": false},
+    {"value": " TRUE ", "expected": true},
+    {"value": "1", "expected": true},
+    {"value": null, "expected": null},
+    {"value": 1, "expected": null},
+    {"value": "", "expected": null},
+    {"value": "${env:MISSING}", "expected": null},
+    {"value": {}, "expected": null}
+  ],
+  "shutdown": [
+    {"name":"mixed subtree", "parents":{"1":null,"2":1,"3":2,"4":1,"5":3},"roots":[1],"survival_roots":[2],"intent":"framework_teardown","terminate":[1,4],"preserved":[2,3,5]},
+    {"name":"explicit stop overrides nested survival", "parents":{"1":null,"2":1,"3":2,"4":1,"5":3},"roots":[2],"survival_roots":[2,3],"intent":"explicit_stop","terminate":[2,3,5],"preserved":[]},
+    {"name":"ordinary shells unchanged", "parents":{"1":null,"2":1,"3":2},"roots":[1],"survival_roots":[],"intent":"framework_teardown","terminate":[1,2,3],"preserved":[]},
+    {"name":"nested manager respects ancestor boundary", "parents":{"1":null,"2":1,"3":2},"roots":[3],"survival_roots":[2],"intent":"framework_teardown","terminate":[],"preserved":[3]},
+    {"name":"cycle terminates traversal", "parents":{"1":2,"2":1},"roots":[1],"survival_roots":[2],"intent":"framework_teardown","terminate":[],"preserved":[1,2]},
+    {"name":"empty selection is not implicit all", "parents":{"1":null},"roots":[],"survival_roots":[],"intent":"explicit_stop","terminate":[],"preserved":[]},
+    {"name":"missing root can still have known descendants", "parents":{"2":1,"3":2},"roots":[1],"survival_roots":[],"intent":"framework_teardown","terminate":[2,3],"preserved":[]}
+  ]
+}

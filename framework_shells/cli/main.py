@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 
 from ..auth import derive_api_token, get_secret
+from ..asyncio_runtime import run as run_owned_loop
 from ..manager import FrameworkShellManager
 from ..process_snapshot import ProcfsProcessProvider, ProcessSnapshot
 from ..record import ShellRecord
@@ -398,7 +399,7 @@ def main():
     setup_environment()
 
     try:
-        asyncio.run(run_async(args))
+        run_owned_loop(run_async(args))
     except KeyboardInterrupt:
         pass
 

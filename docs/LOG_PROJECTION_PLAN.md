@@ -136,6 +136,11 @@ boundary. Preserve raw bytes through peer paths before any UTF-8 decoding.
 
 ## UDS Control Plane And Persistent Shells
 
+Active implementation tracker: [UDS_SHELL_PLAN.md](UDS_SHELL_PLAN.md).
+The first slice contains tested pure policy/attachment primitives in both
+variants; transport, supervisor, launch/adoption and shutdown integration remain
+pending. Existing shell behavior is unchanged.
+
 Implementation follows projection/codecs. Planning now has a concrete consumer:
 TE2 launches ALS as an app worker; TE2 must be restartable while ALS, its active
 conversation, extension adapter, and extension processes remain alive.

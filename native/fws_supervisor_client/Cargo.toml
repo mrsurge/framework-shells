@@ -1,0 +1,19 @@
+[package]
+name = "fws-supervisor-client-python"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "fws_supervisor_client"
+crate-type = ["cdylib"]
+
+[features]
+default = ["abi3"]
+abi3 = ["pyo3/abi3-py39"]
+
+[dependencies]
+fws-supervisor = { path = "../fws_supervisor" }
+pyo3 = { version = "0.28.3" }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }

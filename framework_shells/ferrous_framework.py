@@ -12,6 +12,8 @@ from collections.abc import Coroutine, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
+from .asyncio_runtime import run as run_owned_loop
+
 SUPPORTED_BACKENDS = frozenset({"pipe", "pty", "proc"})
 FERROUS_BRIDGE_API = 1
 FERROUS_BRIDGE_SUPPORTS = {
@@ -341,11 +343,12 @@ class FerrousFrameworkHost:
             raise
 
     def _thread_main(self) -> None:
-        loop = asyncio.new_event_loop()
-        self._loop = loop
-        asyncio.set_event_loop(loop)
+        async def serve() -> None:
+            self._loop = asyncio.get_running_loop()
+            await self._serve()
+
         try:
-            loop.run_until_complete(self._serve())
+            run_owned_loop(serve())
         except BaseException as exc:
             self._ready_error = exc
             self._ready.set()
@@ -354,7 +357,6 @@ class FerrousFrameworkHost:
                 self._bound_socket.close()
             except Exception:
                 pass
-            loop.close()
 
     def _require_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is None or self._loop.is_closed():
@@ -502,18 +504,18 @@ class FerrousFrameworkShell:
             raise RuntimeError("failed to terminate ferrous_framework shell") from exc
 
     def _thread_main(self) -> None:
-        loop = asyncio.new_event_loop()
-        self._loop = loop
-        asyncio.set_event_loop(loop)
+        async def serve() -> None:
+            self._loop = asyncio.get_running_loop()
+            await self._run()
+
         try:
-            loop.run_until_complete(self._run())
+            run_owned_loop(serve())
         except BaseException as exc:
             self._ready_error = exc
             self._ready.set()
             self._lines.put(None)
         finally:
             self._lines.put(None)
-            loop.close()
 
     async def _run(self) -> None:
         framework_shells = cast(

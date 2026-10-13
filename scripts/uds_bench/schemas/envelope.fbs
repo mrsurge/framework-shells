@@ -1,0 +1,12 @@
+namespace FwsBench;
+enum Operation : ubyte { Data = 0 }
+table Envelope {
+  version:ushort = 1;
+  operation:Operation = Data;
+  generation:ulong;
+  stream:ubyte;
+  offset:ulong;
+  payload:[ubyte] (required);
+}
+root_type Envelope;
+file_identifier "FWBE";

@@ -21,8 +21,12 @@ running services. Commit/push/tag the FWS release; pin TE2/ALS only after public
 - [x] Platform-neutral sdist, without bundled platform-specific binaries.
 - [x] FastAPI-removal/optional-loop tests: 20 passed, two optional-loop skips,
   eight subtests. Metadata for all four artifacts excludes FastAPI/schema deps.
-- [ ] Commit/push/tag and publish only the validated artifacts; verify PyPI hashes.
-- [ ] Update TE2/ALS source pins and release-builder default; resolve fresh closure.
+- [x] Commit/push/tag 0.2.65 at 5cc8af3; publish four validated artifacts and
+  verify each SHA-256 against PyPI. Publication receipt below.
+- [x] TE2/ALS source pins and release-builder default updated to 0.2.65. Fresh
+  ALS closure has no FastAPI/FastMCP/Python MCP/Pydantic/cryptography dependencies.
+  TE2's old agent-log-server==0.2.132 pin conflicts with this FWS version, so the
+  coordinated ALS release/pin is required before a fresh TE2 install can resolve.
 
 ## Device/source isolation
 
@@ -46,3 +50,18 @@ Publish only dist/0.2.65/publish/: ABI3 Linux, cp314t Linux, ABI3 Android and th
 platform-neutral sdist. Raw Linux/Android source-build sdists/candidates in the
 parent output directory are not release inputs. Build/smoke logs remain in the
 parent TE2 .codex-scratch and the isolated Pixel fws-release-0.2.65 staging root.
+
+## Publication receipt
+
+Published at https://pypi.org/project/framework-shells/0.2.65/ with matching hashes:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| cp314-cp314t-manylinux_2_28_x86_64.whl | f16d61b0f89eecf6c445a0cf31f98d0817bb8db765485df8370e4700c3aed456 |
+| cp39-abi3-android_24_arm64_v8a.whl | 2f8d9c0088b34cb0cd8c9e39f6423ef8f44b1e08f5a961a1f555813feba4c148 |
+| cp39-abi3-manylinux_2_28_x86_64.whl | f37e22392938e507c8428803452380caafaf6d2122998ec9935a5679acd9cd4b |
+| framework_shells-0.2.65.tar.gz | 6f68388a997e2fd0a39fae573fbd9b5efd8108a5cb828316bb892afe4bffa989 |
+
+The wheel labels in the table omit the common framework_shells-0.2.65- prefix.
+No active installation or runtime was upgraded/restarted. Retain the immutable
+release tag; this receipt is a post-publication documentation update.
